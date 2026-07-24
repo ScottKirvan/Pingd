@@ -1,0 +1,27 @@
+/* VitePress default theme hardcodes most font-size/spacing in px rather
+   than rem, so overriding the root font-size barely affects it. `zoom`
+   rescales the whole rendered page uniformly, the same way browser zoom
+   does, which is what actually shrinks the "too big" feel site-wide. */
+html {
+  zoom: 0.875;
+}
+
+/* Light/dark sponsor logo swap */
+.sponsor-logo.dark-only {
+  display: none;
+}
+html.dark .sponsor-logo.dark-only {
+  display: inline-block;
+}
+html.dark .sponsor-logo.light-only {
+  display: none;
+}
+
+/* Greyscale until hover */
+.sponsor-logo {
+  filter: grayscale(100%);
+  transition: filter 0.25s ease;
+}
+.sponsor-logo:hover {
+  filter: grayscale(0%);
+}
