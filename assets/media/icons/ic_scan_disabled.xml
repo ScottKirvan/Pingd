@@ -1,0 +1,28 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Uplink tracer — disabled/paused: all 5 bars dim, none lit -->
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="24dp"
+    android:height="24dp"
+    android:viewportWidth="24"
+    android:viewportHeight="24">
+    <path
+        android:fillColor="#FFFFFF"
+        android:fillAlpha="0.3"
+        android:pathData="M2.4,4 L4.8,4 L4.8,20 L2.4,20 Z" />
+    <path
+        android:fillColor="#FFFFFF"
+        android:fillAlpha="0.3"
+        android:pathData="M6.6,4 L9.0,4 L9.0,20 L6.6,20 Z" />
+    <path
+        android:fillColor="#FFFFFF"
+        android:fillAlpha="0.3"
+        android:pathData="M10.8,4 L13.2,4 L13.2,20 L10.8,20 Z" />
+    <path
+        android:fillColor="#FFFFFF"
+        android:fillAlpha="0.3"
+        android:pathData="M15.0,4 L17.4,4 L17.4,20 L15.0,20 Z" />
+    <path
+        android:fillColor="#FFFFFF"
+        android:fillAlpha="0.3"
+        android:pathData="M19.2,4 L21.6,4 L21.6,20 L19.2,20 Z" />
+</vector>
