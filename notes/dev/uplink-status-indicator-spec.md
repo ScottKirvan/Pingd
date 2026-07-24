@@ -29,7 +29,20 @@ a separate animation timer.
 
 All six are the same 5-bar shape — only the fill changes. Vector
 drawables, ~24x24dp, single-color silhouette, transparent background,
-following standard notification icon guidelines.
+following standard notification icon guidelines. Duotone is achieved
+through alpha only (dim bars at 0.3, the lit bar at 1.0), never through
+a second fill color — the status-bar small-icon slot flattens any real
+color to a single OS-applied tint and only respects alpha, so a
+same-tint opacity difference is the only way to get the dim/lit look to
+actually survive being rendered there.
+
+**Signed off:** draft vector drawables for all 6 frames are in
+`assets/media/icons/` (`ic_scan_disabled.xml`, `ic_scan_1.xml` …
+`ic_scan_5.xml`, merged in [PR #3](https://github.com/ScottKirvan/UplinkStatus/pull/3))
+and approved as the basis for implementation. They still need to move
+into an Android `res/drawable` directory when the app project is
+scaffolded, and the 0.3 dim alpha is worth a real-device sanity check,
+but the shape and duotone approach are settled.
 
 "Hidden" is **not** a 7th icon — it's the absence of the icon (nothing
 shown in the status bar).
