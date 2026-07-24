@@ -38,7 +38,7 @@ This Code of Conduct applies within all community spaces, and also applies when 
 
 Instances of abusive, harassing, or otherwise unacceptable behavior may be reported to the project maintainers responsible for enforcement at:
 
-- GitHub Issues: [Report an issue](https://github.com/ScottKirvan/ScooterGitTemplate/issues)
+- GitHub Issues: [Report an issue](https://github.com/ScottKirvan/UplinkStatus/issues)
 - LinkedIn: [linkedin.com/in/scottkirvan/](https://www.linkedin.com/in/scottkirvan/)
 - Discord: [discord.gg/TN6XJSNK5Y](https://discord.gg/TN6XJSNK5Y)
 

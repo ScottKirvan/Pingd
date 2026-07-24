@@ -1,6 +1,6 @@
-# Contributing to ScooterGitTemplate
+# Contributing to UplinkStatus
 
-First off, thank you for considering contributing to ScooterGitTemplate! It's people like you that make this template better for everyone.
+First off, thank you for considering contributing to UplinkStatus! It's people like you that make this template better for everyone.
 
 ## Code of Conduct
 
@@ -78,7 +78,7 @@ feat!: change template initialization workflow
 ## Project Structure
 
 ```
-ScooterGitTemplate/
+UplinkStatus/
 ├── .github/
 │   ├── gitignore-templates/  # Example .gitignore files
 │   ├── ISSUE_TEMPLATE/       # Issue templates

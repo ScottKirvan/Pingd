@@ -1,16 +1,16 @@
 import { defineConfig } from 'vitepress'
 
 export default defineConfig({
-  title: "ScooterGitTemplate",
+  title: "UplinkStatus",
   description: "TODO: Replace with your project description.",
-  base: '/ScooterGitTemplate/',
+  base: '/UplinkStatus/',
   themeConfig: {
     nav: [
       { text: 'Home', link: '/' },
-      { text: 'GitHub', link: 'https://github.com/ScottKirvan/ScooterGitTemplate' }
+      { text: 'GitHub', link: 'https://github.com/ScottKirvan/UplinkStatus' }
     ],
     socialLinks: [
-      { icon: 'github', link: 'https://github.com/ScottKirvan/ScooterGitTemplate' },
+      { icon: 'github', link: 'https://github.com/ScottKirvan/UplinkStatus' },
       { icon: 'discord', link: 'https://discord.gg/TN6XJSNK5Y' }
     ],
     footer: {
