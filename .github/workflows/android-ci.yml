@@ -25,12 +25,6 @@ on:
       - 'gradlew.bat'
       - '.github/workflows/android-ci.yml'
   workflow_dispatch:
-    inputs:
-      branch:
-        description: 'Branch to build'
-        required: true
-        default: 'dev'
-        type: string
 
 permissions:
   contents: read
@@ -40,12 +34,13 @@ jobs:
     name: Build and test
     runs-on: ubuntu-latest
     steps:
+      # No explicit `ref:` here — GitHub's own "Use workflow from" branch/tag
+      # picker on a manual run already sets `github.ref` to whatever was
+      # selected, and checkout defaults to that. An extra custom branch input
+      # would just duplicate that picker (and, worse, could silently override
+      # it if the two ever disagreed).
       - name: Checkout
         uses: actions/checkout@v4
-        with:
-          # On a manual run this checks out whichever branch was entered above;
-          # push/PR events fall back to the ref that triggered the workflow.
-          ref: ${{ github.event.inputs.branch || github.ref }}
 
       - name: Validate Gradle wrapper
         uses: gradle/actions/wrapper-validation@v4
