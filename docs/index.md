@@ -3,10 +3,13 @@ layout: home
 
 hero:
   name: "UplinkStatus"
-  text: "TODO: Short project headline"
-  tagline: TODO: Replace with your project tagline.
+  text: "A status-bar icon for your uplink health"
+  tagline: A persistent Android status-bar icon that shows, at a glance, whether your device currently has a working internet connection.
   actions:
     - theme: brand
+      text: Install and setup
+      link: /guide/install
+    - theme: alt
       text: View on GitHub
       link: https://github.com/ScottKirvan/UplinkStatus
     - theme: alt
@@ -14,17 +17,17 @@ hero:
       link: https://discord.gg/TN6XJSNK5Y
 
 features:
-  - icon: 🚀
-    title: Feature One
-    details: TODO: Describe your first key feature here.
+  - icon: 📶
+    title: A glanceable connectivity indicator
+    details: A small 5-bar icon sits alongside your signal and battery icons, actively cycling while your connection checks out — and freezing in place the moment a check fails.
 
-  - icon: 🛠️
-    title: Feature Two
-    details: TODO: Describe your second key feature here.
+  - icon: ⚙️
+    title: Scoped to how you actually use your phone
+    details: Choose Wi-Fi only, any connection, cellular only, or a whitelist of specific Wi-Fi networks, so the indicator only runs where you want it to.
 
-  - icon: 📖
-    title: Feature Three
-    details: TODO: Describe your third key feature here.
+  - icon: 🔋
+    title: Built for always-on background use
+    details: Runs as a low-priority foreground service designed to stay up indefinitely, not to be opened and closed like a typical app.
 ---
 
 <!-- Begin Sponsors -->
