@@ -118,7 +118,45 @@ Stage 1). No scope creep — no settings UI, no DataStore, no real
 changes.
 
 ## Stage 3 — Settings UI + preferences
-Status: not started
+Status: **merged into `dev`** (commit `17f89e2`, fast-forwarded)
+
+**Dev agent's approach:** replaced Stage 2's `VisibilityInputs` mutable
+singleton entirely rather than bolting DataStore onto its shape — split
+into `UplinkPreferencesRepository` (real, persisted, `Flow`-based: master
+toggle, hide-when-disabled, network scope + SSID whitelist, ping target
+host) and a much smaller `NetworkScopeStatus` (still just Stage 4's
+manual stand-in for live network-in-scope detection, clearly TODO-marked).
+`UplinkStatusService` now runs a `combine()` of the preferences flow and
+the network-scope stand-in, re-deriving `VisibilityDecider`'s result on
+every emission — so a settings change reaches an already-running service
+without a restart, not just a one-time read at start. Real Compose
+settings screen covers every preference in the spec, with
+`ACCESS_FINE_LOCATION` (+ required `ACCESS_COARSE_LOCATION`) requested
+only at the point the user selects SSID-whitelist scope, never up front.
+
+**Reviewing agent's independent read:** rebuilt clean — 98 test
+executions across `:app` (both variants) and `:core`, 0 failures, lint
+clean. Specifically checked the reactive-flow rework for soundness (the
+`combine().collect()` shape, and that the one test proving a live
+preference change reaches a running service without a second
+`onStartCommand` call actually exercises that path, not just the
+persistence layer in isolation). Confirmed the location-permission
+request is deferred to point-of-use and the hostname validator is
+appropriately lightweight (obviously-wrong input only; a
+plausible-but-unresolvable host still correctly surfaces as `:core`'s
+`DnsResolutionFailure` at probe time, not a false sense of validation).
+No scope creep — no `ConnectivityManager` code touched. Approved without
+changes.
+
+**Minor note for later stages, not a blocker:** `applyVisibility()`
+(which calls `startForeground`/`stopForeground`/`stopSelf`) now runs
+from a `Dispatchers.Default` coroutine rather than the main thread,
+extending a pattern already established in Stage 2 (notification calls
+already happened off the main thread there). This is expected to be
+fine — these particular Android APIs proxy to system services over
+Binder and aren't documented as main-thread-only — but it's exactly the
+kind of thing worth keeping an eye on during Stage 7's real-device
+testing rather than assuming from a Robolectric pass alone.
 
 ## Stage 4 — Live connectivity integration
 Status: not started
