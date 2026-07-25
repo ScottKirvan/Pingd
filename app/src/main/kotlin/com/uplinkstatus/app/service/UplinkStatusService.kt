@@ -83,13 +83,15 @@ class UplinkStatusService : Service() {
     private val workerThread by lazy { HandlerThread("UplinkStatusProbeWorker").apply { start() } }
     private val workerHandler: Handler by lazy { Handler(workerThread.looper) }
 
-    private lateinit var notificationController: UplinkNotificationController
+    internal lateinit var notificationController: UplinkNotificationController
     private var cycleRunner: ProbeCycleRunner? = null
     private var observingPreferences = false
 
     override fun onCreate() {
         super.onCreate()
-        notificationController = UplinkNotificationController(applicationContext)
+        if (!::notificationController.isInitialized) {
+            notificationController = UplinkNotificationController(applicationContext)
+        }
         if (!::preferencesRepository.isInitialized) {
             preferencesRepository = DataStoreUplinkPreferencesRepository(applicationContext.uplinkPreferencesDataStore)
         }

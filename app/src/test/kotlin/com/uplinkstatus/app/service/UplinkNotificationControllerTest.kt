@@ -10,6 +10,7 @@ import com.uplinkstatus.core.tracer.BarPosition
 import com.uplinkstatus.core.tracer.CycleEvent
 import com.uplinkstatus.core.tracer.FreezeReason
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertNotEquals
 import org.junit.Assert.assertNull
 import org.junit.Before
 import org.junit.Test
@@ -92,38 +93,109 @@ class UplinkNotificationControllerTest {
         assertEquals(context.getString(R.string.notification_text_connected_unknown_latency), textOf(posted))
     }
 
-    // --- CycleEvent.Frozen: must NOT trigger notify() ------------------------------------
+    // --- CycleEvent.Frozen: must update accessibility text, never the icon, and must not --
+    // --- spam notify() on repeated immediate retries with the same reason -----------------
 
     @Test
-    fun `frozen event never posts a notification`() {
-        // Per spec: "Only call notify() on an ack (tracer advance) or a state transition" —
-        // a frozen attempt (no ack fired) is neither, so this must be a pure no-op.
-        controller.onEvent(CycleEvent.Frozen(BarPosition.BAR_2, FreezeReason.PROBE_FAILURE))
+    fun `frozen event before any ack has ever fired still posts distinct failure text`() {
+        // No CycleEvent.Advanced has happened yet this session -- a freeze from the very
+        // first probe attempt must still be surfaced, not silently swallowed because
+        // nothing was "already showing" to compare against.
+        controller.onEvent(CycleEvent.Frozen(BarPosition.BAR_1, FreezeReason.PROBE_FAILURE))
 
-        assertNull(postedNotification())
+        val posted = checkNotNull(postedNotification())
+        assertEquals(R.drawable.ic_scan_1, posted.smallIcon.resId)
+        assertEquals(context.getString(R.string.notification_text_probe_failure), textOf(posted))
     }
 
     @Test
-    fun `frozen event after an existing notification leaves it completely unchanged`() {
+    fun `generic probe failure after a connected notification keeps the same icon but shows distinct failure text`() {
         controller.onEvent(CycleEvent.Advanced(BarPosition.BAR_1, AckSource.PROBE_SUCCESS, latencyMs = 10))
         val before = checkNotNull(postedNotification())
-        val beforeText = textOf(before)
+        val beforeIcon = before.smallIcon.resId
+
+        controller.onEvent(CycleEvent.Frozen(BarPosition.BAR_1, FreezeReason.PROBE_FAILURE))
+
+        val after = checkNotNull(postedNotification())
+        // Per spec: freezing in place is the only failure indication for the icon -- no
+        // distinct "lost" frame -- so the icon must be unchanged from the last ack.
+        assertEquals(beforeIcon, after.smallIcon.resId)
+        assertEquals(context.getString(R.string.notification_text_probe_failure), textOf(after))
+    }
+
+    @Test
+    fun `dns resolution failure shows text genuinely distinct from generic probe failure`() {
+        controller.onEvent(CycleEvent.Advanced(BarPosition.BAR_1, AckSource.PROBE_SUCCESS, latencyMs = 10))
+        val before = checkNotNull(postedNotification())
         val beforeIcon = before.smallIcon.resId
 
         controller.onEvent(CycleEvent.Frozen(BarPosition.BAR_1, FreezeReason.DNS_RESOLUTION_FAILURE))
 
         val after = checkNotNull(postedNotification())
         assertEquals(beforeIcon, after.smallIcon.resId)
-        assertEquals(beforeText, textOf(after))
+        val dnsText = context.getString(R.string.notification_text_dns_failure)
+        assertEquals(dnsText, textOf(after))
+        assertNotEquals(context.getString(R.string.notification_text_probe_failure), dnsText)
     }
 
     @Test
-    fun `repeated frozen events during immediate no-back-off retries never post anything`() {
+    fun `repeated frozen events with the same reason during immediate no-back-off retries post only once`() {
+        // Per spec: "Only call notify() on an ack (tracer advance) or a state transition" --
+        // a sustained outage retries immediately with no back-off, so ProbeCycleRunner emits
+        // one Frozen per attempt. Repeats that don't change *why* it's frozen must not each
+        // trigger a fresh notify() call -- that would be exactly the "bare timer tick" spam
+        // the spec rules out, even though the visible end state (same icon/text) would look
+        // identical either way. notifyCallCount is the seam that lets this test tell the
+        // difference between "posted once" and "posted five times with identical content."
         repeat(5) {
             controller.onEvent(CycleEvent.Frozen(BarPosition.BAR_4, FreezeReason.PROBE_FAILURE))
         }
 
-        assertNull(postedNotification())
+        assertEquals(1, controller.notifyCallCount)
+        val posted = checkNotNull(postedNotification())
+        assertEquals(R.drawable.ic_scan_4, posted.smallIcon.resId)
+        assertEquals(context.getString(R.string.notification_text_probe_failure), textOf(posted))
+    }
+
+    @Test
+    fun `freeze reason changing mid-outage posts fresh distinct text, not suppressed as a repeat`() {
+        controller.onEvent(CycleEvent.Frozen(BarPosition.BAR_2, FreezeReason.PROBE_FAILURE))
+        val callsAfterFirstFreeze = controller.notifyCallCount
+
+        controller.onEvent(CycleEvent.Frozen(BarPosition.BAR_2, FreezeReason.DNS_RESOLUTION_FAILURE))
+
+        assertEquals(callsAfterFirstFreeze + 1, controller.notifyCallCount)
+        val posted = checkNotNull(postedNotification())
+        assertEquals(context.getString(R.string.notification_text_dns_failure), textOf(posted))
+    }
+
+    @Test
+    fun `an ack after a freeze resumes connected text and un-suppresses the next freeze`() {
+        controller.onEvent(CycleEvent.Frozen(BarPosition.BAR_2, FreezeReason.PROBE_FAILURE))
+        val callsAfterFreeze = controller.notifyCallCount
+
+        controller.onEvent(CycleEvent.Advanced(BarPosition.BAR_3, AckSource.PROBE_SUCCESS, latencyMs = 8))
+        assertEquals(callsAfterFreeze + 1, controller.notifyCallCount)
+        assertEquals(
+            context.getString(R.string.notification_text_connected_with_latency, 8),
+            textOf(checkNotNull(postedNotification())),
+        )
+
+        // A fresh freeze with the *same* reason as before the ack is not treated as a
+        // duplicate of the pre-ack freeze -- the connected state in between resets tracking.
+        controller.onEvent(CycleEvent.Frozen(BarPosition.BAR_3, FreezeReason.PROBE_FAILURE))
+        assertEquals(callsAfterFreeze + 2, controller.notifyCallCount)
+    }
+
+    @Test
+    fun `resetSession clears freeze de-duplication so a fresh session's first freeze always posts`() {
+        controller.onEvent(CycleEvent.Frozen(BarPosition.BAR_1, FreezeReason.PROBE_FAILURE))
+        val callsBeforeReset = controller.notifyCallCount
+
+        controller.resetSession()
+        controller.onEvent(CycleEvent.Frozen(BarPosition.BAR_1, FreezeReason.PROBE_FAILURE))
+
+        assertEquals(callsBeforeReset + 1, controller.notifyCallCount)
     }
 
     // --- Visibility-state notification builders -----------------------------------------

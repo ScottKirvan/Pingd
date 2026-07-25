@@ -12,6 +12,7 @@ import com.uplinkstatus.app.R
 import com.uplinkstatus.core.tracer.BarPosition
 import com.uplinkstatus.core.tracer.CycleEvent
 import com.uplinkstatus.core.tracer.CycleListener
+import com.uplinkstatus.core.tracer.FreezeReason
 
 /**
  * Builds and posts the status-bar notification, and is the single place that decides when
@@ -19,20 +20,41 @@ import com.uplinkstatus.core.tracer.CycleListener
  *
  * Implements [CycleListener] so it can be wired directly as [com.uplinkstatus.core.tracer.ProbeCycleRunner]'s
  * listener: every [CycleEvent.Advanced] (an ack) updates the notification with the new bar
- * icon and accessibility text. [CycleEvent.Frozen] is intentionally a no-op — per spec,
- * "Only call notify() on an ack (tracer advance) or a state transition," and a frozen
- * attempt is neither. The tracer visibly staying put is achieved by simply not touching the
- * notification, not by re-posting an unchanged one; this also matters because
- * [com.uplinkstatus.core.tracer.ProbeCycleRunner] emits one `Frozen` event per failed probe
- * attempt, including back-to-back immediate retries during an outage — calling `notify()`
- * for each of those would be exactly the "bare timer tick" spam the spec rules out.
+ * icon and accessibility text.
+ *
+ * [CycleEvent.Frozen] is *not* a blanket no-op (revised in Stage 5 from an earlier draft
+ * that treated every `Frozen` as a pure no-op, which left a DNS failure and a generic probe
+ * failure indistinguishable to a screen-reader user — and, worse, left a real outage
+ * indistinguishable from "everything's fine, just slow," since nothing about the
+ * notification ever changed on any freeze). The icon still never gets a distinct "lost"
+ * frame — it stays on [CycleEvent.Frozen.position], exactly where the tracer visually
+ * froze, per spec — but the accessibility text now updates to name what's actually
+ * happening, and the DNS-resolution case gets genuinely distinct text from the generic
+ * case (see [R.string.notification_text_dns_failure] / [R.string.notification_text_probe_failure]).
+ *
+ * This still has to respect "Only call notify() on an ack (tracer advance) or a state
+ * transition — not on every internal timer tick": [com.uplinkstatus.core.tracer.ProbeCycleRunner]
+ * emits one `Frozen` event per failed probe attempt, including back-to-back immediate
+ * retries with no back-off during a sustained outage, so posting on every single one of
+ * those would be exactly the "bare timer tick" spam the spec rules out. [lastNotifiedState]
+ * tracks what was last actually posted (connected, or frozen-for-a-given-reason) so a
+ * repeat `Frozen` with the *same* [FreezeReason] as what's already showing is suppressed —
+ * only the transition into a freeze, or a change in *why* it's frozen (e.g. a generic
+ * failure that turns into an unresolvable host mid-outage), triggers a fresh `notify()`.
  *
  * Visibility-state transitions (ENABLED/DISABLED/HIDDEN) are handled separately via
  * [notificationForEnabled]/[notificationForDisabled]/[hide], called by
  * [UplinkStatusService] when [com.uplinkstatus.core.visibility.UplinkVisibility] changes —
  * the other half of the spec's "ack or state transition" rule.
+ *
+ * Open (and [onEvent] separately marked `open`) purely so [UplinkStatusServiceTest] can
+ * inject a thin recording subclass that observes every [CycleEvent] this class receives
+ * while still exercising the real notify()/permission-check/de-duplication logic via
+ * `super.onEvent(event)` — that's what lets a test prove the DNS-vs-generic-failure
+ * distinction and the no-back-off retry behavior hold *end to end* through a real,
+ * running [UplinkStatusService], not just at this class's own unit-test level.
  */
-class UplinkNotificationController(
+open class UplinkNotificationController(
     private val context: Context,
     private val notificationManager: NotificationManagerCompat = NotificationManagerCompat.from(context),
 ) : CycleListener {
@@ -44,6 +66,27 @@ class UplinkNotificationController(
      * per-process reset per spec. */
     @Volatile
     private var lastLatencyMs: Long? = null
+
+    /** What the notification last actually reflected: either the connected/ack state, or a
+     * freeze with a specific [FreezeReason]. `null` means nothing has been posted yet this
+     * session. Used purely to de-duplicate repeated [CycleEvent.Frozen] events with an
+     * unchanged reason — see class doc — never read for anything else. */
+    @Volatile
+    private var lastNotifiedState: NotifiedState? = null
+
+    /** Counts every real call through to [notificationManager]`.notify()` (i.e. past the
+     * permission check). Production code never reads this; it exists so tests can prove the
+     * de-duplication in [onEvent] actually suppresses repeated system calls during a
+     * back-to-back no-back-off retry storm, not just that the visible end state happens to
+     * look right. */
+    @Volatile
+    internal var notifyCallCount: Int = 0
+        private set
+
+    private sealed interface NotifiedState {
+        data object Connected : NotifiedState
+        data class Frozen(val reason: FreezeReason) : NotifiedState
+    }
 
     init {
         ensureChannel()
@@ -60,21 +103,32 @@ class UplinkNotificationController(
     /** Called when a fresh probe cycle starts (transition into `ENABLED` from not-running).
      * Clears any latency remembered from a previous session, since bar position also resets
      * to [BarPosition.START] at that point — nothing here should look like a value from an
-     * earlier run. */
+     * earlier run. Also clears [lastNotifiedState] so a freeze in a brand-new session is
+     * never mistaken for a repeat of one from a previous run. */
     fun resetSession() {
         lastLatencyMs = null
+        lastNotifiedState = null
     }
 
-    override fun onEvent(event: CycleEvent) {
+    open override fun onEvent(event: CycleEvent) {
         when (event) {
             is CycleEvent.Advanced -> {
                 event.latencyMs?.let { lastLatencyMs = it }
+                lastNotifiedState = NotifiedState.Connected
                 notify(buildEnabledNotification(event.position, lastLatencyMs))
             }
 
             is CycleEvent.Frozen -> {
-                // Intentionally a no-op — see class doc. The icon/text simply stay as they
-                // were at the last ack; nothing is re-posted.
+                val state = NotifiedState.Frozen(event.reason)
+                if (lastNotifiedState != state) {
+                    // Either the first freeze after a successful ack, or the reason itself
+                    // changed (e.g. generic failure -> can't-resolve-host mid-outage) --
+                    // either way this is a genuine change worth surfacing, not a bare tick.
+                    lastNotifiedState = state
+                    notify(buildFrozenNotification(event.position, event.reason))
+                }
+                // Same reason as what's already showing: a repeated immediate-retry attempt
+                // with nothing new to say -- suppressed, per the class doc.
             }
         }
     }
@@ -107,6 +161,19 @@ class UplinkNotificationController(
         return buildNotification(iconRes = iconResFor(position), text = text)
     }
 
+    /** Builds the notification for a [CycleEvent.Frozen]: same icon as the last ack (the
+     * tracer freezes in place, per spec -- there is no distinct "lost" frame), but text that
+     * genuinely distinguishes "can't resolve the target host" from a generic connect
+     * failure/timeout, per the spec's "a DNS problem and a network-down problem shouldn't
+     * look the same to the user." */
+    private fun buildFrozenNotification(position: BarPosition, reason: FreezeReason): Notification {
+        val text = when (reason) {
+            FreezeReason.PROBE_FAILURE -> context.getString(R.string.notification_text_probe_failure)
+            FreezeReason.DNS_RESOLUTION_FAILURE -> context.getString(R.string.notification_text_dns_failure)
+        }
+        return buildNotification(iconRes = iconResFor(position), text = text)
+    }
+
     private fun notify(notification: Notification) {
         // POST_NOTIFICATIONS (Android 13+) is a revocable runtime permission: MainActivity
         // only starts the service once it's granted, but the user can revoke it from system
@@ -123,6 +190,7 @@ class UplinkNotificationController(
         ) == PackageManager.PERMISSION_GRANTED
         if (!hasPermission) return
         notificationManager.notify(NOTIFICATION_ID, notification)
+        notifyCallCount++
     }
 
     private fun buildNotification(iconRes: Int, text: String): Notification =

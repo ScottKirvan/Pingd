@@ -6,6 +6,10 @@ import com.uplinkstatus.app.R
 import com.uplinkstatus.app.prefs.FakeUplinkPreferencesRepository
 import com.uplinkstatus.core.probe.ProbeResult
 import com.uplinkstatus.core.probe.ProbeTarget
+import com.uplinkstatus.core.tracer.AckSource
+import com.uplinkstatus.core.tracer.BarPosition
+import com.uplinkstatus.core.tracer.CycleEvent
+import com.uplinkstatus.core.tracer.FreezeReason
 import com.uplinkstatus.core.visibility.UplinkVisibility
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -255,5 +259,90 @@ class UplinkStatusServiceTest {
         assertEquals(1, fakeProber.callCount)
         val foregroundNotification = checkNotNull(shadowService().lastForegroundNotification)
         assertEquals(R.drawable.ic_scan_1, foregroundNotification.smallIcon.resId)
+    }
+
+    // --- Stage 5: DNS-vs-generic-failure and no-back-off, end to end through the real ------
+    // --- running service (not just ProbeCycleRunnerTest's or                             ---
+    // --- UplinkNotificationControllerTest's standalone unit level) -------------------------
+
+    @Test
+    fun `a real cycle run inside the service reports generic and DNS failures as distinct CycleEvents in order`() {
+        val recordingController = RecordingNotificationController(RuntimeEnvironment.getApplication())
+        service.notificationController = recordingController
+        fakeProber = FakeProber(
+            ProbeResult.Failure,
+            ProbeResult.DnsResolutionFailure,
+            ProbeResult.Success(5),
+        )
+        service.prober = fakeProber
+
+        service.applyVisibility(UplinkVisibility.ENABLED)
+
+        // Three probe attempts happened synchronously, back to back, with no wait in
+        // between -- exactly what "immediate retry, no adaptive back-off" requires even
+        // when driven by the real service (not a standalone ProbeCycleRunner in isolation).
+        assertEquals(3, fakeProber.callCount)
+        assertEquals(
+            listOf(
+                CycleEvent.Frozen(BarPosition.BAR_1, FreezeReason.PROBE_FAILURE),
+                CycleEvent.Frozen(BarPosition.BAR_1, FreezeReason.DNS_RESOLUTION_FAILURE),
+                CycleEvent.Advanced(BarPosition.BAR_2, AckSource.PROBE_SUCCESS, latencyMs = 5),
+            ),
+            recordingController.events,
+        )
+        // The DNS failure changed *why* the tracer was frozen relative to the previous
+        // generic failure, so it must not be suppressed as a repeat -- three distinct
+        // notify() calls (one per real state change), not deduplicated down to fewer.
+        assertEquals(3, recordingController.notifyCallCount)
+    }
+
+    @Test
+    fun `repeated generic failures inside a real running cycle only post the failure notification once`() {
+        val recordingController = RecordingNotificationController(RuntimeEnvironment.getApplication())
+        service.notificationController = recordingController
+        fakeProber = FakeProber(
+            ProbeResult.Failure,
+            ProbeResult.Failure,
+            ProbeResult.Failure,
+            ProbeResult.Failure,
+            ProbeResult.Success(1),
+        )
+        service.prober = fakeProber
+
+        service.applyVisibility(UplinkVisibility.ENABLED)
+
+        assertEquals(5, fakeProber.callCount)
+        // Four Frozen events with the *same* reason, then one Advanced -- but only the
+        // first Frozen and the eventual Advanced should have actually posted, per the
+        // spec's "not on every internal timer tick" rule -- proven here through the real
+        // service's own cycle, not just UplinkNotificationControllerTest's direct calls.
+        assertEquals(2, recordingController.notifyCallCount)
+        val posted = checkNotNull(
+            shadowOf(notificationManager).getNotification(UplinkNotificationController.NOTIFICATION_ID),
+        )
+        assertEquals(
+            RuntimeEnvironment.getApplication().getString(R.string.notification_text_connected_with_latency, 1),
+            shadowOf(posted).contentText,
+        )
+    }
+
+    @Test
+    fun `a real running cycle schedules no delay at all for failed attempts -- only the post-success automatic ack`() {
+        fakeProber = FakeProber(
+            ProbeResult.Failure,
+            ProbeResult.DnsResolutionFailure,
+            ProbeResult.Failure,
+            ProbeResult.Success(3),
+        )
+        service.prober = fakeProber
+
+        service.applyVisibility(UplinkVisibility.ENABLED)
+
+        assertEquals(4, fakeProber.callCount)
+        // The only thing ever scheduled is the 500ms automatic ack that follows the
+        // eventual success -- nothing was scheduled for any of the three failed attempts,
+        // confirming "no adaptive back-off" holds with a real ProbeCycleRunner instance
+        // owned and started by the real, running UplinkStatusService.
+        assertEquals(1, fakeScheduler.scheduled.size)
     }
 }

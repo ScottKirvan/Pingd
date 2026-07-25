@@ -193,7 +193,57 @@ correctness. One inaccuracy in the agent's self-report: it stated "5
 test regression. Approved.
 
 ## Stage 5 — Edge-case and accessibility hardening pass
-Status: not started
+Status: **implemented, awaiting independent review** (branch `stage5-hardening`)
+
+**Dev agent's approach:** Fixed the confirmed gap first: `UplinkNotificationController.onEvent()`
+treated every `CycleEvent.Frozen` as a blanket no-op, so a DNS-resolution failure and a
+generic probe failure were indistinguishable, and a real outage looked identical to
+"everything's fine" — nothing about the notification ever changed on any freeze. The icon
+still never gets a distinct "lost" frame (freezing in place is correct and required per
+spec), but the accessibility text now updates per `FreezeReason`, with genuinely distinct
+strings for `PROBE_FAILURE` vs `DNS_RESOLUTION_FAILURE`
+(`notification_text_probe_failure`/`notification_text_dns_failure`). This had to be more
+than "just call notify() on every Frozen," though: `ProbeCycleRunner`'s immediate
+no-back-off retry loop emits one `Frozen` per failed attempt, potentially many per second
+during a sustained outage, and posting on every one would itself violate the spec's "not on
+every internal timer tick" rule — the exact concern the old no-op implementation's doc
+comment raised. Added `lastNotifiedState` tracking (connected, or frozen-for-a-specific-
+reason) so a repeat `Frozen` with an *unchanged* reason is suppressed, while a transition
+into a freeze or a change in *why* it's frozen still posts. Added `notifyCallCount`
+(internal, test-only) as an observability seam proving the suppression actually happens,
+not just that the visible end state looks right.
+
+Went on to self-audit every "Explicitly Out of Scope" and "Technical Notes" bullet against
+the actual code (not just re-reading prior stages' summaries). Everything else checked out
+already correct and already adequately tested (no new tests added for these, per the
+brief's "don't add redundant tests" guidance) — see the dev agent's full audit walkthrough
+in the PR description / final report. One real spec defect found and fixed (in the spec
+doc, not the code): the "User Preferences" section's "Ping target host" bullet said the
+default was the bare IP literal `1.1.1.1` (alternate `8.8.8.8`), directly contradicting the
+"Core Mechanism" section two pages earlier, which explains at length why the default must
+be a *hostname* (`one.one.one.one`/`dns.google`) so the OS can pick the right address family
+per network — and which the code has always correctly matched
+(`ProbeTarget.DEFAULT_HOST`/`ALTERNATE_HOST`). The User Preferences bullet was simply stale
+text never updated after that reasoning was written; corrected in place with the
+contradiction explained inline, matching how Stage 2 documented its Handler-thread
+correction.
+
+Added end-to-end test coverage (not just at `UplinkNotificationControllerTest`'s or
+`:core`'s `ProbeCycleRunnerTest`'s unit level) by making `UplinkStatusService`'s
+`notificationController` an injectable seam (matching the existing
+`prober`/`schedulerFactory`/`preferencesRepository`/`networkScopeStatus` pattern) and adding
+a `RecordingNotificationController` test double that delegates to the real implementation
+while recording every `CycleEvent` it receives. New service-level tests drive a real
+`ProbeCycleRunner`, created and started by the real, running `UplinkStatusService`, through
+a scripted sequence of generic failure -> DNS failure -> success, and separately confirm the
+no-back-off retry behavior (no delay ever scheduled for a failed attempt) holds at the
+service level, not just in `:core`'s existing bounded-sequence unit tests.
+
+**Tests:** all existing tests still pass; net +7 new/rewritten tests across
+`UplinkNotificationControllerTest` (14, was 10) and `UplinkStatusServiceTest` (15, was 12).
+Full `./gradlew build` (assemble debug+release, all unit tests, lint) passes clean.
+
+**Reviewing agent's independent read:** _pending._
 
 ## Stage 6 — VitePress user documentation
 Status: not started

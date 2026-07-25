@@ -14,16 +14,28 @@ import com.uplinkstatus.core.tracer.TracerScheduler
  * would be more machinery than two small functional-interface fakes justify for this
  * stage). These mirror them just enough for [UplinkStatusServiceTest]'s needs: no real
  * sockets, no real waiting.
+ *
+ * Mirrors `:core`'s own [com.uplinkstatus.core.fakes.FakeProber] shape (Stage 5): a scripted
+ * queue of results, one per call, falling back to [defaultResult] once drained -- so a
+ * service-level test can drive a real [com.uplinkstatus.core.tracer.ProbeCycleRunner] through
+ * a specific sequence of failures (including a mix of generic and DNS-resolution failures)
+ * before it eventually succeeds, and prove the resulting notification/no-back-off behavior
+ * end to end, not just at [com.uplinkstatus.core.tracer.ProbeCycleRunnerTest]'s or
+ * [UplinkNotificationControllerTest]'s unit level.
  */
 internal class FakeProber(
+    vararg scriptedResults: ProbeResult,
     private val defaultResult: ProbeResult = ProbeResult.Success(1),
 ) : Prober {
+
+    private val queue = ArrayDeque(scriptedResults.toList())
+
     var callCount: Int = 0
         private set
 
     override fun probe(target: ProbeTarget): ProbeResult {
         callCount++
-        return defaultResult
+        return if (queue.isNotEmpty()) queue.removeFirst() else defaultResult
     }
 }
 

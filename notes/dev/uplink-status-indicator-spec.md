@@ -157,9 +157,16 @@ flowchart TD
   - Cellular only
   - Specific SSID(s) — a whitelist of one or more networks; the icon
     is only enabled while connected to a listed network.
-- **Ping target host** — default `1.1.1.1` (Cloudflare), with `8.8.8.8`
-  (Google) offered as an alternate quick-pick; user can override with
-  any custom host.
+- **Ping target host** — default `one.one.one.one` (Cloudflare), with
+  `dns.google` (Google) offered as an alternate quick-pick; user can
+  override with any custom host. (Corrected in Stage 5: this bullet
+  previously said `1.1.1.1`/`8.8.8.8` — bare IP literals — which
+  directly contradicted the "Core Mechanism" section above and was
+  simply stale text left over from before that section's hostname-vs-
+  literal reasoning was written. The implementation has always used the
+  hostname defaults, matching Core Mechanism and
+  `ProbeTarget.DEFAULT_HOST`/`ProbeTarget.ALTERNATE_HOST`; only this
+  bullet's wording was wrong.)
 
 ## Technical Notes
 - Foreground service (`FOREGROUND_SERVICE` permission). Type:

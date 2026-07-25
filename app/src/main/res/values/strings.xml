@@ -9,6 +9,12 @@
     <string name="notification_text_connected_unknown_latency">Uplink: connected</string>
     <string name="notification_text_disabled">Uplink: paused (network out of scope)</string>
 
+    <!-- Stage 5: CycleEvent.Frozen accessibility text. Per spec, a DNS problem and a
+         network-down problem must not look the same to the user, even though the icon
+         itself freezes in place either way (no distinct "lost" frame). -->
+    <string name="notification_text_probe_failure">Uplink: connection trouble, retrying…</string>
+    <string name="notification_text_dns_failure">Uplink: can\'t resolve target host, retrying…</string>
+
     <!-- Stage 2: POST_NOTIFICATIONS runtime-permission rationale flow. -->
     <string name="notification_permission_rationale">UplinkStatus shows its connectivity status as a persistent status-bar icon. That requires permission to post a notification — allow it so the icon can be shown.</string>
     <string name="notification_permission_request_button">Allow notifications</string>
