@@ -25,6 +25,12 @@ on:
       - 'gradlew.bat'
       - '.github/workflows/android-ci.yml'
   workflow_dispatch:
+    inputs:
+      branch:
+        description: 'Branch to build'
+        required: true
+        default: 'dev'
+        type: string
 
 permissions:
   contents: read
@@ -36,6 +42,10 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+        with:
+          # On a manual run this checks out whichever branch was entered above;
+          # push/PR events fall back to the ref that triggered the workflow.
+          ref: ${{ github.event.inputs.branch || github.ref }}
 
       - name: Validate Gradle wrapper
         uses: gradle/actions/wrapper-validation@v4
@@ -68,3 +78,15 @@ jobs:
             app/build/reports/tests
             core/build/reports/tests
           retention-days: 7
+
+      # Debug-signed (installable via `adb install`) rather than the release
+      # variant, which has no signing config yet and can't be installed as-is.
+      # Only produced on a manual run, not on every push/PR — this is for
+      # grabbing a build to test, not something every CI run needs to keep.
+      - name: Upload debug APK
+        if: github.event_name == 'workflow_dispatch'
+        uses: actions/upload-artifact@v4
+        with:
+          name: uplinkstatus-debug-apk
+          path: app/build/outputs/apk/debug/app-debug.apk
+          retention-days: 14
