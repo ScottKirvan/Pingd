@@ -39,7 +39,45 @@ will have the agent explicitly `git fetch origin dev` and check it out
 as its first step, so this isn't relied on again.
 
 ## Stage 1 — Core probe + tracer/ack state machine
-Status: not started
+Status: **merged into `dev`** (commit `f0196d0`, fast-forwarded)
+
+**Dev agent's approach:** new `:core` Gradle module on the plain
+`kotlin.jvm` plugin (not `kotlin.android`) — a build-enforced boundary
+against Android framework dependencies, not just a convention. TCP
+connect probe (`TcpConnectProber`) with DNS resolution as an explicit
+separate step so `UnknownHostException` maps to a distinct
+`ProbeResult.DnsResolutionFailure`, not folded into generic `Failure`.
+The 5-step ack cycle (`ProbeCycleRunner`) is driven entirely by an
+injected `TracerScheduler` and `Prober` — no real sleeping, no real
+sockets in unit tests. Failure retries are a `while` loop, not
+recursion, specifically so a long real-world outage can't grow the call
+stack. `VisibilityDecider.decide()` short-circuits to `HIDDEN` before
+scope/hide-when-disabled are even reachable when the master toggle is
+off, which is what makes "master toggle always wins" a structural
+guarantee rather than a convention someone could accidentally violate
+later. Correctly self-corrected the worktree-base process gap from
+Stage 0 by fetching and resetting onto `origin/dev` as its first step.
+
+**Reviewing agent's independent read:** read the cycle implementation
+line by line against the spec's 5-step description, specifically
+checking the one place a subtle bug was most likely — whether the
+second 500ms gap produces an ack (it must not) — and confirmed the code
+and its test both get this right. Confirmed the visibility truth table
+test is exhaustive (all 8 boolean combinations, not just the "obvious"
+cases). Rebuilt `:core` from scratch independently (`rm -rf core/build
+&& ./gradlew :core:test`) rather than trusting the report: 31/31 tests
+passing. No scope creep found — no notification/service/UI code leaked
+into this stage. Approved without changes, fast-forward merge (no
+conflicts).
+
+**Note for later stages:** the immediate no-back-off retry loop, as
+built, has no artificial floor between synchronous connect attempts —
+if a target host actively refuses connections fast (as opposed to
+timing out), retries could fire back-to-back with no gap at all. This
+is what the spec explicitly asks for ("no adaptive back-off," "retries
+immediately") and isn't a defect, but it's worth keeping in mind during
+Stage 7's device testing as a real-world battery/CPU consideration on a
+persistently-refusing host, not just a theoretical one.
 
 ## Stage 2 — Foreground service + notification wiring
 Status: not started
