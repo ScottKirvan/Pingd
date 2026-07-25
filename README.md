@@ -45,6 +45,34 @@
 
 **UplinkStatus** is voluptatibus magni nemo est. Nulla nobis dicta iste minus dolor repellendus aspernatur atque. Earum expedita aut inventore tempora fugiat deleniti. Molestias minima nam expedita beatae totam ipsa reprehenderit animi. Occaecati quibusdam beatae ducimus voluptate ut doloribus vitae amet. Quia ut ut voluptate dignissimos adipisci dolorum rem.
 
+## Android App
+
+The `app/` module is the actual UplinkStatus Android app (Kotlin, Jetpack
+Compose, `minSdk` 34 / `targetSdk` 36). It's currently a Stage 0
+scaffold: one placeholder screen proving the toolchain is wired up, no
+probe/notification/settings logic yet. See
+[`notes/dev/uplink-status-indicator-spec.md`](notes/dev/uplink-status-indicator-spec.md)
+for the design it's being built to, and
+[`Agents/UplinkStatus_dev/BRIEF.md`](Agents/UplinkStatus_dev/BRIEF.md) for
+the staged implementation plan.
+
+**Build and test locally:**
+
+```bash
+./gradlew build   # compiles, assembles debug + release APKs, runs unit tests, lints
+./gradlew test    # unit tests only
+```
+
+Both require a local Android SDK (`compileSdk`/`targetSdk` 36, `minSdk`
+34) — install it via Android Studio, or the standalone command-line
+tools, and either set `ANDROID_HOME`/`ANDROID_SDK_ROOT` or add a
+`local.properties` file at the repo root with `sdk.dir=/path/to/sdk`
+(that file is gitignored; it's local machine config, not project
+config). No device or emulator is required — the Compose UI test runs
+on the JVM via Robolectric. `.github/workflows/android-ci.yml` runs the
+same `./gradlew build` on every push/PR that touches the Android
+project.
+
 ## Getting Started with This Template
 
 >[!IMPORTANT]
