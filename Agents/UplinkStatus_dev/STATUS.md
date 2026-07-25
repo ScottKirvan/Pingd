@@ -271,4 +271,28 @@ default branch unless there's a reason not to.
 Status: not started
 
 ## Stage 7 — Device testing protocol
-Status: not started
+Status: **merged into `dev`** (commit `8d5b505`, fast-forwarded)
+
+**Dev agent's approach:** `notes/dev/device-testing-protocol.md`, a
+500-line human-executed script organized into Install/First-run,
+Permission flows (including deliberate deny paths for both notification
+and location), State transitions (with the master-toggle-always-wins
+rule as its own explicit numbered sequence, C5/C6, not folded into a
+generic "verify enabled/disabled/hidden work"), Doze/screen-off, an
+extended-run section, Settings persistence (app-restart *and* full
+device reboot, plus a contrast case proving bar position deliberately
+does *not* survive), a dedicated "Named real-device-only risks" section
+turning all four STATUS.md-flagged items (dim-bar alpha, no-back-off
+retry against a fast-refusing host, off-main-thread service lifecycle
+calls, hostname resolution across IPv4/IPv6/dual-stack) into concrete
+numbered steps with real pass conditions, and an explicit out-of-scope
+statement for multi-OEM battery-management variance.
+
+**Reviewing agent's independent read:** spot-checked every quoted
+UI string in the document (the notification-permission rationale text,
+the denial message, the disabled/probe-failure/DNS-failure notification
+text) against the actual `strings.xml` — all matched exactly, word for
+word, confirming the protocol was written against the real app rather
+than plausible-sounding invented text. Confirmed no code was touched
+(a pure `.md` addition) and that `STATUS.md` was correctly left alone
+this time, unlike Stage 5. Approved without changes.
