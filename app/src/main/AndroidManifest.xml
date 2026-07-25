@@ -1,0 +1,27 @@
+<?xml version="1.0" encoding="utf-8"?>
+<manifest xmlns:android="http://schemas.android.com/apk/res/android">
+
+    <!--
+        Stage 0 scaffold: no permissions declared. Booting this app to its one
+        placeholder screen requires none. Later stages add exactly the permissions
+        their features need (INTERNET for the probe in Stage 1, POST_NOTIFICATIONS
+        in Stage 2, ACCESS_FINE_LOCATION gated behind SSID whitelisting in Stage 3),
+        each justified in that stage, not declared speculatively here.
+    -->
+    <application
+        android:allowBackup="true"
+        android:icon="@mipmap/ic_launcher"
+        android:label="@string/app_name"
+        android:theme="@style/Theme.UplinkStatus"
+        android:supportsRtl="true">
+        <activity
+            android:name=".MainActivity"
+            android:exported="true">
+            <intent-filter>
+                <action android:name="android.intent.action.MAIN" />
+                <category android:name="android.intent.category.LAUNCHER" />
+            </intent-filter>
+        </activity>
+    </application>
+
+</manifest>
