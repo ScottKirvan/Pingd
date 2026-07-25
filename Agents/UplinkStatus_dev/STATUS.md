@@ -268,7 +268,36 @@ future stage prompts should say explicitly: don't touch `STATUS.md`
 default branch unless there's a reason not to.
 
 ## Stage 6 — VitePress user documentation
-Status: not started
+Status: **merged into `dev`** (merge commit `2ed29b0`)
+
+**Dev agent's approach:** replaced the template placeholder `docs/`
+content with four real guide pages (install, the status icon, settings,
+troubleshooting) written for an end user with no mention of Kotlin/
+DataStore/ConnectivityManager — the probe/ack mechanism is translated
+into plain language ("a light traveling across 5 bars," "briefly trying
+to open a connection... then immediately closing it again") while
+staying faithful to the spec (freeze-in-place, no distinct lost frame,
+master-toggle-always-wins). Pulled real control labels and real
+notification/permission strings directly from `SettingsScreen.kt`/
+`strings.xml` rather than paraphrasing. Updated `config.mts`'s nav/
+sidebar so the new pages are actually reachable, and caught a VitePress
+anchor-slug gotcha (apostrophes become hyphens, not dropped) before it
+shipped as a dead link.
+
+**Reviewing agent's independent read:** ran this stage's worktree
+against its actual base commit (`32d25a1`) rather than the since-advanced
+`dev` tip, to correctly separate "what this agent changed" from "what
+Stage 7 added to `dev` in the meantime" — confirmed no overlap, no
+`STATUS.md`/protocol-doc edits despite a diff-vs-current-`dev` initially
+making it look that way. Spot-checked every quoted UI/notification
+string in `status-icon.md` against `strings.xml` — exact matches.
+Independently ran `npm install && npm run docs:build` clean. Confirmed
+the one flagged judgment call (describing a brief freeze during a
+Wi-Fi/cellular handoff as "normal, give it a few seconds") is accurate
+user guidance consistent with the freeze-on-failure mechanism, not a
+hedge — left as written. Approved without changes. Merge was a real
+3-way merge (not fast-forward) since `dev` had moved ahead with Stage 7
+while this ran in parallel; no conflicts.
 
 ## Stage 7 — Device testing protocol
 Status: **merged into `dev`** (commit `8d5b505`, fast-forwarded)
