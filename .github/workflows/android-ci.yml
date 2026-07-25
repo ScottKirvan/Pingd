@@ -5,6 +5,7 @@ on:
     branches: [main, dev]
     paths:
       - 'app/**'
+      - 'core/**'
       - 'gradle/**'
       - 'build.gradle.kts'
       - 'settings.gradle.kts'
@@ -15,6 +16,7 @@ on:
   pull_request:
     paths:
       - 'app/**'
+      - 'core/**'
       - 'gradle/**'
       - 'build.gradle.kts'
       - 'settings.gradle.kts'
@@ -50,9 +52,10 @@ jobs:
       - name: Set up Gradle
         uses: gradle/actions/setup-gradle@v4
 
-      # `build` assembles debug+release, runs unit tests, and lints; it fails
+      # `build` assembles debug+release, runs unit tests, and lints across every
+      # module (:app and, since Stage 1, the plain-Kotlin :core module) and fails
       # the job (non-zero exit) on any test failure, per Stage 0's acceptance
-      # criteria. See app/src/test and app/src/testDebug for the unit tests.
+      # criteria. See app/src/test, app/src/testDebug, and core/src/test.
       - name: Build and test
         run: ./gradlew build --stacktrace
 
@@ -61,5 +64,7 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: test-reports
-          path: app/build/reports/tests
+          path: |
+            app/build/reports/tests
+            core/build/reports/tests
           retention-days: 7

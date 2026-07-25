@@ -16,3 +16,4 @@ dependencyResolutionManagement {
 
 rootProject.name = "UplinkStatus"
 include(":app")
+include(":core")
