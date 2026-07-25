@@ -159,7 +159,38 @@ kind of thing worth keeping an eye on during Stage 7's real-device
 testing rather than assuming from a Robolectric pass alone.
 
 ## Stage 4 — Live connectivity integration
-Status: not started
+Status: **merged into `dev`** (commit `9ad5064`, fast-forwarded)
+
+**Dev agent's approach:** `ConnectivityManagerNetworkSnapshotProvider`
+uses `registerDefaultNetworkCallback` (not a broad `NetworkRequest`) so
+"the network in scope" maps directly to "the OS's actual default
+network," rather than reimplementing that judgment over every network
+the device happens to be holding onto. `NetworkScopeMatcher` is a pure,
+Android-free function implementing all four scope modes; deliberately
+asymmetric on `NET_CAPABILITY_VALIDATED` — WiFi/Cellular/SSID-whitelist
+modes check transport only, `ANY_CONNECTION` requires validation — so a
+connected-but-broken network still shows the probe cycle's own
+frozen-tracer signal instead of collapsing into DISABLED/HIDDEN and
+hiding it. SSID whitelist mode checks `hasLocationPermission` as an
+explicit input rather than inferring it from a null SSID. Restructured
+Stage 3's `NetworkScopeStatus` from a bare mutable stand-in into an
+interface + real `combine()`-based class, matching the same pattern
+already established for preferences.
+
+**Reviewing agent's independent read:** rebuilt clean — 158 total test
+executions (127 `:app`, 31 `:core`, `:core` untouched by this stage as
+expected), 0 failures, lint clean. Verified the validation-asymmetry
+reasoning holds up against the spec's freeze-on-failure design, and that
+new service-level tests prove connectivity-only changes (no preference
+change) correctly drive HIDDEN/DISABLED/ENABLED transitions on an
+already-running service. Test fixtures use reflection to build
+`NetworkCapabilities` in one test file, worked around a compile-time SDK
+stub gap in this sandbox (the mutator methods used are genuine public
+platform API); isolated to test code, doesn't affect production
+correctness. One inaccuracy in the agent's self-report: it stated "5
+`:core` executions," which didn't match the actual, unchanged count of
+31 — a tally mistake in the summary, not a defect in the code or a real
+test regression. Approved.
 
 ## Stage 5 — Edge-case and accessibility hardening pass
 Status: not started
