@@ -16,6 +16,34 @@ a separate animation timer.
 - Discrete icon-frame swaps only — no smooth/animated rendering.
 - No adaptive back-off on ping retry.
 
+## Implementation Baseline
+Settled going into implementation, so these aren't open questions for
+whoever builds this:
+- **Language/UI:** Kotlin, Jetpack Compose for all in-app UI (settings
+  screen and anything else the user navigates to). Compose doesn't
+  apply to the notification itself or the foreground service — those
+  are standard Android notification/service APIs regardless of UI
+  toolkit.
+- **`minSdk` 34 (Android 14), `targetSdk` latest stable at build time.**
+  No pre-14 compatibility path — this removes an entire category of
+  legacy foreground-service-type branching the spec would otherwise
+  need to account for, and matches the only device available for real
+  testing (see below).
+- **Preferences:** Jetpack DataStore (Preferences DataStore), not
+  SharedPreferences.
+- **Test device:** Google Pixel 6 Pro, Android 14+. This is the only
+  hardware available for real-device validation — the device-testing
+  protocol targets it specifically. Multi-OEM battery-management
+  variance (Samsung, Xiaomi, etc.) is a known real-world risk category
+  that this protocol cannot cover without that hardware; it's an
+  explicit scope limit of testing, not a shortcut in the app itself.
+- **Internal module/package structure** is intentionally left to
+  implementation judgment rather than dictated here — reviewed for
+  soundness rather than prescribed. The one hard requirement: the probe
+  and tracer/ack state-machine logic must be plain Kotlin with no
+  Android framework dependency, so it's unit-testable on the JVM
+  without instrumentation.
+
 ## Icon States (6 total)
 
 | Icon               | Frame                                    | Meaning                                  |
