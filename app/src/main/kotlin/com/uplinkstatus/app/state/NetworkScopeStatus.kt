@@ -1,41 +1,62 @@
 package com.uplinkstatus.app.state
 
-import kotlinx.coroutines.flow.MutableStateFlow
-import kotlinx.coroutines.flow.StateFlow
-import kotlinx.coroutines.flow.asStateFlow
+import com.uplinkstatus.app.connectivity.NetworkSnapshotProvider
+import com.uplinkstatus.app.prefs.UplinkPreferencesRepository
+import kotlinx.coroutines.flow.Flow
+import kotlinx.coroutines.flow.combine
+import kotlinx.coroutines.flow.distinctUntilChanged
 
 /**
- * Stage 3 replaces Stage 2's `VisibilityInputs` (a mutable singleton bundling all three
- * inputs to [com.uplinkstatus.core.visibility.VisibilityDecider]) because two of those three
- * inputs — the master toggle and hide-when-disabled — are now real, persisted
- * [com.uplinkstatus.app.prefs.UplinkPreferences] fields read through
- * [com.uplinkstatus.app.prefs.UplinkPreferencesRepository]'s `Flow`. Folding them back into
- * this object would mean keeping two sources of truth for the same values in sync by hand.
+ * Stage 4's real replacement for Stage 2/3's manual `NetworkScopeStatus` stand-in object (a
+ * `MutableStateFlow<Boolean>` someone set by hand, defaulting to "in scope"). This is now an
+ * interface with a real, reactive implementation ([ConnectivityNetworkScopeStatus]) —
+ * required, not optional, because [inScopeFlow] has to react independently to *two* different
+ * sources changing (live connectivity, and the persisted network-scope/SSID-whitelist
+ * preference — see [NetworkScopeMatcher]'s doc and Stage 4's acceptance criteria), and a bare
+ * mutable object had no way to derive that from either one on its own.
  *
- * The third input — "is the current network in scope" — has no real source yet: that's
- * Stage 4's `ConnectivityManager.NetworkCallback` job, matching live connectivity against
- * [com.uplinkstatus.app.prefs.UplinkPreferences.networkScope] /
- * `.ssidWhitelist`. Until then, this is what Stage 2's `VisibilityInputs.networkInScope`
- * was: a manually-set stand-in, defaulting to "in scope" so a fresh install resolves to
- * `ENABLED` rather than silently sitting in `DISABLED`.
- *
- * It's exposed as a [StateFlow] (not just a plain `var`, though [inScope] still reads/writes
- * like one) specifically so [com.uplinkstatus.app.service.UplinkStatusService] can `combine`
- * it with the real preferences `Flow` and react continuously to either changing — the same
- * shape Stage 4's real `NetworkCallback`-backed flow will need to slot into.
- *
- * TODO(Stage 4): replace this object (and the manual `inScope` setter) with a real
- * `ConnectivityManager.NetworkCallback`-driven flow that matches live connectivity against
- * the persisted network-scope preference.
+ * Kept as an interface (rather than [ConnectivityNetworkScopeStatus] being the only shape) for
+ * the same reason [UplinkPreferencesRepository] is one: so
+ * [com.uplinkstatus.app.service.UplinkStatusService]'s tests can inject a trivial
+ * [kotlinx.coroutines.flow.MutableStateFlow]-backed fake instead of standing up a real
+ * [android.net.ConnectivityManager] and DataStore file just to flip "in scope" for a test.
  */
-object NetworkScopeStatus {
-    private val state = MutableStateFlow(true)
+interface NetworkScopeStatus {
+    /** Emits a new "is the current network in scope" value whenever either live connectivity
+     * or the persisted network-scope preference changes — never requiring the other to change
+     * in lockstep for the result to update. */
+    val inScopeFlow: Flow<Boolean>
+}
 
-    val inScopeFlow: StateFlow<Boolean> = state.asStateFlow()
+/**
+ * Combines [preferencesRepository]'s persisted [com.uplinkstatus.app.prefs.NetworkScope] /
+ * SSID whitelist with [snapshotProvider]'s live connectivity signal, re-running
+ * [NetworkScopeMatcher] on every emission from either source. [hasLocationPermission] is a
+ * function (not a value snapshotted once at construction) so it reflects the permission's
+ * actual state at combine-time — invoked fresh on every connectivity or preference emission,
+ * which is enough to satisfy Stage 4's acceptance criteria (permission state isn't itself
+ * pushed as a third reactive stream here: neither the spec nor the brief asks the display to
+ * react, with no other trigger, to a mid-run permission revocation, and in practice revoking a
+ * granted runtime permission from system settings kills the app's process on the overwhelming
+ * majority of Android versions this targets, so the next process start re-evaluates it anyway
+ * — adding a `BroadcastReceiver`/polling loop just for that no-other-trigger edge case would
+ * be exactly the scope creep the brief warns against).
+ */
+class ConnectivityNetworkScopeStatus(
+    private val preferencesRepository: UplinkPreferencesRepository,
+    private val snapshotProvider: NetworkSnapshotProvider,
+    private val hasLocationPermission: () -> Boolean,
+) : NetworkScopeStatus {
 
-    var inScope: Boolean
-        get() = state.value
-        set(value) {
-            state.value = value
-        }
+    override val inScopeFlow: Flow<Boolean> = combine(
+        preferencesRepository.preferencesFlow,
+        snapshotProvider.snapshotFlow,
+    ) { preferences, snapshot ->
+        NetworkScopeMatcher.isInScope(
+            scope = preferences.networkScope,
+            ssidWhitelist = preferences.ssidWhitelist,
+            hasLocationPermission = hasLocationPermission(),
+            snapshot = snapshot,
+        )
+    }.distinctUntilChanged()
 }

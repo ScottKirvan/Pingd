@@ -4,7 +4,6 @@ import android.Manifest
 import android.app.NotificationManager
 import com.uplinkstatus.app.R
 import com.uplinkstatus.app.prefs.FakeUplinkPreferencesRepository
-import com.uplinkstatus.app.state.NetworkScopeStatus
 import com.uplinkstatus.core.probe.ProbeResult
 import com.uplinkstatus.core.probe.ProbeTarget
 import com.uplinkstatus.core.visibility.UplinkVisibility
@@ -38,7 +37,10 @@ import org.robolectric.annotation.Config
  * project's standing rule (carried over from Stage 1) against real network calls in unit
  * tests. Stage 3 adds [FakeUplinkPreferencesRepository] (no real DataStore file) and an
  * `Dispatchers.Unconfined` [UplinkStatusService.visibilityScope] for the `onStartCommand`
- * tests, so the preferences-driven visibility recompute also runs synchronously.
+ * tests, so the preferences-driven visibility recompute also runs synchronously. Stage 4 adds
+ * [FakeNetworkScopeStatus] (no real `ConnectivityManager`), replacing what used to be a
+ * process-wide `NetworkScopeStatus.inScope` singleton mutation with a per-test instance
+ * injected the same way [fakePreferencesRepository] already is.
  */
 @RunWith(RobolectricTestRunner::class)
 @Config(sdk = [34])
@@ -49,15 +51,11 @@ class UplinkStatusServiceTest {
     private lateinit var fakeProber: FakeProber
     private lateinit var fakeScheduler: FakeScheduler
     private lateinit var fakePreferencesRepository: FakeUplinkPreferencesRepository
+    private lateinit var fakeNetworkScopeStatus: FakeNetworkScopeStatus
     private lateinit var notificationManager: NotificationManager
 
     @Before
     fun setUp() {
-        // NetworkScopeStatus is a process-wide singleton (Stage 3's remaining stand-in for
-        // Stage 4's real ConnectivityManager plumbing -- see its doc) -- reset it before
-        // each test so tests don't leak state into one another.
-        NetworkScopeStatus.inScope = true
-
         // UplinkNotificationController (which this service delegates all notify() calls
         // to) checks POST_NOTIFICATIONS before posting -- grant it the same way a real
         // device would after MainActivity's permission prompt is accepted, since
@@ -71,10 +69,12 @@ class UplinkStatusServiceTest {
         fakeProber = FakeProber(ProbeResult.Success(latencyMs = 7))
         fakeScheduler = FakeScheduler()
         fakePreferencesRepository = FakeUplinkPreferencesRepository()
+        fakeNetworkScopeStatus = FakeNetworkScopeStatus(initial = true)
         service.prober = fakeProber
         service.probeTarget = ProbeTarget(host = "probe.invalid")
         service.schedulerFactory = { fakeScheduler }
         service.preferencesRepository = fakePreferencesRepository
+        service.networkScopeStatus = fakeNetworkScopeStatus
         // Unconfined so the onStartCommand tests' preferences-collector coroutine runs
         // synchronously to completion (up to its first suspension point) on the test
         // thread, rather than hopping to a real background dispatcher -- same reasoning as
@@ -171,7 +171,7 @@ class UplinkStatusServiceTest {
         // truth-table case Stage 1's VisibilityDecider guarantees structurally; this test
         // confirms the service actually consults the persisted preference the same way.
         fakePreferencesRepository.setMasterToggleEnabled(false)
-        NetworkScopeStatus.inScope = true
+        fakeNetworkScopeStatus.inScope = true
 
         controller.startCommand(0, 1)
 
@@ -182,7 +182,7 @@ class UplinkStatusServiceTest {
     @Test
     fun `onStartCommand with master toggle on and network in scope drives ENABLED`() = runTest {
         fakePreferencesRepository.setMasterToggleEnabled(true)
-        NetworkScopeStatus.inScope = true
+        fakeNetworkScopeStatus.inScope = true
 
         controller.startCommand(0, 1)
 
@@ -193,7 +193,7 @@ class UplinkStatusServiceTest {
     @Test
     fun `onStartCommand wires the persisted ping target host into the probe cycle`() = runTest {
         fakePreferencesRepository.setPingTargetHost("custom.example.invalid")
-        NetworkScopeStatus.inScope = true
+        fakeNetworkScopeStatus.inScope = true
 
         controller.startCommand(0, 1)
 
@@ -211,5 +211,49 @@ class UplinkStatusServiceTest {
         fakePreferencesRepository.setMasterToggleEnabled(false)
 
         assertTrue(shadowService().isStoppedBySelf)
+    }
+
+    @Test
+    fun `a connectivity change alone -- no preference change -- drives HIDDEN while the service is already running`() = runTest {
+        // Master toggle stays on and hide-when-disabled stays on for this test -- only
+        // networkScopeStatus flips, simulating a real ConnectivityManager.NetworkCallback
+        // reporting the device left its in-scope network (e.g. WiFi disconnected under a
+        // WIFI_ONLY scope setting).
+        fakePreferencesRepository.setHideWhenDisabled(true)
+        controller.startCommand(0, 1)
+        assertEquals(1, fakeProber.callCount)
+
+        fakeNetworkScopeStatus.inScope = false
+
+        assertTrue(shadowService().isStoppedBySelf)
+    }
+
+    @Test
+    fun `a connectivity change alone -- no preference change -- drives DISABLED (dimmed icon) while the service is already running`() = runTest {
+        // hide-when-disabled off this time: going out of scope should dim the icon rather
+        // than remove it, and it should do so purely from networkScopeStatus flipping.
+        fakePreferencesRepository.setHideWhenDisabled(false)
+        controller.startCommand(0, 1)
+        val callsWhileInScope = fakeProber.callCount
+
+        fakeNetworkScopeStatus.inScope = false
+
+        val foregroundNotification = checkNotNull(shadowService().lastForegroundNotification)
+        assertEquals(R.drawable.ic_scan_disabled, foregroundNotification.smallIcon.resId)
+        assertEquals(callsWhileInScope, fakeProber.callCount)
+    }
+
+    @Test
+    fun `going back in scope after being out of scope resumes ENABLED, still with no second onStartCommand`() = runTest {
+        fakePreferencesRepository.setHideWhenDisabled(false)
+        fakeNetworkScopeStatus.inScope = false
+        controller.startCommand(0, 1)
+        assertEquals(0, fakeProber.callCount)
+
+        fakeNetworkScopeStatus.inScope = true
+
+        assertEquals(1, fakeProber.callCount)
+        val foregroundNotification = checkNotNull(shadowService().lastForegroundNotification)
+        assertEquals(R.drawable.ic_scan_1, foregroundNotification.smallIcon.resId)
     }
 }

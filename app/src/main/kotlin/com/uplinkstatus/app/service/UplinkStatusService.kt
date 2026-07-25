@@ -1,14 +1,20 @@
 package com.uplinkstatus.app.service
 
+import android.Manifest
 import android.app.Service
 import android.content.Context
 import android.content.Intent
+import android.content.pm.PackageManager
+import android.net.ConnectivityManager
 import android.os.Handler
 import android.os.HandlerThread
 import android.os.IBinder
+import androidx.core.content.ContextCompat
+import com.uplinkstatus.app.connectivity.ConnectivityManagerNetworkSnapshotProvider
 import com.uplinkstatus.app.prefs.DataStoreUplinkPreferencesRepository
 import com.uplinkstatus.app.prefs.UplinkPreferencesRepository
 import com.uplinkstatus.app.prefs.uplinkPreferencesDataStore
+import com.uplinkstatus.app.state.ConnectivityNetworkScopeStatus
 import com.uplinkstatus.app.state.NetworkScopeStatus
 import com.uplinkstatus.core.probe.ProbeTarget
 import com.uplinkstatus.core.probe.Prober
@@ -44,23 +50,25 @@ import kotlinx.coroutines.launch
  * "main looper" wording (the probe is a blocking call, and running it on the main thread
  * risks ANRs, especially during a sustained outage's back-to-back immediate retries).
  *
- * Stage 3 replaces Stage 2's `VisibilityInputs` stand-in: [onStartCommand] now starts
- * (once) a coroutine that `combine`s [preferencesRepository]'s real, persisted
- * master-toggle/hide-when-disabled/ping-target values with
- * [NetworkScopeStatus.inScopeFlow] (Stage 4's still-manual network-scope stand-in — see its
- * doc) and re-derives [UplinkVisibility] via [VisibilityDecider] on every emission, so a
- * settings change made while this service is already running is reflected without needing
- * to kill and restart it. [applyVisibility] itself is unchanged as the lower-level entry
- * point tests drive directly.
+ * Stage 3 replaced Stage 2's `VisibilityInputs` stand-in with a coroutine (started once from
+ * [onStartCommand]) that `combine`s [preferencesRepository]'s real, persisted
+ * master-toggle/hide-when-disabled/ping-target values with a network-in-scope signal, and
+ * re-derives [UplinkVisibility] via [VisibilityDecider] on every emission, so a settings
+ * change made while this service is already running is reflected without needing to kill and
+ * restart it. Stage 4 replaces that network-in-scope signal itself: [networkScopeStatus] is
+ * now [ConnectivityNetworkScopeStatus], a real `ConnectivityManager.NetworkCallback`-driven
+ * flow (see [NetworkScopeStatus]'s doc), not the Stage 2/3 manual stand-in. [applyVisibility]
+ * itself is unchanged as the lower-level entry point tests drive directly.
  *
- * [prober], [probeTarget], [preferencesRepository], [schedulerFactory], [runOnWorker], and
- * [visibilityScope] are internal test seams: production code never touches them (they
- * default to the real TCP prober, the spec's default host, the real DataStore-backed
- * repository, a real `Handler`-backed scheduler, posting to the worker thread, and a real
- * background-dispatcher coroutine scope respectively), but tests override them before
- * triggering a visibility transition so the cycle — and, for the two tests that exercise
- * [onStartCommand], the preferences read — runs synchronously against fakes instead of
- * touching a real socket, a real DataStore file, or a real background thread.
+ * [prober], [probeTarget], [preferencesRepository], [networkScopeStatus], [schedulerFactory],
+ * [runOnWorker], and [visibilityScope] are internal test seams: production code never touches
+ * them (they default to the real TCP prober, the spec's default host, the real
+ * DataStore-backed repository, the real `ConnectivityManager`-backed scope status, a real
+ * `Handler`-backed scheduler, posting to the worker thread, and a real background-dispatcher
+ * coroutine scope respectively), but tests override them before triggering a visibility
+ * transition so the cycle — and, for the tests that exercise [onStartCommand], the
+ * preferences/connectivity read — runs synchronously against fakes instead of touching a real
+ * socket, a real DataStore file, a real `ConnectivityManager`, or a real background thread.
  */
 class UplinkStatusService : Service() {
 
@@ -69,6 +77,7 @@ class UplinkStatusService : Service() {
     internal var schedulerFactory: () -> TracerScheduler = { AndroidTracerScheduler(workerHandler) }
     internal var runOnWorker: (Runnable) -> Unit = { action -> workerHandler.post(action) }
     internal lateinit var preferencesRepository: UplinkPreferencesRepository
+    internal lateinit var networkScopeStatus: NetworkScopeStatus
     internal var visibilityScope: CoroutineScope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
 
     private val workerThread by lazy { HandlerThread("UplinkStatusProbeWorker").apply { start() } }
@@ -84,7 +93,23 @@ class UplinkStatusService : Service() {
         if (!::preferencesRepository.isInitialized) {
             preferencesRepository = DataStoreUplinkPreferencesRepository(applicationContext.uplinkPreferencesDataStore)
         }
+        if (!::networkScopeStatus.isInitialized) {
+            val connectivityManager = checkNotNull(
+                ContextCompat.getSystemService(applicationContext, ConnectivityManager::class.java),
+            )
+            networkScopeStatus = ConnectivityNetworkScopeStatus(
+                preferencesRepository = preferencesRepository,
+                snapshotProvider = ConnectivityManagerNetworkSnapshotProvider(connectivityManager),
+                hasLocationPermission = { hasLocationPermission() },
+            )
+        }
     }
+
+    private fun hasLocationPermission(): Boolean =
+        ContextCompat.checkSelfPermission(
+            applicationContext,
+            Manifest.permission.ACCESS_FINE_LOCATION,
+        ) == PackageManager.PERMISSION_GRANTED
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
         startObservingPreferencesIfNeeded()
@@ -104,8 +129,12 @@ class UplinkStatusService : Service() {
 
     /**
      * Starts (once) a coroutine that combines the real persisted preferences with
-     * [NetworkScopeStatus]'s Stage 4 stand-in, re-deriving [UplinkVisibility] via
-     * [VisibilityDecider] on every emission from either source. Guarded by
+     * [networkScopeStatus]'s real (Stage 4) or fake (tests) network-in-scope signal,
+     * re-deriving [UplinkVisibility] via [VisibilityDecider] on every emission from either
+     * source — so a live connectivity change (WiFi connect/disconnect, SSID change, cellular
+     * fallback) and a scope-preference change (e.g. the user switching from "WiFi only" to
+     * "cellular only" while already connected) each independently drive a fresh visibility
+     * decision, with neither needing the other to also change. Guarded by
      * [observingPreferences] so a second `onStartCommand` (e.g. a real device redelivering
      * `START_STICKY`, or a settings-screen "nudge" restart) doesn't stack a second collector
      * — the existing one already reacts to whatever changed.
@@ -116,7 +145,7 @@ class UplinkStatusService : Service() {
         visibilityScope.launch {
             combine(
                 preferencesRepository.preferencesFlow,
-                NetworkScopeStatus.inScopeFlow,
+                networkScopeStatus.inScopeFlow,
             ) { preferences, networkInScope -> preferences to networkInScope }
                 .collect { (preferences, networkInScope) ->
                     probeTarget = ProbeTarget(host = preferences.pingTargetHost)
@@ -162,11 +191,12 @@ class UplinkStatusService : Service() {
 
             UplinkVisibility.HIDDEN -> {
                 // Per spec: hidden is not a seventh icon — the notification/service simply
-                // isn't shown at all. There's nothing left for this service to monitor once
-                // master-toggle-off (or out-of-scope-and-hide-when-disabled) applies, so it
-                // stops itself; Stage 4's future connectivity listener (and Stage 3's
-                // settings screen, for the master-toggle/hide-when-disabled cases) is
-                // responsible for starting it again once the state changes back.
+                // isn't shown at all. There's nothing left for this service instance to
+                // monitor once HIDDEN applies, so it stops itself; this is unchanged from
+                // Stage 2/3 and orthogonal to Stage 4's connectivity work -- while this
+                // instance keeps running (any other visibility outcome), its own
+                // preferences+connectivity collector reacts to either changing on its own,
+                // with no restart needed, which is what Stage 4 adds.
                 stopCycle()
                 stopForeground(STOP_FOREGROUND_REMOVE)
                 notificationController.hide()

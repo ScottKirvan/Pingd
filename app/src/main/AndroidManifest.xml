@@ -24,8 +24,14 @@
         requires requesting both together when an app wants FINE access (lint's
         CoarseFineLocation check); this app has no use for coarse-only location and never
         requests it on its own.
+        Stage 4 adds ACCESS_NETWORK_STATE, required by
+        ConnectivityManager.registerDefaultNetworkCallback (the real live-connectivity signal
+        driving network-scope matching) — unlike the location/notification permissions
+        above, this one is a normal (install-time-granted) permission, not a dangerous
+        runtime one, so no separate request flow is needed for it.
     -->
     <uses-permission android:name="android.permission.INTERNET" />
+    <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_SPECIAL_USE" />
     <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
