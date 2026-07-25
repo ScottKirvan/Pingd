@@ -80,7 +80,42 @@ Stage 7's device testing as a real-world battery/CPU consideration on a
 persistently-refusing host, not just a theoretical one.
 
 ## Stage 2 — Foreground service + notification wiring
-Status: not started
+Status: **merged into `dev`** (commit `ba2512b`, fast-forwarded)
+
+**Dev agent's approach:** `UplinkStatusService` (`specialUse`, correctly
+justified in the manifest) owns only lifecycle (`startForeground`/
+`stopForeground`/`stopSelf`) and driving `:core`'s `ProbeCycleRunner`;
+`UplinkNotificationController` is the single `notify()` call site,
+implementing `CycleListener` directly so `Frozen` events are a
+structural no-op (satisfies "never notify on a bare tick") and
+`Advanced` events carry real latency text. `HIDDEN` tears the whole
+service down (`stopForeground` + `stopSelf`), matching "hidden is not a
+7th icon, it's absence." `VisibilityInputs` is an explicit, documented
+stand-in for Stage 3/4's real preferences/connectivity — in-memory only,
+not wired to anything persistent yet, by design.
+
+**Notable proactive correction:** caught that running the probe cycle
+on the literal main looper (as the original spec's Technical Notes said)
+would risk ANRs, since `Prober.probe()` blocks synchronously and retries
+immediately with no back-off during an outage. Moved the cycle to a
+dedicated background `HandlerThread` and updated the spec's Technical
+Notes section itself to reflect the correction, transparently marked as
+"revised in Stage 2" with the reasoning inline — exactly the "rework the
+core system, don't shortcut around it" behavior the brief asks for.
+Also added a `latencyMs` field to `:core`'s `CycleEvent.Advanced`
+(default `null`, non-breaking) so notification text can show real
+latency without duplicating probe-timing logic in `:app`.
+
+**Reviewing agent's independent read:** rebuilt clean (`rm -rf app/build
+core/build && ./gradlew build`) rather than trusting the report — 70
+test executions (across debug+release variants plus `:core`), 0
+failures. Specifically traced the `Frozen`-is-a-no-op path and the
+`HIDDEN`-stops-service path by hand against the spec, and confirmed the
+service-level test suite proves the master-toggle-always-wins rule
+holds end-to-end (not just at the `VisibilityDecider` unit level from
+Stage 1). No scope creep — no settings UI, no DataStore, no real
+`ConnectivityManager` wiring leaked into this stage. Approved without
+changes.
 
 ## Stage 3 — Settings UI + preferences
 Status: not started
