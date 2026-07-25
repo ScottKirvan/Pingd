@@ -14,19 +14,29 @@ import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.core.content.ContextCompat
+import com.uplinkstatus.app.prefs.DataStoreUplinkPreferencesRepository
+import com.uplinkstatus.app.prefs.uplinkPreferencesDataStore
 import com.uplinkstatus.app.service.UplinkStatusService
 import com.uplinkstatus.app.ui.NotificationPermissionScreen
-import com.uplinkstatus.app.ui.PlaceholderScreen
+import com.uplinkstatus.app.ui.SettingsScreen
 
 /**
- * Stage 2 adds the `POST_NOTIFICATIONS` runtime-permission request/rationale flow (the
+ * Stage 2 added the `POST_NOTIFICATIONS` runtime-permission request/rationale flow (the
  * status-bar icon can't be shown at all without it) and starts [UplinkStatusService] once
- * it's granted. No settings/preferences UI belongs here yet — that's Stage 3.
+ * it's granted. Stage 3 adds the real settings screen behind that gate: once notifications
+ * are allowed, [SettingsScreen] reads/writes preferences directly through the same
+ * DataStore-backed repository the service observes, so a change here is picked up by an
+ * already-running service without needing to restart it (see
+ * [UplinkStatusService]'s preferences-collector doc).
  */
 class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         enableEdgeToEdge()
+
+        val preferencesRepository = DataStoreUplinkPreferencesRepository(
+            applicationContext.uplinkPreferencesDataStore,
+        )
 
         setContent {
             MaterialTheme {
@@ -42,7 +52,7 @@ class MainActivity : ComponentActivity() {
                 }
 
                 if (permissionGranted) {
-                    PlaceholderScreen()
+                    SettingsScreen(repository = preferencesRepository)
                 } else {
                     NotificationPermissionScreen(
                         showDenied = permissionDenied,

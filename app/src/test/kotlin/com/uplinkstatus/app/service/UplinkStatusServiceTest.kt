@@ -3,10 +3,14 @@ package com.uplinkstatus.app.service
 import android.Manifest
 import android.app.NotificationManager
 import com.uplinkstatus.app.R
-import com.uplinkstatus.app.state.VisibilityInputs
+import com.uplinkstatus.app.prefs.FakeUplinkPreferencesRepository
+import com.uplinkstatus.app.state.NetworkScopeStatus
 import com.uplinkstatus.core.probe.ProbeResult
 import com.uplinkstatus.core.probe.ProbeTarget
 import com.uplinkstatus.core.visibility.UplinkVisibility
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.test.runTest
 import org.junit.After
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertNull
@@ -32,7 +36,9 @@ import org.robolectric.annotation.Config
  * any visibility transition runs, so these tests never touch a real socket, never wait on
  * real time, and never depend on a real Looper thread actually pumping — per the
  * project's standing rule (carried over from Stage 1) against real network calls in unit
- * tests.
+ * tests. Stage 3 adds [FakeUplinkPreferencesRepository] (no real DataStore file) and an
+ * `Dispatchers.Unconfined` [UplinkStatusService.visibilityScope] for the `onStartCommand`
+ * tests, so the preferences-driven visibility recompute also runs synchronously.
  */
 @RunWith(RobolectricTestRunner::class)
 @Config(sdk = [34])
@@ -42,16 +48,15 @@ class UplinkStatusServiceTest {
     private lateinit var service: UplinkStatusService
     private lateinit var fakeProber: FakeProber
     private lateinit var fakeScheduler: FakeScheduler
+    private lateinit var fakePreferencesRepository: FakeUplinkPreferencesRepository
     private lateinit var notificationManager: NotificationManager
 
     @Before
     fun setUp() {
-        // VisibilityInputs is a process-wide singleton (Stage 2's stand-in for Stage 3/4's
-        // real preferences/connectivity plumbing) — reset it before each test so tests
-        // don't leak state into one another.
-        VisibilityInputs.masterToggleEnabled = true
-        VisibilityInputs.networkInScope = true
-        VisibilityInputs.hideWhenDisabled = false
+        // NetworkScopeStatus is a process-wide singleton (Stage 3's remaining stand-in for
+        // Stage 4's real ConnectivityManager plumbing -- see its doc) -- reset it before
+        // each test so tests don't leak state into one another.
+        NetworkScopeStatus.inScope = true
 
         // UplinkNotificationController (which this service delegates all notify() calls
         // to) checks POST_NOTIFICATIONS before posting -- grant it the same way a real
@@ -65,9 +70,16 @@ class UplinkStatusServiceTest {
 
         fakeProber = FakeProber(ProbeResult.Success(latencyMs = 7))
         fakeScheduler = FakeScheduler()
+        fakePreferencesRepository = FakeUplinkPreferencesRepository()
         service.prober = fakeProber
         service.probeTarget = ProbeTarget(host = "probe.invalid")
         service.schedulerFactory = { fakeScheduler }
+        service.preferencesRepository = fakePreferencesRepository
+        // Unconfined so the onStartCommand tests' preferences-collector coroutine runs
+        // synchronously to completion (up to its first suspension point) on the test
+        // thread, rather than hopping to a real background dispatcher -- same reasoning as
+        // overriding runOnWorker below for the probe cycle.
+        service.visibilityScope = CoroutineScope(Dispatchers.Unconfined)
         // Dispatch "worker" work synchronously on the test thread rather than hopping to a
         // real background HandlerThread, so cycle start/stop happens deterministically
         // within the test call itself.
@@ -154,12 +166,12 @@ class UplinkStatusServiceTest {
     }
 
     @Test
-    fun `onStartCommand reads VisibilityInputs -- master toggle off drives HIDDEN regardless of network scope`() {
+    fun `onStartCommand reads real preferences -- master toggle off drives HIDDEN regardless of network scope`() = runTest {
         // Per spec: the master toggle always wins, unconditionally -- this is exactly the
         // truth-table case Stage 1's VisibilityDecider guarantees structurally; this test
-        // confirms the service actually consults it the same way.
-        VisibilityInputs.masterToggleEnabled = false
-        VisibilityInputs.networkInScope = true
+        // confirms the service actually consults the persisted preference the same way.
+        fakePreferencesRepository.setMasterToggleEnabled(false)
+        NetworkScopeStatus.inScope = true
 
         controller.startCommand(0, 1)
 
@@ -168,13 +180,36 @@ class UplinkStatusServiceTest {
     }
 
     @Test
-    fun `onStartCommand with master toggle on and network in scope drives ENABLED`() {
-        VisibilityInputs.masterToggleEnabled = true
-        VisibilityInputs.networkInScope = true
+    fun `onStartCommand with master toggle on and network in scope drives ENABLED`() = runTest {
+        fakePreferencesRepository.setMasterToggleEnabled(true)
+        NetworkScopeStatus.inScope = true
 
         controller.startCommand(0, 1)
 
         assertEquals(1, fakeProber.callCount)
         checkNotNull(shadowService().lastForegroundNotification)
+    }
+
+    @Test
+    fun `onStartCommand wires the persisted ping target host into the probe cycle`() = runTest {
+        fakePreferencesRepository.setPingTargetHost("custom.example.invalid")
+        NetworkScopeStatus.inScope = true
+
+        controller.startCommand(0, 1)
+
+        assertEquals("custom.example.invalid", service.probeTarget.host)
+    }
+
+    @Test
+    fun `a preference change while the service is already running is applied without restarting it`() = runTest {
+        controller.startCommand(0, 1)
+        assertEquals(1, fakeProber.callCount)
+
+        // Simulates the settings screen writing straight to the (shared) DataStore-backed
+        // repository while this service instance keeps running -- the collector started by
+        // onStartCommand above should react on its own, with no second startCommand call.
+        fakePreferencesRepository.setMasterToggleEnabled(false)
+
+        assertTrue(shadowService().isStoppedBySelf)
     }
 }

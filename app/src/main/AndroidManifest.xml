@@ -11,13 +11,26 @@
         this is unconditionally required, not just on newer OS versions) for the status-bar
         notification itself — requested at runtime with a rationale flow from
         MainActivity, not just declared here with no request logic.
-        ACCESS_FINE_LOCATION (Stage 3, gated behind SSID whitelisting) is not yet declared,
-        per spec: request it only when the user actually turns that feature on.
+        Stage 3 adds ACCESS_FINE_LOCATION for the SSID-whitelist network-scope option
+        (reading the connected SSID on Android 10+ requires it, no way around that OS
+        restriction). Android requires a dangerous permission to be manifest-declared
+        before it can be requested at all; there's no "declare only if the feature is used"
+        mechanism short of a separate build flavor, which would be disproportionate
+        machinery for one permission, so the manifest entry itself is unconditional, but the
+        *request* is not: SettingsScreen only calls the runtime request when the user
+        actually selects the SSID-whitelist scope option, never at app launch or for any
+        other scope choice (per spec). Reading the live SSID this permission gates is Stage
+        4's job. ACCESS_COARSE_LOCATION is declared alongside it only because Android 12+
+        requires requesting both together when an app wants FINE access (lint's
+        CoarseFineLocation check); this app has no use for coarse-only location and never
+        requests it on its own.
     -->
     <uses-permission android:name="android.permission.INTERNET" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_SPECIAL_USE" />
     <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
+    <uses-permission android:name="android.permission.ACCESS_FINE_LOCATION" />
+    <uses-permission android:name="android.permission.ACCESS_COARSE_LOCATION" />
 
     <application
         android:allowBackup="true"

@@ -64,6 +64,11 @@ dependencies {
     implementation(libs.androidx.ui.graphics)
     implementation(libs.androidx.ui.tooling.preview)
     implementation(libs.androidx.material3)
+    // Stage 3: preferences storage (spec's Implementation Baseline names Jetpack
+    // DataStore, not SharedPreferences) and the coroutines/Flow API it's built on.
+    implementation(libs.androidx.datastore.preferences)
+    implementation(libs.kotlinx.coroutines.core)
+    implementation(libs.kotlinx.coroutines.android)
     debugImplementation(libs.androidx.ui.tooling)
     // Contributes a test-only launcher activity into the debug manifest merge, which
     // both `testDebugUnitTest` (Robolectric) and `connectedDebugAndroidTest` read from —
@@ -75,4 +80,5 @@ dependencies {
     testImplementation(libs.robolectric)
     testImplementation(platform(libs.androidx.compose.bom))
     testImplementation(libs.androidx.ui.test.junit4)
+    testImplementation(libs.kotlinx.coroutines.test)
 }
