@@ -98,7 +98,7 @@ class ProbeCycleRunner(
     /** Step 2: the probe-success ack, then schedules step 3 (the automatic ack) 500ms out. */
     private fun onProbeSucceeded(result: ProbeResult.Success) {
         val position = tracer.ack()
-        listener.onEvent(CycleEvent.Advanced(position, AckSource.PROBE_SUCCESS))
+        listener.onEvent(CycleEvent.Advanced(position, AckSource.PROBE_SUCCESS, result.latencyMs))
 
         pendingTask = scheduler.postDelayed(AUTO_ACK_DELAY_MS) {
             onAutoAckDue()

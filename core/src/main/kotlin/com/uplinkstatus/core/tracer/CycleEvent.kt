@@ -24,8 +24,21 @@ enum class FreezeReason {
  * notification layer) should react to these — never poll on a bare timer tick, per spec:
  * "Only call notify() on an ack (tracer advance) or a state transition." */
 sealed interface CycleEvent {
-    /** The tracer advanced one step. */
-    data class Advanced(val position: BarPosition, val source: AckSource) : CycleEvent
+    /** The tracer advanced one step.
+     *
+     * [latencyMs] is the probe's connect-time latency when [source] is
+     * [AckSource.PROBE_SUCCESS] (taken straight from the [com.uplinkstatus.core.probe.ProbeResult.Success]
+     * that triggered this ack) and `null` when [source] is [AckSource.AUTOMATIC] — the
+     * automatic ack is a timer, not a new probe, so there's no fresh latency to report at
+     * that step. This exists so a consumer (Stage 2's notification layer) can render
+     * accessibility text like "Uplink: connected, 42ms" without needing to poll the prober
+     * itself or duplicate the cycle's probe-timing logic — latency naturally travels with
+     * the event that already carries the position/source it belongs to. */
+    data class Advanced(
+        val position: BarPosition,
+        val source: AckSource,
+        val latencyMs: Long? = null,
+    ) : CycleEvent
 
     /** No ack fired this attempt; the tracer remains at [position]. Emitted once per
      * failed probe attempt (including repeated immediate retries), not just once per

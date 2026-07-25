@@ -1,3 +1,16 @@
 <resources>
     <string name="app_name">UplinkStatus</string>
+
+    <!-- Stage 2: foreground service notification content. -->
+    <string name="notification_channel_name">Uplink status</string>
+    <string name="notification_channel_description">Ongoing status-bar indicator of uplink (network) connectivity health.</string>
+    <string name="notification_title">Uplink status</string>
+    <string name="notification_text_connected_with_latency">Uplink: connected, %1$dms</string>
+    <string name="notification_text_connected_unknown_latency">Uplink: connected</string>
+    <string name="notification_text_disabled">Uplink: paused (network out of scope)</string>
+
+    <!-- Stage 2: POST_NOTIFICATIONS runtime-permission rationale flow. -->
+    <string name="notification_permission_rationale">UplinkStatus shows its connectivity status as a persistent status-bar icon. That requires permission to post a notification — allow it so the icon can be shown.</string>
+    <string name="notification_permission_request_button">Allow notifications</string>
+    <string name="notification_permission_denied">Notifications permission was denied, so the status icon can\'t be shown. You can grant it from system settings at any time.</string>
 </resources>

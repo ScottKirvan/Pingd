@@ -64,13 +64,14 @@ color to a single OS-applied tint and only respects alpha, so a
 same-tint opacity difference is the only way to get the dim/lit look to
 actually survive being rendered there.
 
-**Signed off:** draft vector drawables for all 6 frames are in
-`assets/media/icons/` (`ic_scan_disabled.xml`, `ic_scan_1.xml` …
-`ic_scan_5.xml`, merged in [PR #3](https://github.com/ScottKirvan/UplinkStatus/pull/3))
-and approved as the basis for implementation. They still need to move
-into an Android `res/drawable` directory when the app project is
-scaffolded, and the 0.3 dim alpha is worth a real-device sanity check,
-but the shape and duotone approach are settled.
+**Signed off:** the vector drawables for all 6 frames (`ic_scan_disabled.xml`,
+`ic_scan_1.xml` … `ic_scan_5.xml`, originally drafted in
+`assets/media/icons/`, merged in [PR #3](https://github.com/ScottKirvan/UplinkStatus/pull/3))
+moved into `app/src/main/res/drawable/` in Stage 2, where the
+notification-building code references them as ordinary Android resources.
+The 0.3 dim alpha is still worth a real-device sanity check (tracked for
+Stage 7's device-testing protocol), but the shape and duotone approach
+are settled.
 
 "Hidden" is **not** a 7th icon — it's the absence of the icon (nothing
 shown in the status bar).
@@ -172,9 +173,17 @@ flowchart TD
   services that don't fit a named bucket — it requires a short
   justification string in the manifest and in the Play Console
   data-safety form, but it's the correct classification here.
-- `Handler`/`postDelayed` loop on the main looper; no wake lock — it's
+- `Handler`/`postDelayed` loop on a dedicated background `HandlerThread`
+  (**revised in Stage 2** from an earlier draft that said "the main
+  looper" — the probe itself is a blocking call, up to 1000ms, retried
+  immediately with no back-off on failure per this doc, and the cycle
+  runner invokes it synchronously from inside the scheduler's own
+  callback; binding that to the real main-thread looper would block the
+  UI thread for every probe attempt and risk an ANR outright during a
+  sustained outage's back-to-back retries). No wake lock — it's still
   acceptable for Doze to throttle timers while the screen is off, since
-  the icon only matters when the user can see it.
+  the icon only matters when the user can see it; that reasoning doesn't
+  depend on which thread the `Handler` runs on.
 - Notification: `setOngoing(true)`, `PRIORITY_LOW`. Also set real
   accessibility text via `setContentTitle()`/`setContentText()` (e.g.
   "Uplink: connected, 42ms") — the glanceable icon itself is

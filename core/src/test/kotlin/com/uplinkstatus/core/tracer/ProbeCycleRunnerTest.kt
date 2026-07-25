@@ -33,7 +33,7 @@ class ProbeCycleRunnerTest {
 
         assertEquals(1, prober.callCount)
         assertEquals(
-            listOf(CycleEvent.Advanced(BarPosition.BAR_2, AckSource.PROBE_SUCCESS)),
+            listOf(CycleEvent.Advanced(BarPosition.BAR_2, AckSource.PROBE_SUCCESS, latencyMs = 42)),
             listener.events,
         )
     }
@@ -61,8 +61,8 @@ class ProbeCycleRunnerTest {
 
         assertEquals(
             listOf(
-                CycleEvent.Advanced(BarPosition.BAR_2, AckSource.PROBE_SUCCESS),
-                CycleEvent.Advanced(BarPosition.BAR_3, AckSource.AUTOMATIC),
+                CycleEvent.Advanced(BarPosition.BAR_2, AckSource.PROBE_SUCCESS, latencyMs = 42),
+                CycleEvent.Advanced(BarPosition.BAR_3, AckSource.AUTOMATIC, latencyMs = null),
             ),
             listener.events,
         )
@@ -105,10 +105,10 @@ class ProbeCycleRunnerTest {
         assertEquals(2, prober.callCount)
         assertEquals(
             listOf(
-                CycleEvent.Advanced(BarPosition.BAR_2, AckSource.PROBE_SUCCESS),
-                CycleEvent.Advanced(BarPosition.BAR_3, AckSource.AUTOMATIC),
-                CycleEvent.Advanced(BarPosition.BAR_4, AckSource.PROBE_SUCCESS),
-                CycleEvent.Advanced(BarPosition.BAR_5, AckSource.AUTOMATIC),
+                CycleEvent.Advanced(BarPosition.BAR_2, AckSource.PROBE_SUCCESS, latencyMs = 10),
+                CycleEvent.Advanced(BarPosition.BAR_3, AckSource.AUTOMATIC, latencyMs = null),
+                CycleEvent.Advanced(BarPosition.BAR_4, AckSource.PROBE_SUCCESS, latencyMs = 20),
+                CycleEvent.Advanced(BarPosition.BAR_5, AckSource.AUTOMATIC, latencyMs = null),
             ),
             listener.events,
         )
