@@ -193,7 +193,7 @@ correctness. One inaccuracy in the agent's self-report: it stated "5
 test regression. Approved.
 
 ## Stage 5 — Edge-case and accessibility hardening pass
-Status: **implemented, awaiting independent review** (branch `stage5-hardening`)
+Status: **merged into `dev`** (commit `5795233`, fast-forwarded)
 
 **Dev agent's approach:** Fixed the confirmed gap first: `UplinkNotificationController.onEvent()`
 treated every `CycleEvent.Frozen` as a blanket no-op, so a DNS-resolution failure and a
@@ -243,7 +243,29 @@ service level, not just in `:core`'s existing bounded-sequence unit tests.
 `UplinkNotificationControllerTest` (14, was 10) and `UplinkStatusServiceTest` (15, was 12).
 Full `./gradlew build` (assemble debug+release, all unit tests, lint) passes clean.
 
-**Reviewing agent's independent read:** _pending._
+**Reviewing agent's independent read:** verified the confirmed-gap fix
+directly — read `onEvent`'s new dedup logic line by line, confirmed
+`lastNotifiedState` genuinely distinguishes reason-changes from repeats
+rather than just widening what counts as "connected," and confirmed the
+spec-defect fix (stale `1.1.1.1`/`8.8.8.8` bullet) against
+`ProbeTarget.DEFAULT_HOST`/`ALTERNATE_HOST` in `:core` before accepting
+it. Rebuilt clean independently: 172 total test executions (141 `:app`,
+31 `:core`), 0 failures, lint clean. Spot-checked the new end-to-end
+service-level tests (`a real cycle run inside the service reports
+generic and DNS failures as distinct CycleEvents in order`, `repeated
+generic failures inside a real running cycle only post the failure
+notification once`) and confirmed they exercise a real running
+`ProbeCycleRunner`/`UplinkStatusService`, not a shortcut back to
+unit-level fakes. Approved without changes.
+
+**Process note:** this stage's dev agent wrote its own entry in this
+log ahead of review (marked "awaiting independent review," not claiming
+an approval that hadn't happened) and worked on a self-named branch
+(`stage5-hardening`) rather than the default worktree branch, which the
+reviewing session had to notice before merging. Harmless this time, but
+future stage prompts should say explicitly: don't touch `STATUS.md`
+(that's the reviewing session's record) and commit to the worktree's
+default branch unless there's a reason not to.
 
 ## Stage 6 — VitePress user documentation
 Status: not started
