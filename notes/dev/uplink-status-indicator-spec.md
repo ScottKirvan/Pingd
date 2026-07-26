@@ -83,6 +83,14 @@ fires partway through the cycle. There is no separate animation loop and
 no formula that scales speed by latency — latency is simply how long
 step 2 below takes to happen.
 
+**The sweep is a ping-pong bounce, not a wrap.** The lit bar moves
+1→2→3→4→5, then reverses and moves back down 5→4→3→2→1, then reverses
+again — never jumping straight from bar 5 back to bar 1. Bar 1 and bar
+5 each appear once per direction change, not twice in a row. This is a
+KITT/scanner-style motion, matching the original visual intent; a
+simple 5-then-wrap-to-1 cycle was implemented first and corrected once
+this was clarified.
+
 **Probe, not ICMP.** Unprivileged Android apps can't open raw ICMP
 sockets (no `CAP_NET_RAW`), so "ping" here is a plain TCP connect-time
 probe: open a `Socket` to the target host on port 443, time how long
@@ -191,10 +199,30 @@ flowchart TD
   acceptable for Doze to throttle timers while the screen is off, since
   the icon only matters when the user can see it; that reasoning doesn't
   depend on which thread the `Handler` runs on.
-- Notification: `setOngoing(true)`, `PRIORITY_LOW`. Also set real
-  accessibility text via `setContentTitle()`/`setContentText()` (e.g.
-  "Uplink: connected, 42ms") — the glanceable icon itself is
-  visual-only, but a screen reader should still get something from it.
+- Notification: `setOngoing(true)`. Channel importance is currently
+  `IMPORTANCE_DEFAULT`, not the originally-specified `PRIORITY_LOW` —
+  **temporary, pending a real-device check.** On the emulator/OS build
+  used during development (a pre-release API level ahead of what's
+  documented anywhere yet), `IMPORTANCE_LOW` notifications didn't get a
+  status-bar tray icon at all, only `IMPORTANCE_DEFAULT` did; `DEFAULT`
+  also plays a one-time notification sound on first post (muted for
+  later updates via `setOnlyAlertOnce(true)`), which `LOW` would not.
+  Revisit on the actual Pixel 6 Pro (real Android 14+, not a
+  pre-release build) before settling this — the spec's intent is still
+  a quiet, `LOW`-importance indicator. Also set real accessibility text
+  via `setContentTitle()`/`setContentText()` (e.g. "Uplink: connected,
+  42ms") — the glanceable icon itself is visual-only, but a screen
+  reader should still get something from it.
+  **Temporarily running as `IMPORTANCE_DEFAULT` instead of
+  `IMPORTANCE_LOW`** during emulator testing — on that (pre-release)
+  OS build, `IMPORTANCE_LOW` notifications didn't get a status-bar tray
+  icon at all, only a shade entry. Unconfirmed whether that's specific
+  to this OS build or general behavior; needs verifying on the real
+  Pixel 6 Pro before deciding whether `PRIORITY_LOW` (the spec's
+  original intent — no sound, fully passive) is achievable, or whether
+  `DEFAULT` (which plays a one-time sound on first post, suppressed
+  after that by `setOnlyAlertOnce(true)`) is required for the icon to
+  show at all.
 - `POST_NOTIFICATIONS` runtime permission (Android 13+) must be
   requested explicitly; without it the icon can't be shown at all, so
   this needs its own request/rationale flow, not just a manifest entry.

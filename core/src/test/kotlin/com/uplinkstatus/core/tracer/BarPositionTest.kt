@@ -5,22 +5,21 @@ import org.junit.Test
 
 class BarPositionTest {
 
-    @Test
-    fun `next steps through all 5 positions in order`() {
-        assertEquals(BarPosition.BAR_2, BarPosition.BAR_1.next())
-        assertEquals(BarPosition.BAR_3, BarPosition.BAR_2.next())
-        assertEquals(BarPosition.BAR_4, BarPosition.BAR_3.next())
-        assertEquals(BarPosition.BAR_5, BarPosition.BAR_4.next())
-    }
+    // Stepping/sequencing (including the ping-pong direction reversal at each end) is
+    // AckTracer's responsibility, not this enum's — see AckTracerTest for that behavior.
 
     @Test
-    fun `next wraps from bar 5 to bar 1`() {
-        assertEquals(BarPosition.BAR_1, BarPosition.BAR_5.next())
-    }
-
-    @Test
-    fun `there are exactly 5 positions`() {
-        assertEquals(5, BarPosition.entries.size)
+    fun `there are exactly 5 positions, in bar order`() {
+        assertEquals(
+            listOf(
+                BarPosition.BAR_1,
+                BarPosition.BAR_2,
+                BarPosition.BAR_3,
+                BarPosition.BAR_4,
+                BarPosition.BAR_5,
+            ),
+            BarPosition.entries,
+        )
     }
 
     @Test

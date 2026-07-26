@@ -93,7 +93,7 @@ open class UplinkNotificationController(
     }
 
     private fun ensureChannel() {
-        val channel = NotificationChannelCompat.Builder(CHANNEL_ID, NotificationManagerCompat.IMPORTANCE_LOW)
+        val channel = NotificationChannelCompat.Builder(CHANNEL_ID, NotificationManagerCompat.IMPORTANCE_DEFAULT)
             .setName(context.getString(R.string.notification_channel_name))
             .setDescription(context.getString(R.string.notification_channel_description))
             .build()

@@ -21,10 +21,43 @@ class AckTracerTest {
     }
 
     @Test
-    fun `ack wraps from bar 5 back to bar 1`() {
+    fun `ack reverses direction at bar 5 instead of wrapping to bar 1`() {
         val tracer = AckTracer(BarPosition.BAR_5)
 
-        assertEquals(BarPosition.BAR_1, tracer.ack())
+        assertEquals(BarPosition.BAR_4, tracer.ack())
+    }
+
+    @Test
+    fun `ack reverses direction at bar 1 after having moved forward`() {
+        val tracer = AckTracer(BarPosition.BAR_1)
+        repeat(4) { tracer.ack() } // 1 -> 2 -> 3 -> 4 -> 5
+        assertEquals(BarPosition.BAR_5, tracer.position)
+
+        assertEquals(BarPosition.BAR_4, tracer.ack()) // reverses: 5 -> 4
+        assertEquals(BarPosition.BAR_3, tracer.ack())
+        assertEquals(BarPosition.BAR_2, tracer.ack())
+        assertEquals(BarPosition.BAR_1, tracer.ack()) // reaches the other end
+        assertEquals(BarPosition.BAR_2, tracer.ack()) // reverses again: back toward 5
+    }
+
+    @Test
+    fun `a full sweep is a ping-pong, not a wrap - each end appears once per direction change`() {
+        val tracer = AckTracer()
+        val positions = generateSequence { tracer.ack() }.take(8).toList()
+
+        assertEquals(
+            listOf(
+                BarPosition.BAR_2,
+                BarPosition.BAR_3,
+                BarPosition.BAR_4,
+                BarPosition.BAR_5,
+                BarPosition.BAR_4,
+                BarPosition.BAR_3,
+                BarPosition.BAR_2,
+                BarPosition.BAR_1,
+            ),
+            positions,
+        )
     }
 
     @Test
