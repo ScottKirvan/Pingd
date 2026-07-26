@@ -114,6 +114,21 @@ class UplinkStatusService : Service() {
         ) == PackageManager.PERMISSION_GRANTED
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
+        // Android requires startForeground() to be called shortly after every
+        // startForegroundService() call, regardless of what the app's own logic decides
+        // afterward -- MainActivity always calls startForegroundService() on launch, but
+        // this service's own visibility logic can resolve straight to HIDDEN (master
+        // toggle off) without ever calling startForeground() on its own, which is exactly
+        // what used to crash the app with ForegroundServiceDidNotStartInTimeException.
+        // Posting a safe placeholder immediately -- before the async preferences/
+        // connectivity read even resolves -- satisfies that contract unconditionally;
+        // applyVisibility() below still tears this back down within a moment if the real
+        // answer turns out to be HIDDEN, and idempotently re-posts the correct content
+        // otherwise (ENABLED/DISABLED).
+        startForeground(
+            UplinkNotificationController.NOTIFICATION_ID,
+            notificationController.notificationForDisabled(),
+        )
         startObservingPreferencesIfNeeded()
         return START_STICKY
     }
