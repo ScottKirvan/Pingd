@@ -17,8 +17,7 @@ a separate animation timer.
 - No adaptive back-off on ping retry.
 
 ## Implementation Baseline
-Settled going into implementation, so these aren't open questions for
-whoever builds this:
+Locked decisions — not open questions:
 - **Language/UI:** Kotlin, Jetpack Compose for all in-app UI (settings
   screen and anything else the user navigates to). Compose doesn't
   apply to the notification itself or the foreground service — those
@@ -64,14 +63,10 @@ color to a single OS-applied tint and only respects alpha, so a
 same-tint opacity difference is the only way to get the dim/lit look to
 actually survive being rendered there.
 
-**Signed off:** the vector drawables for all 6 frames (`ic_scan_disabled.xml`,
-`ic_scan_1.xml` … `ic_scan_5.xml`, originally drafted in
-`assets/media/icons/`, merged in [PR #3](https://github.com/ScottKirvan/UplinkStatus/pull/3))
-moved into `app/src/main/res/drawable/` in Stage 2, where the
-notification-building code references them as ordinary Android resources.
-The 0.3 dim alpha is still worth a real-device sanity check (tracked for
-Stage 7's device-testing protocol), but the shape and duotone approach
-are settled.
+The vector drawables for all 6 frames (`ic_scan_disabled.xml`,
+`ic_scan_1.xml` … `ic_scan_5.xml`) live in `app/src/main/res/drawable/`,
+where the notification-building code references them as ordinary Android
+resources.
 
 "Hidden" is **not** a 7th icon — it's the absence of the icon (nothing
 shown in the status bar).
@@ -87,9 +82,7 @@ step 2 below takes to happen.
 1→2→3→4→5, then reverses and moves back down 5→4→3→2→1, then reverses
 again — never jumping straight from bar 5 back to bar 1. Bar 1 and bar
 5 each appear once per direction change, not twice in a row. This is a
-KITT/scanner-style motion, matching the original visual intent; a
-simple 5-then-wrap-to-1 cycle was implemented first and corrected once
-this was clarified.
+KITT/scanner-style motion.
 
 **Probe, not ICMP.** Unprivileged Android apps can't open raw ICMP
 sockets (no `CAP_NET_RAW`), so "ping" here is a plain TCP connect-time
@@ -167,14 +160,7 @@ flowchart TD
     is only enabled while connected to a listed network.
 - **Ping target host** — default `one.one.one.one` (Cloudflare), with
   `dns.google` (Google) offered as an alternate quick-pick; user can
-  override with any custom host. (Corrected in Stage 5: this bullet
-  previously said `1.1.1.1`/`8.8.8.8` — bare IP literals — which
-  directly contradicted the "Core Mechanism" section above and was
-  simply stale text left over from before that section's hostname-vs-
-  literal reasoning was written. The implementation has always used the
-  hostname defaults, matching Core Mechanism and
-  `ProbeTarget.DEFAULT_HOST`/`ProbeTarget.ALTERNATE_HOST`; only this
-  bullet's wording was wrong.)
+  override with any custom host.
 
 ## Technical Notes
 - Foreground service (`FOREGROUND_SERVICE` permission). Type:
@@ -189,40 +175,24 @@ flowchart TD
   justification string in the manifest and in the Play Console
   data-safety form, but it's the correct classification here.
 - `Handler`/`postDelayed` loop on a dedicated background `HandlerThread`
-  (**revised in Stage 2** from an earlier draft that said "the main
-  looper" — the probe itself is a blocking call, up to 1000ms, retried
+  — the probe itself is a blocking call, up to 1000ms, retried
   immediately with no back-off on failure per this doc, and the cycle
   runner invokes it synchronously from inside the scheduler's own
-  callback; binding that to the real main-thread looper would block the
-  UI thread for every probe attempt and risk an ANR outright during a
-  sustained outage's back-to-back retries). No wake lock — it's still
-  acceptable for Doze to throttle timers while the screen is off, since
-  the icon only matters when the user can see it; that reasoning doesn't
-  depend on which thread the `Handler` runs on.
-- Notification: `setOngoing(true)`. Channel importance is currently
-  `IMPORTANCE_DEFAULT`, not the originally-specified `PRIORITY_LOW` —
-  **temporary, pending a real-device check.** On the emulator/OS build
-  used during development (a pre-release API level ahead of what's
-  documented anywhere yet), `IMPORTANCE_LOW` notifications didn't get a
-  status-bar tray icon at all, only `IMPORTANCE_DEFAULT` did; `DEFAULT`
-  also plays a one-time notification sound on first post (muted for
-  later updates via `setOnlyAlertOnce(true)`), which `LOW` would not.
-  Revisit on the actual Pixel 6 Pro (real Android 14+, not a
-  pre-release build) before settling this — the spec's intent is still
-  a quiet, `LOW`-importance indicator. Also set real accessibility text
-  via `setContentTitle()`/`setContentText()` (e.g. "Uplink: connected,
+  callback; binding that to the main-thread looper would block the UI
+  thread for every probe attempt and risk an ANR during a sustained
+  outage's back-to-back retries. No wake lock — it's acceptable for
+  Doze to throttle timers while the screen is off, since the icon only
+  matters when the user can see it.
+- Notification: `setOngoing(true)`. Channel importance is
+  `IMPORTANCE_DEFAULT`, not `IMPORTANCE_LOW` — on-device testing showed
+  `IMPORTANCE_LOW` notifications don't get a status-bar tray icon at
+  all, only a shade entry, so `DEFAULT` is required for the icon to
+  show. `DEFAULT` plays a one-time notification sound on first post;
+  this is suppressed for later updates via `setOnlyAlertOnce(true)`.
+  Also set real accessibility text via
+  `setContentTitle()`/`setContentText()` (e.g. "Uplink: connected,
   42ms") — the glanceable icon itself is visual-only, but a screen
   reader should still get something from it.
-  **Temporarily running as `IMPORTANCE_DEFAULT` instead of
-  `IMPORTANCE_LOW`** during emulator testing — on that (pre-release)
-  OS build, `IMPORTANCE_LOW` notifications didn't get a status-bar tray
-  icon at all, only a shade entry. Unconfirmed whether that's specific
-  to this OS build or general behavior; needs verifying on the real
-  Pixel 6 Pro before deciding whether `PRIORITY_LOW` (the spec's
-  original intent — no sound, fully passive) is achievable, or whether
-  `DEFAULT` (which plays a one-time sound on first post, suppressed
-  after that by `setOnlyAlertOnce(true)`) is required for the icon to
-  show at all.
 - `POST_NOTIFICATIONS` runtime permission (Android 13+) must be
   requested explicitly; without it the icon can't be shown at all, so
   this needs its own request/rationale flow, not just a manifest entry.
