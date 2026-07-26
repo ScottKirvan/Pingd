@@ -8,7 +8,6 @@ import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
 import androidx.activity.result.contract.ActivityResultContracts
-import androidx.compose.material3.MaterialTheme
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -19,6 +18,7 @@ import com.uplinkstatus.app.prefs.uplinkPreferencesDataStore
 import com.uplinkstatus.app.service.UplinkStatusService
 import com.uplinkstatus.app.ui.NotificationPermissionScreen
 import com.uplinkstatus.app.ui.SettingsScreen
+import com.uplinkstatus.app.ui.theme.UplinkStatusTheme
 
 /**
  * Stage 2 added the `POST_NOTIFICATIONS` runtime-permission request/rationale flow (the
@@ -39,7 +39,7 @@ class MainActivity : ComponentActivity() {
         )
 
         setContent {
-            MaterialTheme {
+            UplinkStatusTheme {
                 var permissionGranted by remember { mutableStateOf(hasNotificationPermission()) }
                 var permissionDenied by remember { mutableStateOf(false) }
 

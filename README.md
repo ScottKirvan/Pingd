@@ -48,13 +48,17 @@
 ## Android App
 
 The `app/` module is the actual UplinkStatus Android app (Kotlin, Jetpack
-Compose, `minSdk` 34 / `targetSdk` 36). It's currently a Stage 0
-scaffold: one placeholder screen proving the toolchain is wired up, no
-probe/notification/settings logic yet. See
+Compose, `minSdk` 34 / `targetSdk` 36): a `specialUse` foreground
+service drives a 6-frame status-bar tracer icon from TCP connect-probe
+results, with a Compose settings screen (master on/off, network scope
+incl. SSID whitelist, ping target host) backed by Jetpack DataStore.
+See
 [`notes/dev/uplink-status-indicator-spec.md`](notes/dev/uplink-status-indicator-spec.md)
-for the design it's being built to, and
-[`Agents/UplinkStatus_dev/BRIEF.md`](Agents/UplinkStatus_dev/BRIEF.md) for
-the staged implementation plan.
+for the design it's built to,
+[`Agents/UplinkStatus_dev/STATUS.md`](Agents/UplinkStatus_dev/STATUS.md)
+for the stage-by-stage build log (including post-Stage-7 device-testing
+fixes), and [PR #6](https://github.com/ScottKirvan/UplinkStatus/pull/6)
+for the `dev` → `main` integration.
 
 **Build and test locally:**
 

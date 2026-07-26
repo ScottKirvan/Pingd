@@ -325,3 +325,97 @@ word, confirming the protocol was written against the real app rather
 than plausible-sounding invented text. Confirmed no code was touched
 (a pure `.md` addition) and that `STATUS.md` was correctly left alone
 this time, unlike Stage 5. Approved without changes.
+
+## Stage 8 — Real-device testing fixes and UX polish
+Status: **on `dev`**, not yet a separate merge commit — driven directly
+by hands-on testing on the Pixel 6 Pro emulator/device rather than
+through the Stage 0-7 dev/review-agent process, so this entry covers a
+run of individually-verified fixes and features rather than one staged
+handoff.
+
+**Confirmed bugs found and fixed during device testing (each with a
+red/green regression test, per the standing rule established this
+stage — see below):**
+- The tracer was wrapping bar position (`BAR_5` -> `BAR_1`) instead of
+  reversing direction; corrected to the spec's ping-pong sweep
+  (commit `9bbed3b`).
+- `onStartCommand` could go a noticeable window without ever calling
+  `startForeground()` if the async preferences/connectivity read hadn't
+  resolved yet, risking `ForegroundServiceDidNotStartInTimeException`;
+  fixed by posting a safe placeholder notification immediately, which
+  `applyVisibility()` then supersedes or tears down once the real
+  answer resolves (commit `fae746b`).
+- The settings screen's master toggle could show on/off state that
+  didn't match what the service had actually applied, and rapid
+  clicking made this worse — root-caused to a real, measurable async
+  gap between a preference write, the service's collector reacting to
+  it, and the service actually calling `startForeground`/`stopSelf`.
+  Fixed with `UplinkRuntimeStatus`, a sequence-numbered report of the
+  last visibility `UplinkStatusService` actually finished applying;
+  every settings-screen control now locks (and visually dims, including
+  the master toggle's own label text) from the moment a change is made
+  until that report catches up, rather than assuming a fixed delay.
+- A follow-on request added the same async-race style bug for
+  `notificationForDisabled()`'s text: it always used the generic
+  "network out of scope" wording even under an SSID whitelist, where
+  "waiting for a whitelisted Wi-Fi network…" is what's actually true.
+  `UplinkStatusService` now tracks the current `NetworkScope` (a plain
+  field, not threaded through `applyVisibility()`'s signature, so the
+  many tests calling it directly with no scope argument keep working)
+  and passes it to a scope-aware `notificationForDisabled(scope)`.
+
+**UX work requested directly against the running app, not spec
+deviations:**
+- Tapping the notification now opens the settings screen
+  (`PendingIntent` to `MainActivity`).
+- Settings screen follows system light/dark theme (Material dynamic
+  color).
+- Network scope and ping-target host changed from radio buttons to
+  `ExposedDropdownMenuBox` dropdowns; "hide icon when out of scope"
+  moved below the network-scope section; the custom-hostname field is
+  now only shown once "Custom" is actually selected, instead of always
+  occupying layout space.
+- The whole settings panel (everything but the master toggle itself)
+  dims and disables when the master toggle is off, making "the feature
+  is off" legible at a glance instead of a screen that still looks
+  fully live.
+- Root layout given `Modifier.fillMaxSize().safeDrawingPadding()` on
+  both `SettingsScreen` and `NotificationPermissionScreen` — content
+  drawing under the status bar/gesture-nav area (a side effect of
+  `enableEdgeToEdge()`) was competing with system edge-swipe gestures
+  for touch input and twice presented as a fully "frozen" emulator
+  before being traced to this.
+- Added an on-screen "Status: …" line below the master toggle
+  (`UplinkActivityStatus`, a `StateFlow<String?>` fed from the same
+  `buildNotification()` funnel point `UplinkNotificationController`
+  already uses) so the user has transparency into what the service is
+  actually doing right now — looking for a whitelisted network, a
+  probe failing and why, starting up, hidden — without needing to pull
+  down the notification shade.
+
+**Standing rule established this stage, now binding for all future
+work (recorded in Claude's persistent memory, not just here):** every
+bug fix must be proven red (a test that fails without the fix, verified
+to fail for the right reason by temporarily reverting the fix) then
+green (passes with the fix restored) before being considered done. This
+followed a bug (the toggle-state mismatch above) that had reportedly
+been "fixed" once already and recurred.
+
+**Tests:** net new/changed coverage this stage includes
+`UplinkRuntimeStatus`/`UplinkActivityStatus` reset-for-test seams, a
+`SettingsScreenTest` case proving any settings change locks the whole
+panel until the service's report catches up, a `NetworkScope`-aware
+case for `UplinkNotificationControllerTest`'s
+`notificationForDisabled()`, and `SettingsScreenTest` cases for the
+status line (absent by default; shows the service's latest text with
+the "Uplink: " prefix stripped once reported). Full
+`./gradlew testDebugUnitTest testReleaseUnitTest :core:test :app:lintDebug`
+passes clean: ~149 `:app` test executions (debug + release variants)
+and 31 `:core`, 0 failures, lint 0 issues. Not yet re-run against a
+physical device — that's still Stage 7's protocol
+(`notes/dev/device-testing-protocol.md`), which this stage's fixes
+should be spot-checked against again before considering the app fully
+device-validated.
+
+**Not yet resolved:** a real app launcher/shade icon (still the Stage 0
+placeholder white square — tracked in `notes/TODO.md`).

@@ -2,13 +2,18 @@ package com.uplinkstatus.app.service
 
 import android.Manifest
 import android.app.Notification
+import android.app.PendingIntent
 import android.content.Context
+import android.content.Intent
 import android.content.pm.PackageManager
 import androidx.core.app.NotificationChannelCompat
 import androidx.core.app.NotificationCompat
 import androidx.core.app.NotificationManagerCompat
 import androidx.core.content.ContextCompat
+import com.uplinkstatus.app.MainActivity
 import com.uplinkstatus.app.R
+import com.uplinkstatus.app.prefs.NetworkScope
+import com.uplinkstatus.app.state.UplinkActivityStatus
 import com.uplinkstatus.core.tracer.BarPosition
 import com.uplinkstatus.core.tracer.CycleEvent
 import com.uplinkstatus.core.tracer.CycleListener
@@ -140,16 +145,25 @@ open class UplinkNotificationController(
         buildEnabledNotification(position, lastLatencyMs)
 
     /** Builds the notification for the `DISABLED` state: the sixth icon frame (all bars
-     * dim), tracer paused. */
-    fun notificationForDisabled(): Notification = buildNotification(
-        iconRes = disabledIconRes,
-        text = context.getString(R.string.notification_text_disabled),
-    )
+     * dim), tracer paused. [scope] picks more specific text when it's actually available --
+     * "out of scope" is technically true but unhelpfully vague when what's really happening,
+     * under an SSID whitelist, is "none of your whitelisted networks are in range." */
+    fun notificationForDisabled(scope: NetworkScope): Notification {
+        val textRes = if (scope == NetworkScope.SSID_WHITELIST) {
+            R.string.notification_text_disabled_ssid_scope
+        } else {
+            R.string.notification_text_disabled
+        }
+        return buildNotification(iconRes = disabledIconRes, text = context.getString(textRes))
+    }
 
     /** Removes the notification entirely — the `HIDDEN` state. Per spec, hidden is not a
-     * seventh icon frame; it's the absence of the icon/notification altogether. */
+     * seventh icon frame; it's the absence of the icon/notification altogether. There's no
+     * notification left to carry status text at this point, so the on-screen status line
+     * (which outlives the notification) gets its own explicit update here. */
     fun hide() {
         notificationManager.cancel(NOTIFICATION_ID)
+        UplinkActivityStatus.update(context.getString(R.string.status_text_hidden))
     }
 
     private fun buildEnabledNotification(position: BarPosition, latencyMs: Long?): Notification {
@@ -193,15 +207,40 @@ open class UplinkNotificationController(
         notifyCallCount++
     }
 
-    private fun buildNotification(iconRes: Int, text: String): Notification =
-        NotificationCompat.Builder(context, CHANNEL_ID)
+    private fun buildNotification(iconRes: Int, text: String): Notification {
+        // Every notification-text decision funnels through here, so this is the one place
+        // that needs to also feed the on-screen status line -- SettingsScreen shows this
+        // exact text (see UplinkActivityStatus's doc for why it's reused rather than
+        // maintained as a second copy of the same wording).
+        UplinkActivityStatus.update(text)
+        return NotificationCompat.Builder(context, CHANNEL_ID)
             .setSmallIcon(iconRes)
             .setContentTitle(context.getString(R.string.notification_title))
             .setContentText(text)
             .setOngoing(true)
             .setPriority(NotificationCompat.PRIORITY_LOW)
             .setOnlyAlertOnce(true)
+            .setContentIntent(openAppIntent())
             .build()
+    }
+
+    /** Tapping the notification (in the shade) opens the settings screen. There's no separate
+     * way to make tapping just the tiny status-bar icon itself do this -- that always expands
+     * the shade first, on every Android app, not something this app can override -- so this
+     * is the one tap target that actually exists. */
+    private fun openAppIntent(): PendingIntent {
+        val intent = Intent(context, MainActivity::class.java).apply {
+            flags = Intent.FLAG_ACTIVITY_NEW_TASK or
+                Intent.FLAG_ACTIVITY_CLEAR_TOP or
+                Intent.FLAG_ACTIVITY_SINGLE_TOP
+        }
+        return PendingIntent.getActivity(
+            context,
+            0,
+            intent,
+            PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT,
+        )
+    }
 
     companion object {
         const val CHANNEL_ID = "uplink_status"

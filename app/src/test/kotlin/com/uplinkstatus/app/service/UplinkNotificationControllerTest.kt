@@ -5,6 +5,7 @@ import android.app.Notification
 import android.app.NotificationManager
 import android.content.Context
 import com.uplinkstatus.app.R
+import com.uplinkstatus.app.prefs.NetworkScope
 import com.uplinkstatus.core.tracer.AckSource
 import com.uplinkstatus.core.tracer.BarPosition
 import com.uplinkstatus.core.tracer.CycleEvent
@@ -202,10 +203,21 @@ class UplinkNotificationControllerTest {
 
     @Test
     fun `notificationForDisabled builds the sixth icon frame with paused text`() {
-        val disabled = controller.notificationForDisabled()
+        val disabled = controller.notificationForDisabled(NetworkScope.WIFI_ONLY)
 
         assertEquals(R.drawable.ic_scan_disabled, disabled.smallIcon.resId)
         assertEquals(context.getString(R.string.notification_text_disabled), textOf(disabled))
+    }
+
+    @Test
+    fun `notificationForDisabled under an SSID whitelist scope uses more specific text`() {
+        val disabled = controller.notificationForDisabled(NetworkScope.SSID_WHITELIST)
+
+        assertEquals(R.drawable.ic_scan_disabled, disabled.smallIcon.resId)
+        assertEquals(
+            context.getString(R.string.notification_text_disabled_ssid_scope),
+            textOf(disabled),
+        )
     }
 
     @Test

@@ -8,6 +8,7 @@ local.properties
 .kotlin/
 build/
 app/build/
+bin/
 *.iml
 .idea/
 captures/

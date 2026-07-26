@@ -8,6 +8,15 @@
     <string name="notification_text_connected_with_latency">Uplink: connected, %1$dms</string>
     <string name="notification_text_connected_unknown_latency">Uplink: connected</string>
     <string name="notification_text_disabled">Uplink: paused (network out of scope)</string>
+    <!-- Shown instead of notification_text_disabled specifically when network scope is set
+         to the SSID whitelist: "out of scope" is technically true but unhelpfully vague
+         when what's actually happening is "none of your whitelisted networks are in range." -->
+    <string name="notification_text_disabled_ssid_scope">Uplink: waiting for a whitelisted Wi-Fi network…</string>
+
+    <!-- On-screen status line only (SettingsScreen): HIDDEN never has a notification to
+         build text for, since hidden means no notification at all, but the status line still
+         needs something to say. -->
+    <string name="status_text_hidden">Uplink: hidden (master toggle is off, or out of scope with \"hide when disabled\" on)</string>
 
     <!-- Stage 5: CycleEvent.Frozen accessibility text. Per spec, a DNS problem and a
          network-down problem must not look the same to the user, even though the icon

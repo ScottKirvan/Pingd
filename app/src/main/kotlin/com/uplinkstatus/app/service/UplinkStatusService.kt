@@ -12,10 +12,12 @@ import android.os.IBinder
 import androidx.core.content.ContextCompat
 import com.uplinkstatus.app.connectivity.ConnectivityManagerNetworkSnapshotProvider
 import com.uplinkstatus.app.prefs.DataStoreUplinkPreferencesRepository
+import com.uplinkstatus.app.prefs.NetworkScope
 import com.uplinkstatus.app.prefs.UplinkPreferencesRepository
 import com.uplinkstatus.app.prefs.uplinkPreferencesDataStore
 import com.uplinkstatus.app.state.ConnectivityNetworkScopeStatus
 import com.uplinkstatus.app.state.NetworkScopeStatus
+import com.uplinkstatus.app.state.UplinkRuntimeStatus
 import com.uplinkstatus.core.probe.ProbeTarget
 import com.uplinkstatus.core.probe.Prober
 import com.uplinkstatus.core.probe.TcpConnectProber
@@ -87,6 +89,13 @@ class UplinkStatusService : Service() {
     private var cycleRunner: ProbeCycleRunner? = null
     private var observingPreferences = false
 
+    /** The most recently observed [com.uplinkstatus.app.prefs.UplinkPreferences.networkScope],
+     * kept as a field (rather than threading it through [applyVisibility]'s signature) so the
+     * many existing tests that call `applyVisibility(UplinkVisibility.ENABLED)` directly, with
+     * no scope argument, keep working -- [notificationForDisabled] still needs to know it to
+     * pick SSID-whitelist-specific text. */
+    private var currentNetworkScope: NetworkScope = NetworkScope.WIFI_ONLY
+
     override fun onCreate() {
         super.onCreate()
         if (!::notificationController.isInitialized) {
@@ -127,7 +136,7 @@ class UplinkStatusService : Service() {
         // otherwise (ENABLED/DISABLED).
         startForeground(
             UplinkNotificationController.NOTIFICATION_ID,
-            notificationController.notificationForDisabled(),
+            notificationController.notificationForDisabled(currentNetworkScope),
         )
         startObservingPreferencesIfNeeded()
         return START_STICKY
@@ -166,6 +175,7 @@ class UplinkStatusService : Service() {
             ) { preferences, networkInScope -> preferences to networkInScope }
                 .collect { (preferences, networkInScope) ->
                     probeTarget = ProbeTarget(host = preferences.pingTargetHost)
+                    currentNetworkScope = preferences.networkScope
                     applyVisibility(
                         VisibilityDecider.decide(
                             masterToggleEnabled = preferences.masterToggleEnabled,
@@ -184,6 +194,12 @@ class UplinkStatusService : Service() {
      * `stopForeground`/`stopSelf`) exactly once here, and nowhere else does this class post
      * a notification — every update in between comes from [UplinkNotificationController]
      * reacting to real cycle events.
+     *
+     * Reports to [UplinkRuntimeStatus] once the branch below has actually finished running —
+     * not when a preference changed, not when this function was merely called, but once the
+     * real `startForeground`/`stopCycle`/`stopSelf` work for this decision has completed. A
+     * settings-screen toggle can be told to un-disable itself only once it sees this, which
+     * is what makes "credibly applied" a real, observed fact instead of an assumed delay.
      */
     internal fun applyVisibility(visibility: UplinkVisibility) {
         when (visibility) {
@@ -202,7 +218,7 @@ class UplinkStatusService : Service() {
                 stopCycle()
                 startForeground(
                     UplinkNotificationController.NOTIFICATION_ID,
-                    notificationController.notificationForDisabled(),
+                    notificationController.notificationForDisabled(currentNetworkScope),
                 )
             }
 
@@ -220,6 +236,7 @@ class UplinkStatusService : Service() {
                 stopSelf()
             }
         }
+        UplinkRuntimeStatus.report(visibility)
     }
 
     private fun startCycle() {
