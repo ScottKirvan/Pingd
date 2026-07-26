@@ -76,6 +76,16 @@ npm run docs:preview   # preview the built output
 The `docs.yml` workflow auto-deploys this site to Pages on pushes to
 `main` that touch `docs/**`.
 
+## Git workflow
+
+- `dev` is the ongoing integration branch — Claude owns it and commits/pushes
+  directly to it.
+- `main` is never touched (no commits, no merges) without explicit
+  instruction from the user for that specific merge.
+- Claude may launch agents to work on other branches, but always reviews
+  their code, confirms tests pass, and strips any attribution lines from
+  commit messages and PR bodies before anything lands on `dev`.
+
 ## Commit / versioning conventions
 
 Commits follow [Conventional Commits](https://www.conventionalcommits.org/)
