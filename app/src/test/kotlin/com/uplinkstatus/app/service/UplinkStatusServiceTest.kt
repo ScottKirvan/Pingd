@@ -6,6 +6,7 @@ import com.uplinkstatus.app.R
 import com.uplinkstatus.app.prefs.FakeUplinkPreferencesRepository
 import com.uplinkstatus.core.probe.ProbeResult
 import com.uplinkstatus.core.probe.ProbeTarget
+import com.uplinkstatus.core.probe.Prober
 import com.uplinkstatus.core.tracer.AckSource
 import com.uplinkstatus.core.tracer.BarPosition
 import com.uplinkstatus.core.tracer.CycleEvent
@@ -27,6 +28,11 @@ import org.robolectric.RuntimeEnvironment
 import org.robolectric.Shadows.shadowOf
 import org.robolectric.android.controller.ServiceController
 import org.robolectric.annotation.Config
+import java.util.concurrent.CountDownLatch
+import java.util.concurrent.Executors
+import java.util.concurrent.Semaphore
+import java.util.concurrent.TimeUnit
+import java.util.concurrent.atomic.AtomicInteger
 
 /**
  * Verifies [UplinkStatusService]'s reaction to visibility transitions (the spec's
@@ -324,6 +330,66 @@ class UplinkStatusServiceTest {
             RuntimeEnvironment.getApplication().getString(R.string.notification_text_connected_with_latency, 1),
             shadowOf(posted).contentText,
         )
+    }
+
+    // --- Outage-driven retry loop vs. a single-threaded worker queue ----------------------
+
+    /**
+     * Regression test for the "an outage can permanently starve the cycle's own stop()"
+     * defect.
+     *
+     * Unlike every other test in this class, this one does *not* run worker work
+     * synchronously on the test thread: it hands [UplinkStatusService.runOnWorker] a real
+     * single-threaded executor, which is the essential property of the production
+     * `HandlerThread`/`Handler` pairing (one queued unit of work runs to completion before
+     * the next is dispatched). Without that, the failure is structurally unreachable — a
+     * synchronous `runOnWorker` cannot express two pieces of work contending for one thread.
+     *
+     * The prober here models a continuous outage the way production actually behaves: each
+     * probe blocks (as a real TCP connect does) and then fails, so `runProbeAttempts()`
+     * loops straight back around with no gap and never yields the worker thread. If
+     * `stopCycle()` posts `runner.stop()` onto that same queue, it sits behind a loop that
+     * will not return until the network recovers, and the cycle keeps probing and keeps
+     * posting notifications after the service has torn itself down.
+     */
+    @Test
+    fun `HIDDEN during a continuous outage stops the cycle instead of queueing stop behind it`() {
+        val worker = Executors.newSingleThreadExecutor()
+        try {
+            service.runOnWorker = { worker.execute(it) }
+            val probeEntered = CountDownLatch(1)
+            val releaseProbe = Semaphore(0)
+            val probeCount = AtomicInteger()
+            service.prober = Prober {
+                probeCount.incrementAndGet()
+                probeEntered.countDown()
+                // Blocks like a real connect() attempt does, until the test decides this
+                // attempt's "timeout" has elapsed.
+                releaseProbe.acquire()
+                ProbeResult.Failure
+            }
+
+            service.applyVisibility(UplinkVisibility.ENABLED)
+            assertTrue("the cycle never reached its first probe", probeEntered.await(5, TimeUnit.SECONDS))
+
+            // The service leaves ENABLED while the outage is still in progress -- the probe
+            // is in flight and the worker thread is inside the retry loop right now.
+            service.applyVisibility(UplinkVisibility.HIDDEN)
+            releaseProbe.release() // the in-flight probe returns Failure
+
+            // With the cycle genuinely stopped, the retry loop returns and the worker thread
+            // becomes available again, so this marker task runs. If stop() had been queued
+            // behind the loop instead, the loop would have gone straight into probe #2 (for
+            // which no permit is released, standing in for an outage that simply continues)
+            // and this would time out -- which is precisely the starvation being fixed.
+            worker.submit { }.get(5, TimeUnit.SECONDS)
+
+            assertEquals(1, probeCount.get())
+            // ...and nothing resurrected the notification the HIDDEN transition removed.
+            assertNull(shadowOf(notificationManager).getNotification(UplinkNotificationController.NOTIFICATION_ID))
+        } finally {
+            worker.shutdownNow()
+        }
     }
 
     @Test

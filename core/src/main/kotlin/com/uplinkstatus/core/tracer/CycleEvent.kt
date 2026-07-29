@@ -46,7 +46,17 @@ sealed interface CycleEvent {
     data class Frozen(val position: BarPosition, val reason: FreezeReason) : CycleEvent
 }
 
-/** Receives [CycleEvent]s from a running [ProbeCycleRunner]. */
+/**
+ * Receives [CycleEvent]s from a running [ProbeCycleRunner].
+ *
+ * [onEvent] is called while the runner holds its internal lifecycle lock — that's what
+ * guarantees no event is ever delivered after [ProbeCycleRunner.stop] returns, including one
+ * produced by a probe that was already in flight. Implementations must therefore return
+ * promptly (this is the "post a notification" step, not a place for slow or blocking work),
+ * since a concurrent [ProbeCycleRunner.stop] waits on that lock for the duration of the
+ * callback, and must not block on a lock that another thread could be holding while calling
+ * [ProbeCycleRunner.stop].
+ */
 fun interface CycleListener {
     fun onEvent(event: CycleEvent)
 }
