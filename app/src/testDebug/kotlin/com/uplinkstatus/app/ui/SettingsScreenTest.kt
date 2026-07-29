@@ -2,6 +2,7 @@ package com.uplinkstatus.app.ui
 
 import android.Manifest
 import androidx.compose.material3.MaterialTheme
+import androidx.datastore.preferences.core.PreferenceDataStoreFactory
 import androidx.compose.ui.test.assertCountEquals
 import androidx.compose.ui.test.assertIsEnabled
 import androidx.compose.ui.test.assertIsNotEnabled
@@ -12,24 +13,34 @@ import androidx.compose.ui.test.onNodeWithText
 import androidx.compose.ui.test.performClick
 import androidx.compose.ui.test.performScrollTo
 import androidx.compose.ui.test.performTextInput
+import com.uplinkstatus.app.prefs.DataStoreUplinkPreferencesRepository
 import com.uplinkstatus.app.prefs.FakeUplinkPreferencesRepository
 import com.uplinkstatus.app.prefs.NetworkScope
 import com.uplinkstatus.app.prefs.UplinkPreferences
+import com.uplinkstatus.app.prefs.UplinkPreferencesRepository
 import com.uplinkstatus.app.service.UplinkStatusService
 import com.uplinkstatus.app.state.UplinkActivityStatus
 import com.uplinkstatus.app.state.UplinkRuntimeStatus
 import com.uplinkstatus.core.probe.ProbeTarget
 import com.uplinkstatus.core.visibility.UplinkVisibility
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.ExperimentalCoroutinesApi
+import kotlinx.coroutines.channels.Channel
+import kotlinx.coroutines.flow.first
+import kotlinx.coroutines.runBlocking
+import kotlinx.coroutines.test.UnconfinedTestDispatcher
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertTrue
 import org.junit.Before
 import org.junit.Rule
 import org.junit.Test
+import org.junit.rules.TemporaryFolder
 import org.junit.runner.RunWith
 import org.robolectric.RobolectricTestRunner
 import org.robolectric.RuntimeEnvironment
 import org.robolectric.Shadows.shadowOf
 import org.robolectric.annotation.Config
+import java.io.File
 
 /**
  * Compose UI tests for [SettingsScreen], run on the JVM via Robolectric (the same approach
@@ -47,12 +58,18 @@ import org.robolectric.annotation.Config
  * throwing, which is exactly the kind of failure that looks like "the click didn't work"
  * when it's really "the click landed nowhere."
  */
+@OptIn(ExperimentalCoroutinesApi::class)
 @RunWith(RobolectricTestRunner::class)
 @Config(sdk = [34])
 class SettingsScreenTest {
 
     @get:Rule
     val composeTestRule = createComposeRule()
+
+    /** Only used by the master-toggle restart-ordering test below, which needs a real
+     * `DataStore<Preferences>` file rather than an in-memory fake -- see its own doc. */
+    @get:Rule
+    val temporaryFolder = TemporaryFolder()
 
     private lateinit var repository: FakeUplinkPreferencesRepository
 
@@ -145,6 +162,111 @@ class SettingsScreenTest {
                 "re-enabling the master toggle, but none was recorded.",
             sawServiceRestart,
         )
+    }
+
+    /**
+     * Regression test for the "re-enabling the master toggle races the service restart against
+     * the DataStore write it depends on" defect.
+     *
+     * Unlike the test above, this one does not use [FakeUplinkPreferencesRepository]: its
+     * writes are synchronous in-memory assignments, which removes the exact asynchrony the bug
+     * lives in. Here the screen talks to a real [DataStoreUplinkPreferencesRepository] over a
+     * real `DataStore<Preferences>` file, wrapped so the master-toggle write only completes
+     * when this test says so. That models the losing ordering deterministically: on a device
+     * it's a coroutine-dispatched DataStore write racing a Binder round-trip, with no ordering
+     * guarantee either way; here the write is simply held until after the point where the
+     * unfixed code would already have issued the restart.
+     *
+     * The property under test is the one that closes the race: `startForegroundService()` must
+     * not be issued while the value the fresh service instance is about to read is still the
+     * stale one. If it is, that instance derives HIDDEN, calls `stopSelf()` again, tears down
+     * the collector it just subscribed, and the icon silently never comes back when the real
+     * write lands.
+     */
+    @Test
+    fun `re-enabling the master toggle restarts the service only after the new value is persisted`() {
+        val dataStore = PreferenceDataStoreFactory.create(
+            scope = CoroutineScope(UnconfinedTestDispatcher()),
+            produceFile = { File(temporaryFolder.root, "settings.preferences_pb") },
+        )
+        val gatedRepository = GatedMasterToggleRepository(DataStoreUplinkPreferencesRepository(dataStore))
+        composeTestRule.setContent {
+            MaterialTheme {
+                SettingsScreen(repository = gatedRepository)
+            }
+        }
+
+        // Turn it off first -- on a device this is the transition that drives HIDDEN and
+        // stops the service outright, which is what makes turning it back on a genuine
+        // start-from-nothing rather than a nudge to an already-running instance.
+        composeTestRule.onNodeWithTag(TAG_MASTER_TOGGLE).performScrollTo().performClick()
+        gatedRepository.releaseOneWrite()
+        composeTestRule.waitUntil { persistedMasterToggle(gatedRepository) == false }
+        confirmServiceCaughtUp()
+        drainStartedServices() // discard everything the first toggle produced
+
+        // Turn it back on, with the write deliberately still in flight.
+        composeTestRule.onNodeWithTag(TAG_MASTER_TOGGLE).performScrollTo().performClick()
+        composeTestRule.waitForIdle()
+
+        assertEquals(
+            "startForegroundService() must not be issued while the master-toggle write is " +
+                "still in flight -- a fresh service instance reads preferences at startup, " +
+                "and a stale read makes it derive HIDDEN and stopSelf() again, with nothing " +
+                "left listening when the real write finally lands.",
+            emptyList<String>(),
+            drainStartedServices(),
+        )
+
+        gatedRepository.releaseOneWrite()
+
+        val restarts = mutableListOf<String>()
+        composeTestRule.waitUntil(timeoutMillis = 5_000) {
+            restarts += drainStartedServices()
+            restarts.contains(UplinkStatusService::class.java.name)
+        }
+        // ...and by the time the restart went out, the value it exists to make the service
+        // notice was already committed to disk.
+        assertEquals(true, persistedMasterToggle(gatedRepository))
+    }
+
+    private fun persistedMasterToggle(repository: UplinkPreferencesRepository): Boolean =
+        runBlocking { repository.preferencesFlow.first().masterToggleEnabled }
+
+    /** Drains (and therefore consumes) every `startService`/`startForegroundService` intent
+     * recorded since the last call, as class names. */
+    private fun drainStartedServices(): List<String> {
+        val application = RuntimeEnvironment.getApplication()
+        val started = mutableListOf<String>()
+        var intent = shadowOf(application).nextStartedService
+        while (intent != null) {
+            intent.component?.className?.let(started::add)
+            intent = shadowOf(application).nextStartedService
+        }
+        return started
+    }
+
+    /**
+     * A real repository whose `setMasterToggleEnabled` only completes once the test releases
+     * it -- every other operation (including [preferencesFlow], which stays a real
+     * `DataStore<Preferences>` read) is delegated untouched. Gating just the one write keeps
+     * the test aimed at the ordering between *that* write and the service restart, without
+     * turning the rest of the screen into a fake.
+     */
+    private class GatedMasterToggleRepository(
+        private val delegate: UplinkPreferencesRepository,
+    ) : UplinkPreferencesRepository by delegate {
+
+        private val permits = Channel<Unit>(Channel.UNLIMITED)
+
+        fun releaseOneWrite() {
+            permits.trySend(Unit)
+        }
+
+        override suspend fun setMasterToggleEnabled(enabled: Boolean) {
+            permits.receive()
+            delegate.setMasterToggleEnabled(enabled)
+        }
     }
 
     @Test
