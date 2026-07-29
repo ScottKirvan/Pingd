@@ -5,10 +5,14 @@ import com.uplinkstatus.core.fakes.FakeTracerScheduler
 import com.uplinkstatus.core.fakes.RecordingCycleListener
 import com.uplinkstatus.core.probe.ProbeResult
 import com.uplinkstatus.core.probe.ProbeTarget
+import com.uplinkstatus.core.probe.Prober
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
 import org.junit.Test
+import java.util.concurrent.CountDownLatch
+import java.util.concurrent.TimeUnit
+import java.util.concurrent.atomic.AtomicInteger
 
 class ProbeCycleRunnerTest {
 
@@ -219,6 +223,45 @@ class ProbeCycleRunnerTest {
         cycleRunner.stop()
         assertFalse(scheduler.hasPending())
         assertEquals(1, scheduler.cancelledCount)
+        assertFalse(cycleRunner.isRunning)
+    }
+
+    @Test
+    fun `stop from another thread ends an all-failing retry loop without emitting anything further`() {
+        // Regression test for the outage-starves-stop() defect: with a prober that never
+        // succeeds, runProbeAttempts() retries back to back with no gap (per spec), so the
+        // thread running start() is unavailable to run any work handed to it -- stop() has to
+        // work from a *different* thread, mid-probe, or the cycle can never be ended for as
+        // long as the outage lasts. This models exactly that: the probe blocks until the test
+        // releases it, and stop() is called from the test thread while it's blocked.
+        val probeEntered = CountDownLatch(1)
+        val releaseProbe = CountDownLatch(1)
+        val probeCount = AtomicInteger()
+        val prober = object : Prober {
+            override fun probe(target: ProbeTarget): ProbeResult {
+                probeCount.incrementAndGet()
+                probeEntered.countDown()
+                releaseProbe.await()
+                return ProbeResult.Failure
+            }
+        }
+        val scheduler = FakeTracerScheduler()
+        val listener = RecordingCycleListener()
+        val cycleRunner = ProbeCycleRunner(prober, target, scheduler, listener)
+
+        val cycleThread = Thread { cycleRunner.start() }.apply { start() }
+        assertTrue("the cycle never reached its first probe", probeEntered.await(5, TimeUnit.SECONDS))
+
+        cycleRunner.stop()
+        releaseProbe.countDown() // the in-flight probe now returns Failure
+        cycleThread.join(5_000)
+
+        assertFalse("the cycle thread never exited after stop()", cycleThread.isAlive)
+        // The result of the probe that was already in flight when stop() landed must be
+        // discarded outright: emitting it would post a notification into a listener whose
+        // owner (the service) has already torn down -- the user-visible half of this bug.
+        assertEquals(emptyList<CycleEvent>(), listener.events)
+        assertEquals(1, probeCount.get())
         assertFalse(cycleRunner.isRunning)
     }
 

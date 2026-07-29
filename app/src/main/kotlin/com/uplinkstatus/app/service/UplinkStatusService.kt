@@ -86,6 +86,12 @@ class UplinkStatusService : Service() {
     private val workerHandler: Handler by lazy { Handler(workerThread.looper) }
 
     internal lateinit var notificationController: UplinkNotificationController
+
+    /** `@Volatile` because [stopCycle] now runs on whichever thread decided to leave ENABLED
+     * (the preferences collector's `Dispatchers.Default` thread, or the main thread via
+     * [onDestroy]) rather than being posted to the worker — the reference it reads has to be
+     * the one [startCycle] actually published, not a stale cached copy. */
+    @Volatile
     private var cycleRunner: ProbeCycleRunner? = null
     private var observingPreferences = false
 
@@ -250,10 +256,27 @@ class UplinkStatusService : Service() {
         runOnWorker(Runnable { runner.start() })
     }
 
+    /**
+     * Stops the cycle **on the calling thread**, deliberately *not* via [runOnWorker].
+     *
+     * [ProbeCycleRunner.start] blocks its thread for as long as probes keep failing (that's
+     * what the spec's "retry immediately, no back-off" means with a blocking prober), and
+     * [runOnWorker] posts to a single [HandlerThread] whose [Handler] runs one posted
+     * `Runnable` to completion before dispatching the next. Posting `stop()` there during a
+     * sustained outage would queue it *behind* the very loop it has to interrupt: it could
+     * not run until a probe finally succeeded, so `running` never flipped, the stale cycle
+     * kept probing and kept calling its listener — resurrecting a notification the user had
+     * already turned off — and the worker thread outlived the service that owned it.
+     *
+     * [ProbeCycleRunner.stop] is explicitly documented as safe to call from any thread and
+     * as never blocking on the thread running the cycle, precisely so this call site can
+     * bypass the worker queue. The cycle then ends within one in-flight probe's own timeout
+     * at worst, regardless of how long the outage lasts.
+     */
     private fun stopCycle() {
         val runner = cycleRunner ?: return
         cycleRunner = null
-        runOnWorker(Runnable { runner.stop() })
+        runner.stop()
     }
 
     companion object {
