@@ -125,9 +125,37 @@ fun SettingsScreen(
     val runtimeReport by UplinkRuntimeStatus.reports.collectAsState()
     var pendingBaselineSequence by remember { mutableStateOf<Int?>(null) }
     val isPending = pendingBaselineSequence?.let { runtimeReport.sequence <= it } ?: false
-    fun markChangePending() {
+
+    /**
+     * The single path every preference edit on this screen goes through: lock the panel
+     * immediately, persist the new value, and only *then* nudge the service.
+     *
+     * The ordering is the point. [ensureServiceRunning] used to run synchronously, before the
+     * coroutine that persists the value had even been launched. For a control edited while the
+     * service is already running that's harmless -- the running instance's collector sees the
+     * write whenever it lands. But the master toggle is actionable while the service is *not*
+     * running at all (turning it off drives HIDDEN, which calls `stopSelf()`), and turning it
+     * back on is exactly the case where [ensureServiceRunning] has to start a brand-new
+     * instance whose first `preferencesFlow` read takes whatever is on disk at that moment.
+     * A Binder round-trip and a coroutine-dispatched DataStore write have no ordering
+     * guarantee relative to each other, so that read could still see the stale "off" -- the
+     * new instance would derive HIDDEN, call `stopSelf()` again, tear down the collector it
+     * had just subscribed, and the real write would land moments later with nothing listening.
+     * The icon silently never came back.
+     *
+     * Persisting first removes the race outright rather than narrowing it: the restart is only
+     * ever issued once the value the service is about to read is already committed, so there
+     * is no interleaving in which the fresh instance can read a stale value. Every control
+     * routes through here, not just the master toggle -- any preference write can be the one
+     * that has to bring a stopped service back (e.g. widening the network scope, or adding the
+     * SSID the device is currently on, while HIDDEN is in effect from being out of scope).
+     */
+    fun applyChange(persist: suspend () -> Unit) {
         pendingBaselineSequence = runtimeReport.sequence
-        ensureServiceRunning(context)
+        coroutineScope.launch {
+            persist()
+            ensureServiceRunning(context)
+        }
     }
 
     val controlsEnabled = preferences.masterToggleEnabled && !isPending
@@ -189,8 +217,7 @@ fun SettingsScreen(
                 enabled = !isPending,
                 tag = TAG_MASTER_TOGGLE,
                 onCheckedChange = { enabled ->
-                    markChangePending()
-                    coroutineScope.launch { repository.setMasterToggleEnabled(enabled) }
+                    applyChange { repository.setMasterToggleEnabled(enabled) }
                 },
             )
 
@@ -231,8 +258,7 @@ fun SettingsScreen(
                                     ),
                                 )
                             }
-                            markChangePending()
-                            coroutineScope.launch { repository.setNetworkScope(scope) }
+                            applyChange { repository.setNetworkScope(scope) }
                         },
                     )
 
@@ -245,16 +271,14 @@ fun SettingsScreen(
                             onAdd = {
                                 val trimmed = newSsidText.trim()
                                 if (trimmed.isNotEmpty() && trimmed !in preferences.ssidWhitelist) {
-                                    markChangePending()
-                                    coroutineScope.launch {
+                                    applyChange {
                                         repository.setSsidWhitelist(preferences.ssidWhitelist + trimmed)
                                     }
                                     newSsidText = ""
                                 }
                             },
                             onRemove = { ssid ->
-                                markChangePending()
-                                coroutineScope.launch {
+                                applyChange {
                                     repository.setSsidWhitelist(preferences.ssidWhitelist - ssid)
                                 }
                             },
@@ -269,8 +293,7 @@ fun SettingsScreen(
                     enabled = controlsEnabled,
                     tag = TAG_HIDE_WHEN_DISABLED_TOGGLE,
                     onCheckedChange = { hide ->
-                        markChangePending()
-                        coroutineScope.launch { repository.setHideWhenDisabled(hide) }
+                        applyChange { repository.setHideWhenDisabled(hide) }
                     },
                 )
 
@@ -285,8 +308,7 @@ fun SettingsScreen(
                         enabled = controlsEnabled,
                         onSelectPreset = { host ->
                             showCustomHostInput = false
-                            markChangePending()
-                            coroutineScope.launch { repository.setPingTargetHost(host) }
+                            applyChange { repository.setPingTargetHost(host) }
                         },
                         onSelectCustom = { showCustomHostInput = true },
                     )
@@ -319,8 +341,7 @@ fun SettingsScreen(
                                     val trimmed = customHostText.trim()
                                     if (isValidHostname(trimmed)) {
                                         customHostError = false
-                                        markChangePending()
-                                        coroutineScope.launch { repository.setPingTargetHost(trimmed) }
+                                        applyChange { repository.setPingTargetHost(trimmed) }
                                     } else {
                                         customHostError = true
                                     }
@@ -554,7 +575,7 @@ private fun isPresetHost(host: String): Boolean =
     host == ProbeTarget.DEFAULT_HOST || host == ProbeTarget.ALTERNATE_HOST
 
 /**
- * Called from every preference-write callback on this screen, not just the master toggle.
+ * Called after every preference write on this screen, not just the master toggle's.
  * [UplinkStatusService] tears itself down completely (`stopSelf()`) on any transition to
  * `HIDDEN` -- once that's happened, writing a new preference value alone does nothing, since
  * there's no running service left to observe the change; only [Context.startForegroundService]
@@ -563,6 +584,10 @@ private fun isPresetHost(host: String): Boolean =
  * unconditionally (including from a change that will resolve to HIDDEN again) --
  * `onStartCommand`'s own preferences/connectivity observation is idempotent and figures out
  * the real answer regardless of whether this call was actually necessary.
+ *
+ * Must only be called once the write it is meant to make the service notice has actually
+ * completed -- see `applyChange` above for why calling it any earlier is a race, not just an
+ * ordering preference.
  */
 private fun ensureServiceRunning(context: Context) {
     ContextCompat.startForegroundService(context, UplinkStatusService.createStartIntent(context))
