@@ -5,9 +5,16 @@ import android.net.Network
 import android.net.NetworkCapabilities
 import android.net.wifi.WifiInfo
 import android.net.wifi.WifiManager
+import android.util.Log
 import kotlinx.coroutines.channels.awaitClose
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.callbackFlow
+
+/** Diagnostic only -- see the logging in [ConnectivityManagerNetworkSnapshotProvider] below.
+ * Not read by any production logic; exists so `adb logcat -s UplinkConnectivity` can show
+ * exactly what the platform reports for the *default* network on a real device, since that's
+ * the one thing a JVM/Robolectric test cannot observe. */
+private const val TAG = "UplinkConnectivity"
 
 /**
  * The real, [android.net.ConnectivityManager]-backed [NetworkSnapshotProvider].
@@ -62,18 +69,29 @@ class ConnectivityManagerNetworkSnapshotProvider(
         // onCapabilitiesChanged for the current default network moments later, so anything
         // that changes in the gap is corrected by that callback. Doing it the other way round
         // would risk this synchronous read overwriting a newer callback value with an older one.
-        trySend(currentDefaultNetworkSnapshot())
+        val seed = currentDefaultNetworkSnapshot()
+        Log.d(TAG, "seed (synchronous, pre-registration): ${seed.describeForLog()}")
+        trySend(seed)
 
         val callback = object : ConnectivityManager.NetworkCallback() {
             override fun onCapabilitiesChanged(network: Network, capabilities: NetworkCapabilities) {
-                trySend(capabilities.toSnapshot())
+                val snapshot = capabilities.toSnapshot()
+                // This is the ground truth for what the OS considers the *default* network --
+                // i.e. the one this app's WIFI_ONLY/SSID_WHITELIST/CELLULAR_ONLY/ANY_CONNECTION
+                // matching is actually evaluated against. If a device is genuinely associated
+                // with a WiFi network that isn't showing up here, this line is how to prove it:
+                // the raw NetworkCapabilities the platform handed back, unfiltered.
+                Log.d(TAG, "onCapabilitiesChanged: ${snapshot.describeForLog()}")
+                trySend(snapshot)
             }
 
             override fun onLost(network: Network) {
+                Log.d(TAG, "onLost: default network gone")
                 trySend(NetworkSnapshot.NONE)
             }
 
             override fun onUnavailable() {
+                Log.d(TAG, "onUnavailable: no default network available")
                 trySend(NetworkSnapshot.NONE)
             }
         }
@@ -134,3 +152,13 @@ private fun NetworkCapabilities.toSnapshot(): NetworkSnapshot {
         ssid = ssid,
     )
 }
+
+/** Diagnostic only. `null` here means "the platform genuinely didn't answer" -- see
+ * [ConnectivityManagerNetworkSnapshotProvider.currentDefaultNetworkSnapshot]'s doc -- which is
+ * itself a fact worth being able to see in logcat, not just infer from its absence. */
+private fun NetworkSnapshot?.describeForLog(): String =
+    if (this == null) {
+        "null (platform did not answer)"
+    } else {
+        "wifi=$hasWifiTransport cellular=$hasCellularTransport validated=$isValidated ssid=${ssid ?: "none"}"
+    }
