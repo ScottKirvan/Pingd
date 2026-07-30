@@ -62,8 +62,8 @@ class ConnectivityNetworkScopeStatus(
         // A null snapshot is "connectivity hasn't reported yet," which propagates as a null
         // scope answer rather than being matched against as though it were a real network.
         // NetworkScopeMatcher has no opinion to offer about a network nobody has described:
-        // handing it NetworkSnapshot.NONE here (the shape of the original bug) would make it
-        // dutifully -- and wrongly -- return false for every scope mode.
+        // handing it ConnectivitySnapshot.NONE here (the shape of the original bug) would make
+        // it dutifully -- and wrongly -- return false for every scope mode.
         if (snapshot == null) {
             null
         } else {

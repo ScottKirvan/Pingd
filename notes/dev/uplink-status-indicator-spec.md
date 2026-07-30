@@ -154,10 +154,10 @@ flowchart TD
   distinct from "reported, and we are not on a network in scope." Only
   the latter is grounds for `DISABLED`/`HIDDEN`. The connectivity layer
   keeps this window as close to zero as possible by reading the
-  platform's *current* default network synchronously when it subscribes,
-  rather than waiting on the first `NetworkCallback` to arrive — so the
-  first decision is correct even if that callback is slow or never
-  comes. Deriving a real, user-visible verdict from the mere absence of
+  platform's *current* networks — the whole set, and the default route —
+  synchronously when it subscribes, rather than waiting on the first
+  `NetworkCallback` to arrive, so the first decision is correct even if
+  those callbacks are slow or never come. Deriving a real, user-visible verdict from the mere absence of
   a report would otherwise leave a fresh install sitting on the paused
   tracer until the master toggle was cycled off and on.
 
@@ -207,6 +207,31 @@ not because anything answered.
   - Cellular only
   - Specific SSID(s) — a whitelist of one or more networks; the icon
     is only enabled while connected to a listed network.
+
+  A phone normally holds several networks at once (associated with WiFi
+  while cellular data is also up), and the OS picks exactly one of them
+  as the default route for general traffic. The three modes that name a
+  transport — WiFi only, Cellular only, Specific SSID(s) — are matched
+  against *every* connected network, so "Cellular only" is in scope
+  whenever cellular is connected, whether or not it is the network
+  traffic is currently routed over; "WiFi only" likewise. Both can
+  legitimately be in scope at the same moment.
+
+  *Any connection* is the exception: it asks whether the device's
+  internet works rather than whether a transport is present, so it is
+  matched against the default route alone and is the only mode that
+  requires the OS to have validated that network. The probe opens an
+  unbound socket and therefore measures the default route, so this keeps
+  the scope decision aligned with what the probe reports.
+
+  A network counts as connected for all four modes when it declares
+  itself an internet-carrying WiFi or cellular network. The
+  special-purpose cellular connections a phone holds open regardless of
+  the mobile-data setting (IMS/VoLTE, MMS, SUPL) don't declare that, and
+  don't count. Validation is deliberately *not* required for the three
+  transport modes: a connected-but-broken network stays in scope so the
+  tracer's freeze-on-failure behavior can report it, rather than being
+  hidden as out of scope.
 - **Ping target host** — default `one.one.one.one` (Cloudflare), with
   `dns.google` (Google) offered as an alternate quick-pick; user can
   override with any custom host.
@@ -246,7 +271,15 @@ not because anything answered.
   requested explicitly; without it the icon can't be shown at all, so
   this needs its own request/rationale flow, not just a manifest entry.
 - Network state monitored via `ConnectivityManager.NetworkCallback`;
-  transitions feed directly into the state logic above.
+  transitions feed directly into the state logic above. Two callbacks
+  are registered: one on a `NetworkRequest` matching every
+  internet-carrying WiFi/cellular network, which maintains the set of
+  connected networks the transport and SSID modes are matched against,
+  and one default-network callback, which tracks the single route
+  *Any connection* is matched against. Neither is derivable from the
+  other — the default route can be a transport the request filters out
+  entirely (ethernet, or a VPN layered over the real uplink) — and
+  losing one network never discards what is known about the others.
 - Reading the current SSID for the network-scope whitelist requires
   `ACCESS_FINE_LOCATION` (Android 10+ OS restriction — no way around
   it). Request this permission only when the user actually turns on
