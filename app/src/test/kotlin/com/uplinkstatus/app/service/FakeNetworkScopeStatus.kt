@@ -14,14 +14,17 @@ import kotlinx.coroutines.flow.asStateFlow
  * between runs.
  */
 internal class FakeNetworkScopeStatus(
-    initial: Boolean = true,
+    initial: Boolean? = true,
 ) : NetworkScopeStatus {
 
     private val state = MutableStateFlow(initial)
 
-    override val inScopeFlow: Flow<Boolean> = state.asStateFlow()
+    override val inScopeFlow: Flow<Boolean?> = state.asStateFlow()
 
-    var inScope: Boolean
+    /** Nullable to let a test hold the service in the real "connectivity hasn't reported yet"
+     * state that a fresh subscription starts in -- `null` is not "out of scope," and the
+     * service must be able to tell the difference. */
+    var inScope: Boolean?
         get() = state.value
         set(value) {
             state.value = value

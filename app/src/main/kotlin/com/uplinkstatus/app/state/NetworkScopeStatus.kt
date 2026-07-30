@@ -24,8 +24,15 @@ import kotlinx.coroutines.flow.distinctUntilChanged
 interface NetworkScopeStatus {
     /** Emits a new "is the current network in scope" value whenever either live connectivity
      * or the persisted network-scope preference changes — never requiring the other to change
-     * in lockstep for the result to update. */
-    val inScopeFlow: Flow<Boolean>
+     * in lockstep for the result to update.
+     *
+     * `null` means **"not known yet"** — the connectivity layer has not reported anything to
+     * match the preference against — and is deliberately distinct from `false` ("matched, and
+     * the current network is not in scope"). Consumers must not collapse the two; see
+     * [com.uplinkstatus.core.visibility.VisibilityDecider.decideOrNull] and
+     * [com.uplinkstatus.app.connectivity.NetworkSnapshotProvider.snapshotFlow] for the bug
+     * that conflating them caused. */
+    val inScopeFlow: Flow<Boolean?>
 }
 
 /**
@@ -48,15 +55,24 @@ class ConnectivityNetworkScopeStatus(
     private val hasLocationPermission: () -> Boolean,
 ) : NetworkScopeStatus {
 
-    override val inScopeFlow: Flow<Boolean> = combine(
+    override val inScopeFlow: Flow<Boolean?> = combine(
         preferencesRepository.preferencesFlow,
         snapshotProvider.snapshotFlow,
     ) { preferences, snapshot ->
-        NetworkScopeMatcher.isInScope(
-            scope = preferences.networkScope,
-            ssidWhitelist = preferences.ssidWhitelist,
-            hasLocationPermission = hasLocationPermission(),
-            snapshot = snapshot,
-        )
+        // A null snapshot is "connectivity hasn't reported yet," which propagates as a null
+        // scope answer rather than being matched against as though it were a real network.
+        // NetworkScopeMatcher has no opinion to offer about a network nobody has described:
+        // handing it NetworkSnapshot.NONE here (the shape of the original bug) would make it
+        // dutifully -- and wrongly -- return false for every scope mode.
+        if (snapshot == null) {
+            null
+        } else {
+            NetworkScopeMatcher.isInScope(
+                scope = preferences.networkScope,
+                ssidWhitelist = preferences.ssidWhitelist,
+                hasLocationPermission = hasLocationPermission(),
+                snapshot = snapshot,
+            )
+        }
     }.distinctUntilChanged()
 }

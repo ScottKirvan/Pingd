@@ -1,6 +1,7 @@
 package com.uplinkstatus.core.visibility
 
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertNull
 import org.junit.Test
 
 class VisibilityDeciderTest {
@@ -81,6 +82,63 @@ class VisibilityDeciderTest {
                 expectedVisibility,
                 VisibilityDecider.decide(masterToggleEnabled, networkInScope, hideWhenDisabled),
             )
+        }
+    }
+
+    // --- decideOrNull: "not known yet" is not an input value, it is the absence of one ------
+
+    @Test
+    fun `an unknown network yields no decision at all, rather than falling through to DISABLED`() {
+        assertNull(
+            VisibilityDecider.decideOrNull(
+                masterToggleEnabled = true,
+                networkInScope = null,
+                hideWhenDisabled = false,
+            ),
+        )
+    }
+
+    @Test
+    fun `an unknown network yields no decision even when hide-when-disabled would make it HIDDEN`() {
+        // The more damaging half of the same mistake: with hide-when-disabled on, treating
+        // "nothing reported yet" as "out of scope" doesn't just dim the icon, it resolves to
+        // HIDDEN -- which the service implements by stopping itself outright.
+        assertNull(
+            VisibilityDecider.decideOrNull(
+                masterToggleEnabled = true,
+                networkInScope = null,
+                hideWhenDisabled = true,
+            ),
+        )
+    }
+
+    @Test
+    fun `master toggle off still wins immediately, without waiting on an unknown network`() {
+        // The spec's master-toggle-wins rule never consults the network, so there is nothing
+        // to wait for -- deferring here would strand the user's explicit "off" behind a
+        // connectivity report it does not depend on.
+        assertEquals(
+            UplinkVisibility.HIDDEN,
+            VisibilityDecider.decideOrNull(
+                masterToggleEnabled = false,
+                networkInScope = null,
+                hideWhenDisabled = false,
+            ),
+        )
+    }
+
+    @Test
+    fun `a known network decides identically through decideOrNull and decide`() {
+        for (masterToggleEnabled in listOf(false, true)) {
+            for (networkInScope in listOf(false, true)) {
+                for (hideWhenDisabled in listOf(false, true)) {
+                    assertEquals(
+                        "master=$masterToggleEnabled scope=$networkInScope hide=$hideWhenDisabled",
+                        VisibilityDecider.decide(masterToggleEnabled, networkInScope, hideWhenDisabled),
+                        VisibilityDecider.decideOrNull(masterToggleEnabled, networkInScope, hideWhenDisabled),
+                    )
+                }
+            }
         }
     }
 }
