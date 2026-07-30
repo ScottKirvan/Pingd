@@ -4,6 +4,8 @@ import android.Manifest
 import android.app.NotificationManager
 import com.uplinkstatus.app.R
 import com.uplinkstatus.app.prefs.FakeUplinkPreferencesRepository
+import com.uplinkstatus.app.prefs.NetworkScope
+import com.uplinkstatus.app.state.UplinkActivityStatus
 import com.uplinkstatus.app.state.UplinkRuntimeStatus
 import com.uplinkstatus.core.probe.ProbeResult
 import com.uplinkstatus.core.probe.ProbeTarget
@@ -78,6 +80,10 @@ class UplinkStatusServiceTest {
         // Process-wide singleton -- reset so one test's applied-visibility reports (and its
         // sequence counter) can't be mistaken for another's, per UplinkRuntimeStatus's doc.
         UplinkRuntimeStatus.resetForTest()
+        // Same reasoning: `null` here means "this service has claimed nothing yet," which
+        // several tests below assert on directly, so a previous test's last claim must not
+        // leak in.
+        UplinkActivityStatus.resetForTest()
 
         controller = Robolectric.buildService(UplinkStatusService::class.java)
         service = controller.create().get()
@@ -357,6 +363,140 @@ class UplinkStatusServiceTest {
         assertTrue(shadowService().isStoppedBySelf)
         assertEquals(UplinkVisibility.HIDDEN, UplinkRuntimeStatus.reports.value.visibility)
         assertEquals(0, fakeProber.callCount)
+    }
+
+    // --- The on-screen status line must only ever state what the service has confirmed -----
+
+    /**
+     * The status line is a small honest log the user reads to see what the service is really
+     * doing. That only works if every value it can hold came from a real transition — so the
+     * two things it must never do are (a) name a verdict before one has been reached and
+     * (b) claim a connection before anything has answered. The tests in this section pin both,
+     * plus the states that fill the gaps those bugs left behind.
+     *
+     * `UplinkActivityStatus.activity` being `null` is the load-bearing "nothing has been
+     * claimed yet" signal here, the same way `UplinkRuntimeStatus.sequence == 0` means "no
+     * decision has been applied yet" — asserting on notification content alone could not tell
+     * the two apart, since the notification is posted unconditionally either way.
+     */
+    @Test
+    fun `a start with no visibility decision yet reports starting, never a paused verdict`() = runTest {
+        // Connectivity has reported nothing, so there is no decision to make yet -- exactly
+        // the window in which onStartCommand has to post its required placeholder
+        // notification. That placeholder names a reason ("network out of scope"); the status
+        // line must not repeat it, because nothing has looked at the network.
+        fakeNetworkScopeStatus.inScope = null
+
+        controller.startCommand(0, 1)
+
+        assertEquals(
+            "no visibility decision was reached, so nothing should have been claimed about one",
+            0,
+            UplinkRuntimeStatus.reports.value.sequence,
+        )
+        assertEquals(UplinkActivityStatus.Activity.Starting, UplinkActivityStatus.activity.value)
+    }
+
+    @Test
+    fun `ENABLED reports checking-connection and does not claim connected until a probe answers`() {
+        // Swallow the cycle's work instead of running it, so the test can stand in the window
+        // between "ENABLED was applied" and "the first probe completed" -- which on a real
+        // device is however long the first TCP connect takes, and on an unreachable network
+        // is the full 1000ms probe timeout, repeatedly.
+        service.runOnWorker = { }
+
+        service.applyVisibility(UplinkVisibility.ENABLED)
+
+        assertEquals(0, fakeProber.callCount)
+        assertEquals(
+            UplinkActivityStatus.Activity.CheckingConnection,
+            UplinkActivityStatus.activity.value,
+        )
+    }
+
+    @Test
+    fun `a probe that actually answers is what turns checking-connection into connected`() {
+        service.applyVisibility(UplinkVisibility.ENABLED)
+
+        assertEquals(1, fakeProber.callCount)
+        assertEquals(
+            UplinkActivityStatus.Activity.Connected(latencyMs = 7),
+            UplinkActivityStatus.activity.value,
+        )
+    }
+
+    @Test
+    fun `a real DISABLED decision is the only thing that reports paused`() {
+        service.applyVisibility(UplinkVisibility.DISABLED)
+
+        assertEquals(
+            UplinkActivityStatus.Activity.Paused(NetworkScope.WIFI_ONLY),
+            UplinkActivityStatus.activity.value,
+        )
+    }
+
+    @Test
+    fun `a real DISABLED decision under an SSID whitelist reports what is being waited for`() = runTest {
+        fakePreferencesRepository.setNetworkScope(NetworkScope.SSID_WHITELIST)
+        fakeNetworkScopeStatus.inScope = false
+        fakePreferencesRepository.setHideWhenDisabled(false)
+
+        controller.startCommand(0, 1)
+
+        assertEquals(
+            UplinkActivityStatus.Activity.Paused(NetworkScope.SSID_WHITELIST),
+            UplinkActivityStatus.activity.value,
+        )
+    }
+
+    @Test
+    fun `a real HIDDEN decision reports hidden`() {
+        service.applyVisibility(UplinkVisibility.HIDDEN)
+
+        assertEquals(UplinkActivityStatus.Activity.Hidden, UplinkActivityStatus.activity.value)
+    }
+
+    @Test
+    fun `a nudge restart while already running does not claim to be starting up again`() = runTest {
+        controller.startCommand(0, 1)
+        assertEquals(
+            UplinkActivityStatus.Activity.Connected(latencyMs = 7),
+            UplinkActivityStatus.activity.value,
+        )
+
+        // A settings change calls startForegroundService() again to nudge the running
+        // instance. Nothing is starting -- the service is up and connected -- so saying
+        // "starting up…" would be as false as the paused placeholder was.
+        controller.startCommand(0, 2)
+
+        assertEquals(
+            UplinkActivityStatus.Activity.Connected(latencyMs = 7),
+            UplinkActivityStatus.activity.value,
+        )
+    }
+
+    @Test
+    fun `a destroyed service reports stopped instead of leaving a stale connected line`() {
+        service.applyVisibility(UplinkVisibility.ENABLED)
+        assertEquals(
+            UplinkActivityStatus.Activity.Connected(latencyMs = 7),
+            UplinkActivityStatus.activity.value,
+        )
+
+        controller.destroy()
+
+        // Nothing will update this again until a new instance starts, so "connected, 7ms"
+        // would quietly become a lie the moment this one went away.
+        assertEquals(UplinkActivityStatus.Activity.Stopped, UplinkActivityStatus.activity.value)
+    }
+
+    @Test
+    fun `a service destroyed after HIDDEN keeps the more specific hidden reason`() {
+        service.applyVisibility(UplinkVisibility.HIDDEN)
+
+        controller.destroy()
+
+        assertEquals(UplinkActivityStatus.Activity.Hidden, UplinkActivityStatus.activity.value)
     }
 
     // --- Stage 5: DNS-vs-generic-failure and no-back-off, end to end through the real ------

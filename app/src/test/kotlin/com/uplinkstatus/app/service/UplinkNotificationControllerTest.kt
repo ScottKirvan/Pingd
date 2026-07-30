@@ -6,6 +6,7 @@ import android.app.NotificationManager
 import android.content.Context
 import com.uplinkstatus.app.R
 import com.uplinkstatus.app.prefs.NetworkScope
+import com.uplinkstatus.app.state.UplinkActivityStatus
 import com.uplinkstatus.core.tracer.AckSource
 import com.uplinkstatus.core.tracer.BarPosition
 import com.uplinkstatus.core.tracer.CycleEvent
@@ -44,6 +45,10 @@ class UplinkNotificationControllerTest {
         // notify() path need to grant it explicitly, same as a real device would after the
         // user accepts MainActivity's permission prompt.
         shadowOf(RuntimeEnvironment.getApplication()).grantPermissions(Manifest.permission.POST_NOTIFICATIONS)
+        // Process-wide singleton -- reset so one test's reported activity (in particular, so
+        // the "building a notification claims nothing" assertions below) can't be satisfied
+        // or broken by whatever an unrelated test left behind.
+        UplinkActivityStatus.resetForTest()
     }
 
     private fun postedNotification(): Notification? =
@@ -228,6 +233,31 @@ class UplinkNotificationControllerTest {
     }
 
     @Test
+    fun `the first notification of a fresh cycle says checking, not connected`() {
+        // This one is built before the cycle's first probe has even been attempted, so
+        // "connected" would be a guess. (An ack with no latency is a different case -- that
+        // really happened -- and is still called connected; see the test above.)
+        val enabled = controller.notificationForEnabled(BarPosition.START)
+
+        assertEquals(context.getString(R.string.notification_text_checking), textOf(enabled))
+        assertNotEquals(
+            context.getString(R.string.notification_text_connected_unknown_latency),
+            textOf(enabled),
+        )
+    }
+
+    @Test
+    fun `notificationForStarting shows the dim frame without claiming a network verdict`() {
+        val starting = controller.notificationForStarting()
+
+        assertEquals(R.drawable.ic_scan_disabled, starting.smallIcon.resId)
+        assertEquals(context.getString(R.string.notification_text_starting), textOf(starting))
+        // Specifically not the DISABLED text: that names a reason ("network out of scope")
+        // that nothing has established at the point this notification is posted.
+        assertNotEquals(context.getString(R.string.notification_text_disabled), textOf(starting))
+    }
+
+    @Test
     fun `hide cancels the notification entirely rather than showing a seventh icon`() {
         controller.onEvent(CycleEvent.Advanced(BarPosition.BAR_1, AckSource.PROBE_SUCCESS, latencyMs = 5))
         checkNotNull(postedNotification()) // sanity: something is showing before hide()
@@ -235,5 +265,68 @@ class UplinkNotificationControllerTest {
         controller.hide()
 
         assertNull(postedNotification())
+    }
+
+    // --- The on-screen status line is fed by real events only, never by notification-building --
+
+    /**
+     * The architectural regression guard. Building notification content used to update the
+     * status line as a blanket side effect, which meant a placeholder built to satisfy an
+     * Android API deadline was indistinguishable, downstream, from a confirmed state — and
+     * the placeholder's own text names a specific network verdict. Merely *asking this class
+     * for a notification* must therefore claim nothing: the status line only ever moves on a
+     * real cycle event (below) or a real visibility decision ([UplinkStatusServiceTest]).
+     */
+    @Test
+    fun `building notification content does not by itself report any status`() {
+        controller.notificationForStarting()
+        controller.notificationForDisabled(NetworkScope.WIFI_ONLY)
+        controller.notificationForDisabled(NetworkScope.SSID_WHITELIST)
+        controller.notificationForEnabled(BarPosition.START)
+
+        assertNull(
+            "a notification builder spoke for the status line",
+            UplinkActivityStatus.activity.value,
+        )
+    }
+
+    @Test
+    fun `an ack reports connected with the measured latency`() {
+        controller.onEvent(CycleEvent.Advanced(BarPosition.BAR_2, AckSource.PROBE_SUCCESS, latencyMs = 23))
+
+        assertEquals(
+            UplinkActivityStatus.Activity.Connected(latencyMs = 23),
+            UplinkActivityStatus.activity.value,
+        )
+    }
+
+    @Test
+    fun `a freeze reports connection trouble carrying the reason that caused it`() {
+        controller.onEvent(CycleEvent.Frozen(BarPosition.BAR_2, FreezeReason.PROBE_FAILURE))
+        assertEquals(
+            UplinkActivityStatus.Activity.ConnectionTrouble(FreezeReason.PROBE_FAILURE),
+            UplinkActivityStatus.activity.value,
+        )
+
+        controller.onEvent(CycleEvent.Frozen(BarPosition.BAR_2, FreezeReason.DNS_RESOLUTION_FAILURE))
+        assertEquals(
+            UplinkActivityStatus.Activity.ConnectionTrouble(FreezeReason.DNS_RESOLUTION_FAILURE),
+            UplinkActivityStatus.activity.value,
+        )
+    }
+
+    @Test
+    fun `an ack still reports connected when POST_NOTIFICATIONS has been revoked`() {
+        // The status line describes what the service established, not what it managed to
+        // draw in the status bar -- a revoked notification permission silently drops the
+        // notify() call, but the probe still answered.
+        shadowOf(RuntimeEnvironment.getApplication()).denyPermissions(Manifest.permission.POST_NOTIFICATIONS)
+
+        controller.onEvent(CycleEvent.Advanced(BarPosition.BAR_2, AckSource.PROBE_SUCCESS, latencyMs = 11))
+
+        assertEquals(
+            UplinkActivityStatus.Activity.Connected(latencyMs = 11),
+            UplinkActivityStatus.activity.value,
+        )
     }
 }

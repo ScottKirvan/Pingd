@@ -8,6 +8,7 @@ import androidx.compose.ui.test.assertIsEnabled
 import androidx.compose.ui.test.assertIsNotEnabled
 import androidx.compose.ui.test.junit4.createComposeRule
 import androidx.compose.ui.test.onAllNodesWithTag
+import androidx.compose.ui.test.onAllNodesWithText
 import androidx.compose.ui.test.onNodeWithTag
 import androidx.compose.ui.test.onNodeWithText
 import androidx.compose.ui.test.performClick
@@ -413,14 +414,44 @@ class SettingsScreenTest {
     }
 
     @Test
-    fun `the status line shows the service's latest activity text, with the Uplink prefix stripped`() {
+    fun `the status line renders the service's latest reported activity`() {
         setContent()
 
-        UplinkActivityStatus.update("Uplink: connected, 42ms")
+        UplinkActivityStatus.report(UplinkActivityStatus.Activity.Connected(latencyMs = 42))
         composeTestRule.waitForIdle()
 
         composeTestRule.onNodeWithTag(TAG_STATUS_LINE).assertExists()
         composeTestRule.onNodeWithText("Status: connected, 42ms").assertExists()
+    }
+
+    /**
+     * Startup and a real out-of-scope verdict are genuinely different things and have to read
+     * as different things: "starting up…" is what the service can honestly say before it has
+     * decided anything, and only a decision it actually made can produce the paused wording.
+     */
+    @Test
+    fun `starting up and a real paused verdict read as different states`() {
+        setContent()
+
+        UplinkActivityStatus.report(UplinkActivityStatus.Activity.Starting)
+        composeTestRule.waitForIdle()
+        composeTestRule.onNodeWithText("Status: starting up…").assertExists()
+
+        UplinkActivityStatus.report(UplinkActivityStatus.Activity.Paused(NetworkScope.WIFI_ONLY))
+        composeTestRule.waitForIdle()
+        composeTestRule.onAllNodesWithText("Status: starting up…").assertCountEquals(0)
+        composeTestRule.onNodeWithText("Status: paused (this network is out of scope)").assertExists()
+    }
+
+    @Test
+    fun `checking the connection reads as distinct from being connected`() {
+        setContent()
+
+        UplinkActivityStatus.report(UplinkActivityStatus.Activity.CheckingConnection)
+        composeTestRule.waitForIdle()
+
+        composeTestRule.onNodeWithText("Status: checking the connection…").assertExists()
+        composeTestRule.onAllNodesWithText("Status: connected").assertCountEquals(0)
     }
 
     @Test

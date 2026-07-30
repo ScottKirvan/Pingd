@@ -161,6 +161,41 @@ flowchart TD
   a report would otherwise leave a fresh install sitting on the paused
   tracer until the master toggle was cycled off and on.
 
+## In-App Status Line
+The settings screen carries a one-line, plain-language status field
+("Status: connected, 42ms") describing what the service is doing right
+now. It exists to be a small honest log the user can glance at, so its
+one hard requirement is that everything it says is true at the moment it
+says it — a status field that is merely present, and technically holds
+text, is worse than none at all.
+
+It is therefore fed by a closed set of confirmed states, each reported
+from exactly one real transition:
+
+| State                                                 | Reported when                                                              |
+| ----------------------------------------------------- | -------------------------------------------------------------------------- |
+| starting up                                            | the service has started; no visibility decision has been reached yet        |
+| checking the connection                                | `ENABLED` applied and the cycle started; no probe has completed yet         |
+| connected, *N*ms                                       | a probe answered (or the automatic ack that follows one fired)              |
+| connection trouble / can't resolve the target host     | a probe attempt failed, named by which kind of failure it was               |
+| paused / waiting for a whitelisted Wi-Fi network       | `DISABLED` applied                                                          |
+| hidden                                                 | `HIDDEN` applied                                                            |
+| stopped                                                | the service instance was destroyed, so nothing will update the field again  |
+
+Until the first confirmed state arrives there is no status line on
+screen at all, rather than a default or placeholder one.
+
+Notification content never feeds this field. The notification is a
+separate surface with a different obligation: Android requires one to be
+posted immediately on service start, before anything has been decided,
+so it necessarily carries a placeholder — and a notification built to
+meet an API deadline is not evidence of a state having been reached.
+That placeholder accordingly states no verdict ("Uplink: starting…")
+rather than naming a network condition. For the same reason the first
+notification of a fresh cycle reads "checking connection," not
+"connected": the tracer sits at bar 1 because the cycle just started,
+not because anything answered.
+
 ## User Preferences
 - **Enable/disable toggle** — master on/off for the whole feature,
   without uninstalling the app.

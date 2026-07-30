@@ -17,6 +17,7 @@ import com.uplinkstatus.app.prefs.UplinkPreferencesRepository
 import com.uplinkstatus.app.prefs.uplinkPreferencesDataStore
 import com.uplinkstatus.app.state.ConnectivityNetworkScopeStatus
 import com.uplinkstatus.app.state.NetworkScopeStatus
+import com.uplinkstatus.app.state.UplinkActivityStatus
 import com.uplinkstatus.app.state.UplinkRuntimeStatus
 import com.uplinkstatus.core.probe.ProbeTarget
 import com.uplinkstatus.core.probe.Prober
@@ -102,6 +103,14 @@ class UplinkStatusService : Service() {
      * pick SSID-whitelist-specific text. */
     private var currentNetworkScope: NetworkScope = NetworkScope.WIFI_ONLY
 
+    /** Whether [applyVisibility] has run at least once for *this* service instance, i.e.
+     * whether a real visibility decision exists yet. Only used to keep [onStartCommand] from
+     * reporting [UplinkActivityStatus.Activity.Starting] over a state the service has already
+     * genuinely reached: a settings change nudges `startForegroundService` again while this
+     * instance is happily running, and "starting up…" would be a false claim at that point. */
+    @Volatile
+    private var hasAppliedVisibility = false
+
     override fun onCreate() {
         super.onCreate()
         if (!::notificationController.isInitialized) {
@@ -140,9 +149,22 @@ class UplinkStatusService : Service() {
         // applyVisibility() below still tears this back down within a moment if the real
         // answer turns out to be HIDDEN, and idempotently re-posts the correct content
         // otherwise (ENABLED/DISABLED).
+        //
+        // What this placeholder must not do is state a diagnosis. The disabled/paused
+        // notification is the obvious thing to reach for -- the tracer isn't running, so the
+        // dim frame is right -- but its *text* names a specific network condition ("paused
+        // (network out of scope)") that nothing has evaluated yet, and on a fresh install
+        // that would be the very first thing the app ever tells the user.
+        // notificationForStarting() keeps the required post and the dim icon while saying
+        // only what is actually true: this is starting up. The on-screen status line gets the
+        // same treatment, and only while there is genuinely nothing better to say -- a nudge
+        // restart of an already-running instance is not a start.
+        if (!hasAppliedVisibility) {
+            UplinkActivityStatus.report(UplinkActivityStatus.Activity.Starting)
+        }
         startForeground(
             UplinkNotificationController.NOTIFICATION_ID,
-            notificationController.notificationForDisabled(currentNetworkScope),
+            notificationController.notificationForStarting(),
         )
         startObservingPreferencesIfNeeded()
         return START_STICKY
@@ -152,6 +174,14 @@ class UplinkStatusService : Service() {
 
     override fun onDestroy() {
         stopCycle()
+        // Nothing will update the status line again until a new service instance starts, so
+        // leaving whatever was last true ("connected, 42ms") on screen would turn it into a
+        // lie the moment this instance goes away. HIDDEN is the exception: it already
+        // reported the specific reason this service is stopping, which is strictly more
+        // informative than "stopped."
+        if (UplinkActivityStatus.activity.value != UplinkActivityStatus.Activity.Hidden) {
+            UplinkActivityStatus.report(UplinkActivityStatus.Activity.Stopped)
+        }
         visibilityScope.cancel()
         if (workerThread.isAlive) {
             workerThread.quitSafely()
@@ -218,16 +248,25 @@ class UplinkStatusService : Service() {
             UplinkVisibility.ENABLED -> {
                 if (cycleRunner?.isRunning != true) {
                     notificationController.resetSession()
+                    // "Checking," not "connected." The cycle is about to start; no probe has
+                    // been attempted, let alone answered. The first CycleEvent replaces this
+                    // with a real result (connected, or trouble) the moment there is one.
+                    // Reported before startCycle() because with a fast/synchronous probe the
+                    // cycle can produce that real result before this call even returns.
+                    UplinkActivityStatus.report(UplinkActivityStatus.Activity.CheckingConnection)
                     startForeground(
                         UplinkNotificationController.NOTIFICATION_ID,
                         notificationController.notificationForEnabled(BarPosition.START),
                     )
                     startCycle()
                 }
+                // Already running: the cycle's own last event is still the current truth --
+                // re-confirming ENABLED changed nothing and must not overwrite it.
             }
 
             UplinkVisibility.DISABLED -> {
                 stopCycle()
+                UplinkActivityStatus.report(UplinkActivityStatus.Activity.Paused(currentNetworkScope))
                 startForeground(
                     UplinkNotificationController.NOTIFICATION_ID,
                     notificationController.notificationForDisabled(currentNetworkScope),
@@ -245,9 +284,11 @@ class UplinkStatusService : Service() {
                 stopCycle()
                 stopForeground(STOP_FOREGROUND_REMOVE)
                 notificationController.hide()
+                UplinkActivityStatus.report(UplinkActivityStatus.Activity.Hidden)
                 stopSelf()
             }
         }
+        hasAppliedVisibility = true
         UplinkRuntimeStatus.report(visibility)
     }
 
