@@ -1,4 +1,4 @@
-# UplinkStatus [![starline](https://starlines.qoo.monster/assets/ScottKirvan/UplinkStatus)](https://github.com/qoomon/starline)
+﻿# UplinkStatus [![starline](https://raw.githubusercontent.com/ScottKirvan/UplinkStatus/refs/heads/starlines/ScottKirvan/UplinkStatus/starline.svg)](https://github.com/qoomon/starlines)
 <div align="center">
 
   <img src="assets/media/logo.jpg" alt="logo" width="200" height="auto" />
