@@ -49,6 +49,7 @@ import com.uplinkstatus.app.prefs.UplinkPreferencesRepository
 import com.uplinkstatus.app.prefs.isValidHostname
 import com.uplinkstatus.app.service.UplinkStatusService
 import com.uplinkstatus.app.state.UplinkActivityStatus
+import com.uplinkstatus.app.state.describe
 import com.uplinkstatus.app.state.UplinkRuntimeStatus
 import com.uplinkstatus.core.probe.ProbeTarget
 import kotlinx.coroutines.launch
@@ -121,7 +122,7 @@ fun SettingsScreen(
     // number (not the visibility value alone, which can't distinguish "nothing happened yet"
     // from "the service re-confirmed the same state it was already in") to know when the
     // service has genuinely caught up, rather than guessing at a delay.
-    val activityStatusText by UplinkActivityStatus.text.collectAsState()
+    val activityStatus by UplinkActivityStatus.activity.collectAsState()
     val runtimeReport by UplinkRuntimeStatus.reports.collectAsState()
     var pendingBaselineSequence by remember { mutableStateOf<Int?>(null) }
     val isPending = pendingBaselineSequence?.let { runtimeReport.sequence <= it } ?: false
@@ -221,13 +222,15 @@ fun SettingsScreen(
                 },
             )
 
-            // Micro-log transparency: the same text the notification itself shows (see
-            // UplinkActivityStatus's doc), reused here so a user who wants more detail than
-            // the icon alone conveys can see what the service is actually doing right now --
-            // looking for a whitelisted SSID, a probe failing, starting up, hidden, etc.
-            if (activityStatusText != null) {
+            // Micro-log transparency: what the service has actually confirmed about itself
+            // right now -- starting up, looking for a whitelisted SSID, a probe failing,
+            // hidden, and so on -- for a user who wants more detail than the icon alone
+            // conveys. Every value this can show corresponds to a real transition the service
+            // made (see UplinkActivityStatus's doc); nothing is filled in by default, which is
+            // why there is no line at all until the first one arrives.
+            activityStatus?.let { status ->
                 Text(
-                    text = "Status: " + activityStatusText.orEmpty().removePrefix("Uplink: "),
+                    text = "Status: " + status.describe(context),
                     style = MaterialTheme.typography.bodySmall,
                     modifier = Modifier.testTag(TAG_STATUS_LINE),
                 )

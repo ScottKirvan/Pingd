@@ -8,15 +8,34 @@
     <string name="notification_text_connected_with_latency">Uplink: connected, %1$dms</string>
     <string name="notification_text_connected_unknown_latency">Uplink: connected</string>
     <string name="notification_text_disabled">Uplink: paused (network out of scope)</string>
+    <!-- The notification Android requires immediately on service start, before any
+         visibility decision has been reached, and the one posted the instant the tracer
+         starts cycling but before any probe has completed. Neither claims a connection
+         state, because none has been established at either point. -->
+    <string name="notification_text_starting">Uplink: starting…</string>
+    <string name="notification_text_checking">Uplink: checking connection…</string>
     <!-- Shown instead of notification_text_disabled specifically when network scope is set
          to the SSID whitelist: "out of scope" is technically true but unhelpfully vague
          when what's actually happening is "none of your whitelisted networks are in range." -->
     <string name="notification_text_disabled_ssid_scope">Uplink: waiting for a whitelisted Wi-Fi network…</string>
 
-    <!-- On-screen status line only (SettingsScreen): HIDDEN never has a notification to
-         build text for, since hidden means no notification at all, but the status line still
-         needs something to say. -->
-    <string name="status_text_hidden">Uplink: hidden (master toggle is off, or out of scope with \"hide when disabled\" on)</string>
+    <!-- On-screen status line (SettingsScreen) wording, one string per confirmed state the
+         service can report. These are kept separate from the notification strings above
+         rather than derived from them: the two surfaces agree about confirmed states but
+         genuinely diverge at startup, where the notification must carry a placeholder
+         Android requires and the status line must only ever say what has actually been
+         established. They also read as a sentence after "Status: ", with no "Uplink: "
+         prefix to strip. -->
+    <string name="status_text_starting">starting up…</string>
+    <string name="status_text_checking">checking the connection…</string>
+    <string name="status_text_connected_with_latency">connected, %1$dms</string>
+    <string name="status_text_connected">connected</string>
+    <string name="status_text_probe_failure">connection trouble, retrying…</string>
+    <string name="status_text_dns_failure">can\'t resolve the target host, retrying…</string>
+    <string name="status_text_paused">paused (this network is out of scope)</string>
+    <string name="status_text_paused_ssid_scope">waiting for a whitelisted Wi-Fi network…</string>
+    <string name="status_text_hidden">hidden (master toggle is off, or out of scope with \"hide when disabled\" on)</string>
+    <string name="status_text_stopped">stopped (the status service isn\'t running)</string>
 
     <!-- Stage 5: CycleEvent.Frozen accessibility text. Per spec, a DNS problem and a
          network-down problem must not look the same to the user, even though the icon

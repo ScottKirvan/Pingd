@@ -50,7 +50,13 @@ import com.uplinkstatus.core.tracer.FreezeReason
  * Visibility-state transitions (ENABLED/DISABLED/HIDDEN) are handled separately via
  * [notificationForEnabled]/[notificationForDisabled]/[hide], called by
  * [UplinkStatusService] when [com.uplinkstatus.core.visibility.UplinkVisibility] changes —
- * the other half of the spec's "ack or state transition" rule.
+ * the other half of the spec's "ack or state transition" rule. [notificationForStarting]
+ * stands apart from all of those: it is not a transition at all, just the content for the
+ * post Android requires the moment the service starts, before any state is known.
+ *
+ * This class reports the states it genuinely observes — acks and freezes — to
+ * [UplinkActivityStatus], but *only* from [onEvent]. Building notification content reports
+ * nothing, deliberately: see [buildNotification].
  *
  * Open (and [onEvent] separately marked `open`) purely so [UplinkStatusServiceTest] can
  * inject a thin recording subclass that observes every [CycleEvent] this class receives
@@ -120,6 +126,11 @@ open class UplinkNotificationController(
             is CycleEvent.Advanced -> {
                 event.latencyMs?.let { lastLatencyMs = it }
                 lastNotifiedState = NotifiedState.Connected
+                // A real ack: the target answered (or the automatic ack that follows one
+                // fired). Reported unconditionally, before the permission-gated notify()
+                // below, because the status line describes what the service established,
+                // not what it managed to draw in the status bar.
+                UplinkActivityStatus.report(UplinkActivityStatus.Activity.Connected(lastLatencyMs))
                 notify(buildEnabledNotification(event.position, lastLatencyMs))
             }
 
@@ -130,6 +141,9 @@ open class UplinkNotificationController(
                     // changed (e.g. generic failure -> can't-resolve-host mid-outage) --
                     // either way this is a genuine change worth surfacing, not a bare tick.
                     lastNotifiedState = state
+                    UplinkActivityStatus.report(
+                        UplinkActivityStatus.Activity.ConnectionTrouble(event.reason),
+                    )
                     notify(buildFrozenNotification(event.position, event.reason))
                 }
                 // Same reason as what's already showing: a repeated immediate-retry attempt
@@ -138,11 +152,30 @@ open class UplinkNotificationController(
         }
     }
 
-    /** Builds (and, via [UplinkStatusService], posts through `startForeground`) the
-     * notification for the `ENABLED` state at a given bar position — used for the very
-     * first notification of a fresh cycle, before any [CycleEvent] has arrived. */
+    /** Builds the notification Android requires the instant the service starts, before any
+     * visibility decision has been reached. It shows the dim (paused) frame because that is
+     * the least-wrong thing an icon can be while nothing is known — but its *text* claims
+     * nothing, which is the part that matters: this notification is a deadline obligation,
+     * not a verdict, and [UplinkStatusService] deliberately does not let it speak for the
+     * on-screen status line. */
+    fun notificationForStarting(): Notification =
+        buildNotification(
+            iconRes = disabledIconRes,
+            text = context.getString(R.string.notification_text_starting),
+        )
+
+    /** Builds (and, via [UplinkStatusService], posts through `startForeground`) the very
+     * first notification of a fresh `ENABLED` cycle, before any [CycleEvent] has arrived.
+     *
+     * The text says "checking," not "connected": at this point the cycle has been started but
+     * no probe has completed, so there is nothing confirmed to report. (An *ack* with no
+     * latency is a different matter — that one really did happen, and
+     * [buildEnabledNotification] still calls it connected.) */
     fun notificationForEnabled(position: BarPosition): Notification =
-        buildEnabledNotification(position, lastLatencyMs)
+        buildNotification(
+            iconRes = iconResFor(position),
+            text = context.getString(R.string.notification_text_checking),
+        )
 
     /** Builds the notification for the `DISABLED` state: the sixth icon frame (all bars
      * dim), tracer paused. [scope] picks more specific text when it's actually available --
@@ -158,12 +191,12 @@ open class UplinkNotificationController(
     }
 
     /** Removes the notification entirely — the `HIDDEN` state. Per spec, hidden is not a
-     * seventh icon frame; it's the absence of the icon/notification altogether. There's no
-     * notification left to carry status text at this point, so the on-screen status line
-     * (which outlives the notification) gets its own explicit update here. */
+     * seventh icon frame; it's the absence of the icon/notification altogether. Reporting
+     * that state to the on-screen status line (which outlives the notification) belongs to
+     * whoever made the decision, not to this method: this one only knows it was told to take
+     * the icon down. */
     fun hide() {
         notificationManager.cancel(NOTIFICATION_ID)
-        UplinkActivityStatus.update(context.getString(R.string.status_text_hidden))
     }
 
     private fun buildEnabledNotification(position: BarPosition, latencyMs: Long?): Notification {
@@ -208,11 +241,13 @@ open class UplinkNotificationController(
     }
 
     private fun buildNotification(iconRes: Int, text: String): Notification {
-        // Every notification-text decision funnels through here, so this is the one place
-        // that needs to also feed the on-screen status line -- SettingsScreen shows this
-        // exact text (see UplinkActivityStatus's doc for why it's reused rather than
-        // maintained as a second copy of the same wording).
-        UplinkActivityStatus.update(text)
+        // Deliberately does *not* feed the on-screen status line. Every notification this
+        // class can be asked to build funnels through here, including the placeholder posted
+        // to satisfy Android's startForeground deadline before anything has been decided --
+        // so "some notification content was built" is not evidence of anything, and treating
+        // it as such is exactly how the status line ends up asserting states the app never
+        // reached. Status reporting happens at the real transitions instead: acks and
+        // freezes in onEvent above, visibility decisions in UplinkStatusService.
         return NotificationCompat.Builder(context, CHANNEL_ID)
             .setSmallIcon(iconRes)
             .setContentTitle(context.getString(R.string.notification_title))
