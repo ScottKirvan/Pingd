@@ -158,8 +158,8 @@ flowchart TD
   rather than waiting on the first `NetworkCallback` to arrive — so the
   first decision is correct even if that callback is slow or never
   comes. Deriving a real, user-visible verdict from the mere absence of
-  a report is what made a fresh install sit on the paused tracer until
-  the master toggle was cycled off and on (issue #22).
+  a report would otherwise leave a fresh install sitting on the paused
+  tracer until the master toggle was cycled off and on.
 
 ## User Preferences
 - **Enable/disable toggle** — master on/off for the whole feature,
