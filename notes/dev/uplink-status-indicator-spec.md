@@ -157,9 +157,10 @@ flowchart TD
   platform's *current* networks — the whole set, and the default route —
   synchronously when it subscribes, rather than waiting on the first
   `NetworkCallback` to arrive, so the first decision is correct even if
-  those callbacks are slow or never come. Deriving a real, user-visible verdict from the mere absence of
-  a report would otherwise leave a fresh install sitting on the paused
-  tracer until the master toggle was cycled off and on.
+  those callbacks are slow or never come. Deriving a real, user-visible
+  verdict from the mere absence of a report would otherwise leave a
+  fresh install sitting on the paused tracer until the master toggle was
+  cycled off and on.
 
 ## In-App Status Line
 The settings screen carries a one-line, plain-language status field
