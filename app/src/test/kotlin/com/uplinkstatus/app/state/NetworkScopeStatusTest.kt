@@ -1,5 +1,6 @@
 package com.uplinkstatus.app.state
 
+import com.uplinkstatus.app.connectivity.ConnectivitySnapshot
 import com.uplinkstatus.app.connectivity.FakeNetworkSnapshotProvider
 import com.uplinkstatus.app.connectivity.NetworkSnapshot
 import com.uplinkstatus.app.prefs.FakeUplinkPreferencesRepository
@@ -25,17 +26,26 @@ import org.junit.Test
 @OptIn(ExperimentalCoroutinesApi::class)
 class NetworkScopeStatusTest {
 
-    private val wifiHome = NetworkSnapshot(
+    private val wifiHomeNetwork = NetworkSnapshot(
         hasWifiTransport = true,
         hasCellularTransport = false,
         isValidated = true,
         ssid = "Home",
     )
-    private val cellular = NetworkSnapshot(
+    private val cellularNetwork = NetworkSnapshot(
         hasWifiTransport = false,
         hasCellularTransport = true,
         isValidated = true,
         ssid = null,
+    )
+
+    private val wifiHome = ConnectivitySnapshot(
+        networks = listOf(wifiHomeNetwork),
+        defaultNetwork = wifiHomeNetwork,
+    )
+    private val cellular = ConnectivitySnapshot(
+        networks = listOf(cellularNetwork),
+        defaultNetwork = cellularNetwork,
     )
 
     @Test
@@ -59,7 +69,7 @@ class NetworkScopeStatusTest {
 
         // A real report of "there is no default network" is a *positive* answer and does
         // legitimately resolve to false -- the point is that it had to be reported to count.
-        snapshotProvider.snapshot = NetworkSnapshot.NONE
+        snapshotProvider.snapshot = ConnectivitySnapshot.NONE
 
         assertEquals(listOf(null, false), results)
 
@@ -96,7 +106,7 @@ class NetworkScopeStatusTest {
         val preferences = FakeUplinkPreferencesRepository(
             UplinkPreferences(networkScope = NetworkScope.WIFI_ONLY),
         )
-        val snapshotProvider = FakeNetworkSnapshotProvider(initial = NetworkSnapshot.NONE)
+        val snapshotProvider = FakeNetworkSnapshotProvider(initial = ConnectivitySnapshot.NONE)
         val status = ConnectivityNetworkScopeStatus(preferences, snapshotProvider) { true }
 
         val results = mutableListOf<Boolean?>()
@@ -111,7 +121,7 @@ class NetworkScopeStatusTest {
         assertEquals(listOf(false, true), results)
 
         // Disconnect entirely -- flips back out of scope, again with no preference change.
-        snapshotProvider.snapshot = NetworkSnapshot.NONE
+        snapshotProvider.snapshot = ConnectivitySnapshot.NONE
 
         assertEquals(listOf(false, true, false), results)
     }
@@ -145,7 +155,11 @@ class NetworkScopeStatusTest {
                 ssidWhitelist = setOf("Home"),
             ),
         )
-        val neighborWifi = wifiHome.copy(ssid = "NeighborsNetwork")
+        val neighborWifiNetwork = wifiHomeNetwork.copy(ssid = "NeighborsNetwork")
+        val neighborWifi = ConnectivitySnapshot(
+            networks = listOf(neighborWifiNetwork),
+            defaultNetwork = neighborWifiNetwork,
+        )
         val snapshotProvider = FakeNetworkSnapshotProvider(initial = neighborWifi)
         val status = ConnectivityNetworkScopeStatus(preferences, snapshotProvider) { true }
 
