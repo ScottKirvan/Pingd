@@ -14,14 +14,18 @@ import kotlinx.coroutines.flow.asStateFlow
  * [com.uplinkstatus.app.service.UplinkStatusService] end-to-end) derives from it.
  */
 internal class FakeNetworkSnapshotProvider(
-    initial: NetworkSnapshot = NetworkSnapshot.NONE,
+    initial: NetworkSnapshot? = null,
 ) : NetworkSnapshotProvider {
 
     private val state = MutableStateFlow(initial)
 
-    override val snapshotFlow: Flow<NetworkSnapshot> = state.asStateFlow()
+    override val snapshotFlow: Flow<NetworkSnapshot?> = state.asStateFlow()
 
-    var snapshot: NetworkSnapshot
+    /** `null` reproduces the pre-report window of a real subscription: connectivity has said
+     * nothing yet. It is the default precisely so a test that means "no network" has to say
+     * [NetworkSnapshot.NONE] out loud rather than getting it by accident -- the two being
+     * interchangeable is the bug this seam exists to keep from coming back. */
+    var snapshot: NetworkSnapshot?
         get() = state.value
         set(value) {
             state.value = value

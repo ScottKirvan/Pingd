@@ -182,13 +182,19 @@ class UplinkStatusService : Service() {
                 .collect { (preferences, networkInScope) ->
                     probeTarget = ProbeTarget(host = preferences.pingTargetHost)
                     currentNetworkScope = preferences.networkScope
-                    applyVisibility(
-                        VisibilityDecider.decide(
-                            masterToggleEnabled = preferences.masterToggleEnabled,
-                            networkInScope = networkInScope,
-                            hideWhenDisabled = preferences.hideWhenDisabled,
-                        ),
-                    )
+                    // decideOrNull, not decide: networkInScope is nullable ("not reported
+                    // yet"), and a null answer means this emission is not grounds for any
+                    // user-visible change at all. Skipping it leaves onStartCommand's
+                    // placeholder notification in place for the moment it takes connectivity
+                    // to report -- which is strictly better than the alternative this replaces,
+                    // where "nothing reported yet" was silently spent as a real DISABLED/HIDDEN
+                    // verdict and, on a fresh install, was the last word the user ever saw.
+                    val visibility = VisibilityDecider.decideOrNull(
+                        masterToggleEnabled = preferences.masterToggleEnabled,
+                        networkInScope = networkInScope,
+                        hideWhenDisabled = preferences.hideWhenDisabled,
+                    ) ?: return@collect
+                    applyVisibility(visibility)
                 }
         }
     }

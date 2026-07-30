@@ -43,11 +43,26 @@ class ConnectivityManagerNetworkSnapshotProvider(
     private val connectivityManager: ConnectivityManager,
 ) : NetworkSnapshotProvider {
 
-    override val snapshotFlow: Flow<NetworkSnapshot> = callbackFlow {
-        // Registering the callback doesn't synchronously replay the current state the way a
-        // hot LiveData might -- start collectors off at "nothing known yet" so a slow-to-fire
-        // first callback doesn't leave a stale/undefined snapshot in the meantime.
-        trySend(NetworkSnapshot.NONE)
+    override val snapshotFlow: Flow<NetworkSnapshot?> = callbackFlow {
+        // Seed from the platform's *current* answer before registering, rather than from a
+        // placeholder. Registering a callback doesn't synchronously replay anything, and the
+        // previous version of this line sent NetworkSnapshot.NONE unconditionally -- which
+        // downstream could not distinguish from a real "no network," so the first visibility
+        // decision of every service start was deterministically DISABLED/HIDDEN no matter what
+        // the device was actually connected to. On a fresh install that is precisely the
+        // "master toggle is on but the tracer stays on the paused frame" report: the wrong
+        // answer was not a race, it was computed from a value that meant nothing.
+        //
+        // getActiveNetwork()/getNetworkCapabilities() answer the same question the callback
+        // does, synchronously and without waiting for any dispatch, so the very first emission
+        // is already correct -- and stays correct even in the worst case where the callback,
+        // for whatever reason, never arrives at all.
+        //
+        // Read *before* registering, deliberately: registration always delivers a fresh
+        // onCapabilitiesChanged for the current default network moments later, so anything
+        // that changes in the gap is corrected by that callback. Doing it the other way round
+        // would risk this synchronous read overwriting a newer callback value with an older one.
+        trySend(currentDefaultNetworkSnapshot())
 
         val callback = object : ConnectivityManager.NetworkCallback() {
             override fun onCapabilitiesChanged(network: Network, capabilities: NetworkCapabilities) {
@@ -63,10 +78,46 @@ class ConnectivityManagerNetworkSnapshotProvider(
             }
         }
 
+        // No explicit Handler overload on purpose. It looks like this call needs one -- it is
+        // made from a Dispatchers.Default pool thread, which has no prepared Looper -- but
+        // ConnectivityManager.registerDefaultNetworkCallback(NetworkCallback) does not use the
+        // calling thread's Looper at all: it delegates to getDefaultHandler(), a static
+        // CallbackHandler built on ConnectivityThread.getInstanceLooper() (a dedicated
+        // self-starting HandlerThread inside the app process), and the platform's own javadoc
+        // for this overload states "The callback is invoked on the default internal Handler."
+        // Verified against the AOSP android-34 sources for ConnectivityManager/ConnectivityThread.
+        // Passing a Handler here would only change which thread callbacks land on -- it would
+        // fix nothing -- so it is left off rather than added as cargo cult; the correctness of
+        // the first emission is guaranteed by the synchronous seed above instead.
         connectivityManager.registerDefaultNetworkCallback(callback)
 
         awaitClose { connectivityManager.unregisterNetworkCallback(callback) }
     }
+
+    /**
+     * The platform's current answer for the default network, read synchronously.
+     *
+     * Returns [NetworkSnapshot.NONE] for the real, positive answer "there is no default
+     * network," and `null` only for the genuinely indeterminate cases: the default network was
+     * torn down between the two calls below (so capabilities came back null for a [Network]
+     * that existed a moment ago), or the platform refused the query outright. `null` leaves the
+     * decision to the callback rather than fabricating a "not in scope" verdict -- the same
+     * distinction this whole class's contract rests on.
+     */
+    private fun currentDefaultNetworkSnapshot(): NetworkSnapshot? =
+        try {
+            val activeNetwork = connectivityManager.activeNetwork
+            if (activeNetwork == null) {
+                NetworkSnapshot.NONE
+            } else {
+                connectivityManager.getNetworkCapabilities(activeNetwork)?.toSnapshot()
+            }
+        } catch (_: SecurityException) {
+            // ACCESS_NETWORK_STATE is a normal (install-time) permission and is manifest
+            // declared, so this is not expected -- but "we were not allowed to look" is the
+            // definition of "not known," and it must not become "confirmed no network."
+            null
+        }
 }
 
 private fun NetworkCapabilities.toSnapshot(): NetworkSnapshot {

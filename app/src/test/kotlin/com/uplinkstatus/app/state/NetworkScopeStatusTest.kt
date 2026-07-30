@@ -39,6 +39,38 @@ class NetworkScopeStatusTest {
     )
 
     @Test
+    fun `connectivity that has not reported yet is 'not known', never a plain out-of-scope false`() = runTest {
+        // Regression test for the fresh-install "tracer never starts" bug (issue #22). A real
+        // subscription genuinely begins before the platform has reported anything; what this
+        // layer must not do is answer the scope question anyway. "Nobody has told us what
+        // network we're on" and "we are on a network, and it isn't in scope" are different
+        // facts, and only the second one is grounds for dimming the tracer.
+        val preferences = FakeUplinkPreferencesRepository(
+            UplinkPreferences(networkScope = NetworkScope.WIFI_ONLY),
+        )
+        val snapshotProvider = FakeNetworkSnapshotProvider(initial = null)
+        val status = ConnectivityNetworkScopeStatus(preferences, snapshotProvider) { true }
+
+        val results = mutableListOf<Boolean?>()
+        val dispatcher = UnconfinedTestDispatcher(testScheduler)
+        backgroundScope.launch(dispatcher) { status.inScopeFlow.toList(results) }
+
+        assertEquals(listOf<Boolean?>(null), results)
+
+        // A real report of "there is no default network" is a *positive* answer and does
+        // legitimately resolve to false -- the point is that it had to be reported to count.
+        snapshotProvider.snapshot = NetworkSnapshot.NONE
+
+        assertEquals(listOf(null, false), results)
+
+        // ...and connecting to WiFi under a WIFI_ONLY scope resolves to true off the same
+        // stream, with no preference change and no re-subscription.
+        snapshotProvider.snapshot = wifiHome
+
+        assertEquals(listOf(null, false, true), results)
+    }
+
+    @Test
     fun `a scope-preference change alone flips inScope with no connectivity change`() = runTest {
         val preferences = FakeUplinkPreferencesRepository(
             UplinkPreferences(networkScope = NetworkScope.WIFI_ONLY),
@@ -48,7 +80,7 @@ class NetworkScopeStatusTest {
         val snapshotProvider = FakeNetworkSnapshotProvider(initial = cellular)
         val status = ConnectivityNetworkScopeStatus(preferences, snapshotProvider) { true }
 
-        val results = mutableListOf<Boolean>()
+        val results = mutableListOf<Boolean?>()
         val dispatcher = UnconfinedTestDispatcher(testScheduler)
         backgroundScope.launch(dispatcher) { status.inScopeFlow.toList(results) }
 
@@ -67,7 +99,7 @@ class NetworkScopeStatusTest {
         val snapshotProvider = FakeNetworkSnapshotProvider(initial = NetworkSnapshot.NONE)
         val status = ConnectivityNetworkScopeStatus(preferences, snapshotProvider) { true }
 
-        val results = mutableListOf<Boolean>()
+        val results = mutableListOf<Boolean?>()
         val dispatcher = UnconfinedTestDispatcher(testScheduler)
         backgroundScope.launch(dispatcher) { status.inScopeFlow.toList(results) }
 
@@ -98,7 +130,7 @@ class NetworkScopeStatusTest {
         val snapshotProvider = FakeNetworkSnapshotProvider(initial = wifiHome)
         val status = ConnectivityNetworkScopeStatus(preferences, snapshotProvider) { false }
 
-        val results = mutableListOf<Boolean>()
+        val results = mutableListOf<Boolean?>()
         val dispatcher = UnconfinedTestDispatcher(testScheduler)
         backgroundScope.launch(dispatcher) { status.inScopeFlow.toList(results) }
 
@@ -117,7 +149,7 @@ class NetworkScopeStatusTest {
         val snapshotProvider = FakeNetworkSnapshotProvider(initial = neighborWifi)
         val status = ConnectivityNetworkScopeStatus(preferences, snapshotProvider) { true }
 
-        val results = mutableListOf<Boolean>()
+        val results = mutableListOf<Boolean?>()
         val dispatcher = UnconfinedTestDispatcher(testScheduler)
         backgroundScope.launch(dispatcher) { status.inScopeFlow.toList(results) }
 

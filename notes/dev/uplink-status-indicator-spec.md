@@ -134,18 +134,32 @@ flowchart TD
     A[Master toggle] -->|OFF| H1[HIDDEN — icon removed]
     A -->|ON| B{On a network in scope?}
     B -->|Yes| C[ENABLED — tracer cycling]
+    B -->|Not known yet| W[No decision — hold current state]
     B -->|No| X{Hide when disabled?}
     X -->|Yes| H2[HIDDEN — icon removed]
     X -->|No| D[DISABLED — icon shown, all bars dim]
 ```
 
 - **Master toggle off → `HIDDEN`, always.** This is the whole-app
-  off switch; nothing else overrides it.
+  off switch; nothing else overrides it. It resolves immediately even
+  when the network state is still unknown, because this branch never
+  consults the network at all.
 - **Master toggle on, network in scope → `ENABLED`.** Ping-driven
   tracer runs as described above.
 - **Master toggle on, network out of scope →** the *hide when
   disabled* preference decides between `HIDDEN` (icon removed) and
   `DISABLED` (icon shown, all bars dim, tracer paused).
+- **Master toggle on, network scope not yet known → no decision.**
+  "Connectivity hasn't reported anything yet" is a third input state,
+  distinct from "reported, and we are not on a network in scope." Only
+  the latter is grounds for `DISABLED`/`HIDDEN`. The connectivity layer
+  keeps this window as close to zero as possible by reading the
+  platform's *current* default network synchronously when it subscribes,
+  rather than waiting on the first `NetworkCallback` to arrive — so the
+  first decision is correct even if that callback is slow or never
+  comes. Deriving a real, user-visible verdict from the mere absence of
+  a report is what made a fresh install sit on the paused tracer until
+  the master toggle was cycled off and on (issue #22).
 
 ## User Preferences
 - **Enable/disable toggle** — master on/off for the whole feature,

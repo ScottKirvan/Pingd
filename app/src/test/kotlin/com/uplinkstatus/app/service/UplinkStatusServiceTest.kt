@@ -4,6 +4,7 @@ import android.Manifest
 import android.app.NotificationManager
 import com.uplinkstatus.app.R
 import com.uplinkstatus.app.prefs.FakeUplinkPreferencesRepository
+import com.uplinkstatus.app.state.UplinkRuntimeStatus
 import com.uplinkstatus.core.probe.ProbeResult
 import com.uplinkstatus.core.probe.ProbeTarget
 import com.uplinkstatus.core.probe.Prober
@@ -17,6 +18,7 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.test.runTest
 import org.junit.After
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Before
@@ -72,6 +74,10 @@ class UplinkStatusServiceTest {
         // Robolectric doesn't auto-grant dangerous permissions just because they're
         // manifest-declared.
         shadowOf(RuntimeEnvironment.getApplication()).grantPermissions(Manifest.permission.POST_NOTIFICATIONS)
+
+        // Process-wide singleton -- reset so one test's applied-visibility reports (and its
+        // sequence counter) can't be mistaken for another's, per UplinkRuntimeStatus's doc.
+        UplinkRuntimeStatus.resetForTest()
 
         controller = Robolectric.buildService(UplinkStatusService::class.java)
         service = controller.create().get()
@@ -265,6 +271,92 @@ class UplinkStatusServiceTest {
         assertEquals(1, fakeProber.callCount)
         val foregroundNotification = checkNotNull(shadowService().lastForegroundNotification)
         assertEquals(R.drawable.ic_scan_1, foregroundNotification.smallIcon.resId)
+    }
+
+    // --- Issue #22: a fresh start must not spend "nothing reported yet" as a real verdict ---
+
+    /**
+     * Regression test for the reported fresh-install bug: master toggle on (its default),
+     * device on a network in scope, and the tracer nonetheless sits on the paused/disabled
+     * frame until the user toggles the master switch off and back on.
+     *
+     * [FakeNetworkScopeStatus.inScope] starting at `null` reproduces the state a real
+     * subscription genuinely begins in -- connectivity has not reported anything yet -- which
+     * the previous code could not represent at all: it substituted a placeholder
+     * `NetworkSnapshot.NONE`, so this first emission arrived as a hard `false` and the very
+     * first user-visible decision the service ever made was DISABLED, derived from nothing.
+     *
+     * Asserting on [UplinkRuntimeStatus] rather than on the notification is deliberate:
+     * `onStartCommand` posts a disabled-looking placeholder notification unconditionally (to
+     * satisfy Android's startForeground deadline), so the notification alone cannot tell
+     * "we haven't decided yet" apart from "we decided DISABLED." The runtime report can --
+     * `sequence` counts decisions actually applied, so 0 means no verdict was reached.
+     */
+    @Test
+    fun `a start whose connectivity has not reported yet reaches ENABLED with no toggle off and on`() = runTest {
+        fakePreferencesRepository.setMasterToggleEnabled(true)
+        fakeNetworkScopeStatus.inScope = null
+
+        controller.startCommand(0, 1)
+
+        assertEquals(
+            "a visibility verdict was applied before connectivity reported anything",
+            0,
+            UplinkRuntimeStatus.reports.value.sequence,
+        )
+        assertNull(UplinkRuntimeStatus.reports.value.visibility)
+        assertEquals(0, fakeProber.callCount)
+
+        // Connectivity reports in scope -- no second startCommand, no preference write, and
+        // above all no master-toggle bounce. This alone has to start the tracer.
+        fakeNetworkScopeStatus.inScope = true
+
+        assertEquals(UplinkVisibility.ENABLED, UplinkRuntimeStatus.reports.value.visibility)
+        assertEquals(1, fakeProber.callCount)
+        val foregroundNotification = checkNotNull(shadowService().lastForegroundNotification)
+        assertEquals(R.drawable.ic_scan_1, foregroundNotification.smallIcon.resId)
+    }
+
+    /**
+     * The same defect's more destructive form. With hide-when-disabled on, treating "nothing
+     * reported yet" as "out of scope" doesn't merely dim the icon -- it resolves to HIDDEN,
+     * which this service implements as `stopSelf()`. The service would destroy itself before
+     * connectivity ever got a chance to report, so no later report could bring it back and
+     * only a fresh `startForegroundService` (i.e. the user toggling the master switch) would.
+     */
+    @Test
+    fun `an unreported connectivity state does not tear the service down when hide-when-disabled is on`() = runTest {
+        fakePreferencesRepository.setHideWhenDisabled(true)
+        fakeNetworkScopeStatus.inScope = null
+
+        controller.startCommand(0, 1)
+
+        assertFalse(
+            "the service stopped itself on the strength of a connectivity report that never happened",
+            shadowService().isStoppedBySelf,
+        )
+
+        fakeNetworkScopeStatus.inScope = true
+
+        assertEquals(1, fakeProber.callCount)
+    }
+
+    /**
+     * The guard against over-correcting the above into "always wait for connectivity." The
+     * spec's master-toggle-wins rule never consults the network, so an explicit "off" must
+     * still resolve immediately even while connectivity is unknown -- there is nothing for it
+     * to wait for, and stranding it behind a connectivity report would be the opposite bug.
+     */
+    @Test
+    fun `master toggle off still resolves immediately while connectivity is still unknown`() = runTest {
+        fakePreferencesRepository.setMasterToggleEnabled(false)
+        fakeNetworkScopeStatus.inScope = null
+
+        controller.startCommand(0, 1)
+
+        assertTrue(shadowService().isStoppedBySelf)
+        assertEquals(UplinkVisibility.HIDDEN, UplinkRuntimeStatus.reports.value.visibility)
+        assertEquals(0, fakeProber.callCount)
     }
 
     // --- Stage 5: DNS-vs-generic-failure and no-back-off, end to end through the real ------
