@@ -7,9 +7,11 @@ import android.net.NetworkRequest
 import android.net.wifi.WifiInfo
 import android.net.wifi.WifiManager
 import android.util.Log
+import com.uplinkstatus.app.permissions.LocationPermissionStatus
 import kotlinx.coroutines.channels.awaitClose
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.callbackFlow
+import kotlinx.coroutines.launch
 
 /** Diagnostic only -- see the logging in [ConnectivityManagerNetworkSnapshotProvider] below.
  * Not read by any production logic; exists so `adb logcat -s UplinkConnectivity` can show
@@ -65,9 +67,28 @@ private const val TAG = "UplinkConnectivity"
  * permission-gating for [com.uplinkstatus.app.prefs.NetworkScope.SSID_WHITELIST] happens one
  * layer up, in [com.uplinkstatus.app.state.NetworkScopeMatcher], so that behavior is covered
  * by a plain unit test rather than depending on the OS's ungranted-permission behavior at all.
+ *
+ * That SSID, though, is *redacted on delivery*. Android decides how much of a location-sensitive
+ * field a capabilities object may carry from the requesting app's permission state at the moment
+ * that object is dispatched to a registered callback, and never revisits that decision for an
+ * object already delivered. Nothing about the network itself changes when the *app* gains
+ * `ACCESS_FINE_LOCATION`, so the platform has no reason to dispatch a replacement — a device
+ * sitting on one WiFi network can therefore keep reporting an unreadable SSID indefinitely after
+ * the user grants precise location, which under
+ * [com.uplinkstatus.app.prefs.NetworkScope.SSID_WHITELIST] reads as "no whitelisted network is
+ * connected" forever. [refreshSignals] closes that hole: every emission triggers a fresh
+ * synchronous [readCurrentConnectivity], whose capabilities objects are produced *now* and are
+ * therefore redacted against the permission state the app has *now*.
+ *
+ * @param refreshSignals fires when something the platform will not re-dispatch on its own has
+ *   changed — in production, [LocationPermissionStatus.changes]. This is strictly additive to
+ *   the callbacks: they remain the live source of truth for every genuine network change, and a
+ *   refresh replaces this class's knowledge with the platform's complete current answer rather
+ *   than patching part of it.
  */
 class ConnectivityManagerNetworkSnapshotProvider(
     private val connectivityManager: ConnectivityManager,
+    private val refreshSignals: Flow<Unit> = LocationPermissionStatus.changes,
 ) : NetworkSnapshotProvider {
 
     override val snapshotFlow: Flow<ConnectivitySnapshot?> = callbackFlow {
@@ -109,6 +130,12 @@ class ConnectivityManagerNetworkSnapshotProvider(
         // onCapabilitiesChanged callbacks for the current networks moments later, so anything
         // that changes in the gap is corrected by those. Doing it the other way round would
         // risk this synchronous read overwriting a newer callback value with an older one.
+        //
+        // Note this same read is what refreshSignals re-runs later (see below): "ask the
+        // platform, right now, in this process, with this app's current permissions" is the one
+        // operation that cannot return anything stale, whether the staleness came from a
+        // callback that hasn't arrived yet or from one that arrived while the app was allowed
+        // to see less than it is allowed to see now.
         val seed = readCurrentConnectivity()
         if (seed == null) {
             // "We were not allowed to look" is the definition of "not known," and it must not
@@ -174,6 +201,35 @@ class ConnectivityManagerNetworkSnapshotProvider(
         // therefore never contend, though the lock above does not depend on that holding.)
         connectivityManager.registerNetworkCallback(internetNetworkRequest(), trackedNetworksCallback)
         connectivityManager.registerDefaultNetworkCallback(defaultNetworkCallback)
+
+        // The only thing the callbacks above cannot report: a change in what this app is
+        // *allowed to see* about networks that themselves did not change. Re-reading the
+        // platform is the entire remedy -- the values a fresh read returns are redacted against
+        // the permission state as of that read, so an SSID that was unreadable when its
+        // capabilities object was dispatched becomes readable here without the device having to
+        // leave and rejoin the network.
+        launch {
+            refreshSignals.collect {
+                // The read happens *under the lock*, unlike the seed's (which runs before any
+                // callback can exist). A refresh is a whole-picture replacement, and doing the
+                // read outside the lock would let a callback land in between and then be
+                // overwritten by an answer from before it -- resurrecting a network that had
+                // just been lost, with no second onLost to correct it.
+                synchronized(lock) {
+                    val fresh = readCurrentConnectivity()
+                    if (fresh == null) {
+                        // "Not allowed to look" cannot demote what is already known to
+                        // "nothing connected"; the callbacks stay in charge.
+                        Log.d(TAG, "refresh -> platform did not answer; keeping the known state")
+                    } else {
+                        networks.clear()
+                        networks.putAll(fresh.networks)
+                        defaultNetwork = fresh.defaultNetwork
+                        emitLocked("refresh (synchronous re-read after a permission change)")
+                    }
+                }
+            }
+        }
 
         awaitClose {
             connectivityManager.unregisterNetworkCallback(trackedNetworksCallback)

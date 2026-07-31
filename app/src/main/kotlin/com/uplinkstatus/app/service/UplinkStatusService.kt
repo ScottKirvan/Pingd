@@ -131,6 +131,18 @@ class UplinkStatusService : Service() {
         }
     }
 
+    /**
+     * Read on demand, never cached, so an SSID-whitelist scope is evaluated against the
+     * permission state as it is *now* rather than as it was when this service started.
+     *
+     * On demand is not the same as reactive, though, and nothing here watches for the grant
+     * itself: that is
+     * [com.uplinkstatus.app.permissions.LocationPermissionStatus.changes]'s job, which
+     * [ConnectivityManagerNetworkSnapshotProvider] collects (by default, hence no argument at
+     * the construction above) to re-read the platform's networks whenever the grant changes.
+     * Without that, this function would start returning `true` while the snapshot it is being
+     * combined with still carried the SSID the platform redacted before the grant.
+     */
     private fun hasLocationPermission(): Boolean =
         ContextCompat.checkSelfPermission(
             applicationContext,
