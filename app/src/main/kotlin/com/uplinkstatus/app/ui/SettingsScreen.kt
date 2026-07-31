@@ -43,6 +43,7 @@ import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.unit.dp
 import androidx.core.content.ContextCompat
+import com.uplinkstatus.app.permissions.LocationPermissionStatus
 import com.uplinkstatus.app.prefs.NetworkScope
 import com.uplinkstatus.app.prefs.UplinkPreferences
 import com.uplinkstatus.app.prefs.UplinkPreferencesRepository
@@ -179,6 +180,15 @@ fun SettingsScreen(
         ActivityResultContracts.RequestMultiplePermissions(),
     ) { grants ->
         locationPermissionGranted = grants[Manifest.permission.ACCESS_FINE_LOCATION] == true
+        // The grant almost always lands *after* the service has already been running and
+        // watching the current WiFi network for a while -- this request is only made at the
+        // moment the user picks SSID whitelisting, long after startup. The capabilities object
+        // the service is holding for that network was redacted when the platform delivered it,
+        // and the platform will not deliver another one just because this app's permissions
+        // changed, so without telling it the SSID stays unreadable for as long as the device
+        // stays on that network: exactly the setting the user just turned on, permanently
+        // reporting "waiting for a whitelisted Wi-Fi network." See [LocationPermissionStatus].
+        LocationPermissionStatus.report(locationPermissionGranted)
     }
 
     var newSsidText by rememberSaveable { mutableStateOf("") }

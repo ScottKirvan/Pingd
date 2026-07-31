@@ -4,7 +4,12 @@ import android.net.ConnectivityManager
 import android.net.Network
 import android.net.NetworkCapabilities
 import android.net.NetworkInfo
+import com.uplinkstatus.app.prefs.FakeUplinkPreferencesRepository
+import com.uplinkstatus.app.prefs.NetworkScope
+import com.uplinkstatus.app.prefs.UplinkPreferences
+import com.uplinkstatus.app.state.ConnectivityNetworkScopeStatus
 import kotlinx.coroutines.ExperimentalCoroutinesApi
+import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.flow.toList
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.test.UnconfinedTestDispatcher
@@ -20,6 +25,7 @@ import org.robolectric.Shadows.shadowOf
 import org.robolectric.annotation.Config
 import org.robolectric.shadows.ShadowNetwork
 import org.robolectric.shadows.ShadowNetworkInfo
+import org.robolectric.shadows.ShadowWifiInfo
 
 /**
  * Exercises [ConnectivityManagerNetworkSnapshotProvider] against a real (Robolectric-shadowed)
@@ -103,6 +109,36 @@ class ConnectivityManagerNetworkSnapshotProviderTest {
         )
         shadowOf(connectivityManager).setNetworkCapabilities(network, capabilities)
         return network
+    }
+
+    /**
+     * WiFi capabilities carrying (or deliberately *not* carrying) a readable SSID, which is how
+     * these tests stand in for Android's location redaction.
+     *
+     * Robolectric does not model that redaction: its `NetworkCapabilities` hands back whatever
+     * `TransportInfo` was put on it, regardless of what permissions the test app holds. So the
+     * redacted state is built by hand -- `ssid = null` is a capabilities object with no
+     * `WifiInfo` at all, which is what production code sees for a network whose SSID it isn't
+     * allowed to read (`toSnapshot()` treats a missing `WifiInfo` and a `WifiManager.UNKNOWN_SSID`
+     * identically), and `ssid = "..."` is the same network as the platform would describe it to
+     * an app that *is* allowed. Swapping the shadow from one to the other, with no callback
+     * fired, is the JVM-side equivalent of "the app's permission changed but the network did
+     * not."
+     *
+     * `setTransportInfo` is reached by name rather than by symbol for the reason [capabilitiesWith]
+     * documents: it is public platform API that this project's compile-time SDK stub jar doesn't
+     * declare.
+     */
+    private fun wifiCapabilities(ssid: String?): NetworkCapabilities {
+        val capabilities = capabilitiesWith(NetworkCapabilities.TRANSPORT_WIFI)
+        if (ssid != null) {
+            val wifiInfo = ShadowWifiInfo.newInstance()
+            shadowOf(wifiInfo).setSSID(ssid)
+            NetworkCapabilities::class.java.methods
+                .single { it.name == "setTransportInfo" }
+                .invoke(capabilities, wifiInfo)
+        }
+        return capabilities
     }
 
     private fun trackedNetworksCallback(connectivityManager: ConnectivityManager): TrackedNetworksCallback =
@@ -402,6 +438,104 @@ class ConnectivityManagerNetworkSnapshotProviderTest {
         val latest = checkNotNull(results.last())
         assertEquals(null, latest.defaultNetwork)
         assertTrue(latest.hasWifiTransport)
+    }
+
+    /**
+     * Regression test for an SSID whitelist that never recognises the connected network after
+     * the location permission is granted mid-session.
+     *
+     * The device below never changes network. It is associated with one WiFi network from
+     * before the subscription starts, and stays on it throughout -- so no `onAvailable`, no
+     * `onLost`, and no `onCapabilitiesChanged` ever fires. What changes is only what the app is
+     * *allowed to be told* about that network, which is precisely the change Android does not
+     * re-dispatch capabilities for: a capabilities object is redacted when it is delivered and
+     * is never revisited afterwards, and the app requests `ACCESS_FINE_LOCATION` only when the
+     * user picks SSID whitelisting -- long after the service registered its callbacks.
+     *
+     * Without a refresh, the provider keeps reporting the SSID it was handed before the grant
+     * (here: none at all) for as long as the device stays on that network, and the whitelist has
+     * nothing to match. Re-reading the platform is what makes the now-permitted SSID visible.
+     */
+    @Test
+    fun `a permission change re-reads the platform, without the network itself changing`() = runTest {
+        val connectivityManager = connectivityManager()
+        val permissionChanges = MutableSharedFlow<Unit>()
+        val wifi = setDefaultNetwork(
+            connectivityManager,
+            ConnectivityManager.TYPE_WIFI,
+            wifiCapabilities(ssid = null),
+        )
+        val provider = ConnectivityManagerNetworkSnapshotProvider(connectivityManager, permissionChanges)
+        val results = mutableListOf<ConnectivitySnapshot?>()
+        backgroundScope.launch(UnconfinedTestDispatcher(testScheduler)) {
+            provider.snapshotFlow.toList(results)
+        }
+
+        assertTrue(checkNotNull(results.first()).hasWifiTransport)
+        assertEquals(emptySet<String>(), checkNotNull(results.first()).connectedWifiSsids)
+        // The provider must actually be listening for the signal, not merely accepting one.
+        assertEquals(1, permissionChanges.subscriptionCount.value)
+
+        // The grant lands. The platform would now answer a *fresh* query with the real SSID --
+        // and would still hand back the redacted, already-delivered object to anyone relying on
+        // the callback that fired before it.
+        shadowOf(connectivityManager).setNetworkCapabilities(wifi, wifiCapabilities(ssid = "Skynet"))
+        permissionChanges.emit(Unit)
+
+        assertEquals(setOf("Skynet"), checkNotNull(results.last()).connectedWifiSsids)
+    }
+
+    /**
+     * The same fix seen from the layer that actually decides: an SSID whitelist naming the
+     * network the device is already on must go in scope when the permission is granted, with no
+     * network change, no preference change, and no service restart to trigger it.
+     *
+     * This is the user-visible half of the test above -- the status line reporting "waiting for
+     * a whitelisted Wi-Fi network" indefinitely, on a device sitting on exactly that network
+     * with precise location granted. It runs the real [ConnectivityManagerNetworkSnapshotProvider]
+     * (against a shadowed `ConnectivityManager`) through the real
+     * [ConnectivityNetworkScopeStatus], so it covers the whole path from "the app announced a
+     * permission change" to "in scope."
+     */
+    @Test
+    fun `granting location mid-session brings a whitelisted SSID into scope with no network change`() = runTest {
+        val connectivityManager = connectivityManager()
+        val permissionChanges = MutableSharedFlow<Unit>()
+        val wifi = setDefaultNetwork(
+            connectivityManager,
+            ConnectivityManager.TYPE_WIFI,
+            wifiCapabilities(ssid = null),
+        )
+        // What the service reads on demand -- flipped below exactly when the user grants.
+        var locationPermissionGranted = false
+        val status = ConnectivityNetworkScopeStatus(
+            preferencesRepository = FakeUplinkPreferencesRepository(
+                UplinkPreferences(
+                    networkScope = NetworkScope.SSID_WHITELIST,
+                    ssidWhitelist = setOf("Skynet"),
+                ),
+            ),
+            snapshotProvider = ConnectivityManagerNetworkSnapshotProvider(
+                connectivityManager,
+                permissionChanges,
+            ),
+            hasLocationPermission = { locationPermissionGranted },
+        )
+
+        val results = mutableListOf<Boolean?>()
+        backgroundScope.launch(UnconfinedTestDispatcher(testScheduler)) {
+            status.inScopeFlow.toList(results)
+        }
+
+        assertEquals(listOf(false), results)
+
+        // The user grants precise location. Both halves of what that means happen here: the
+        // platform will now report the SSID to a fresh query, and the app announces the change.
+        locationPermissionGranted = true
+        shadowOf(connectivityManager).setNetworkCapabilities(wifi, wifiCapabilities(ssid = "Skynet"))
+        permissionChanges.emit(Unit)
+
+        assertEquals(listOf(false, true), results)
     }
 
     @Test

@@ -38,16 +38,20 @@ interface NetworkScopeStatus {
 /**
  * Combines [preferencesRepository]'s persisted [com.uplinkstatus.app.prefs.NetworkScope] /
  * SSID whitelist with [snapshotProvider]'s live connectivity signal, re-running
- * [NetworkScopeMatcher] on every emission from either source. [hasLocationPermission] is a
- * function (not a value snapshotted once at construction) so it reflects the permission's
- * actual state at combine-time — invoked fresh on every connectivity or preference emission,
- * which is enough to satisfy Stage 4's acceptance criteria (permission state isn't itself
- * pushed as a third reactive stream here: neither the spec nor the brief asks the display to
- * react, with no other trigger, to a mid-run permission revocation, and in practice revoking a
- * granted runtime permission from system settings kills the app's process on the overwhelming
- * majority of Android versions this targets, so the next process start re-evaluates it anyway
- * — adding a `BroadcastReceiver`/polling loop just for that no-other-trigger edge case would
- * be exactly the scope creep the brief warns against).
+ * [NetworkScopeMatcher] on every emission from either source.
+ *
+ * [hasLocationPermission] is a function (not a value snapshotted once at construction) so it
+ * reflects the permission's actual state at combine-time — invoked fresh on every connectivity
+ * or preference emission, and never cached. It is deliberately *not* a third stream combined in
+ * here, because re-running the matcher is not what a permission grant actually needs: the SSID
+ * the matcher is handed comes from a capabilities object the platform redacted when it
+ * delivered it, so matching the same snapshot again with `hasLocationPermission` newly `true`
+ * would still find no readable SSID to match. The grant has to reach the layer that can ask the
+ * platform again — see
+ * [com.uplinkstatus.app.connectivity.ConnectivityManagerNetworkSnapshotProvider]'s
+ * `refreshSignals` — and the fresh snapshot that produces arrives here as an ordinary
+ * connectivity emission, at which point this function is called again anyway. One mechanism,
+ * one place, and a permission change and a network change reach this combine identically.
  */
 class ConnectivityNetworkScopeStatus(
     private val preferencesRepository: UplinkPreferencesRepository,

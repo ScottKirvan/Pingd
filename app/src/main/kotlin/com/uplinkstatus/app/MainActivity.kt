@@ -13,6 +13,7 @@ import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.core.content.ContextCompat
+import com.uplinkstatus.app.permissions.LocationPermissionStatus
 import com.uplinkstatus.app.prefs.DataStoreUplinkPreferencesRepository
 import com.uplinkstatus.app.prefs.uplinkPreferencesDataStore
 import com.uplinkstatus.app.service.UplinkStatusService
@@ -69,10 +70,34 @@ class MainActivity : ComponentActivity() {
         }
     }
 
+    /**
+     * The one moment this app is guaranteed to be looking when a permission granted *outside*
+     * it takes effect. Granting precise location from the system app-info screen changes what
+     * the service is allowed to read about the current WiFi network, but the platform will not
+     * re-deliver that network's capabilities just because an app's permissions changed — see
+     * [LocationPermissionStatus]. Coming back to this activity is the app's first opportunity to
+     * notice, and reporting here is what turns it into a fresh connectivity read.
+     *
+     * Redundant with the settings screen's own permission-result reporting for the in-app
+     * request path, and deliberately so: [LocationPermissionStatus.report] ignores a state it
+     * has already recorded, so whichever of the two observes the change first is the one that
+     * announces it, and the other costs nothing.
+     */
+    override fun onResume() {
+        super.onResume()
+        LocationPermissionStatus.report(hasLocationPermission())
+    }
+
     private fun hasNotificationPermission(): Boolean =
         ContextCompat.checkSelfPermission(
             this,
             Manifest.permission.POST_NOTIFICATIONS,
+        ) == PackageManager.PERMISSION_GRANTED
+
+    private fun hasLocationPermission(): Boolean =
+        ContextCompat.checkSelfPermission(
+            this,
+            Manifest.permission.ACCESS_FINE_LOCATION,
         ) == PackageManager.PERMISSION_GRANTED
 
     private fun startUplinkService() {
