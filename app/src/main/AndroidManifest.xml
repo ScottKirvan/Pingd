@@ -1,0 +1,75 @@
+<?xml version="1.0" encoding="utf-8"?>
+<manifest xmlns:android="http://schemas.android.com/apk/res/android">
+
+    <!--
+        Stage 2 adds exactly the permissions the foreground service + notification need:
+        INTERNET for the TCP-connect probe (Stage 1's Prober, wired to a real socket here),
+        FOREGROUND_SERVICE + FOREGROUND_SERVICE_SPECIAL_USE for the always-on status
+        service (see the <service> element below for why "specialUse" and not
+        "dataSync" — dataSync is capped at 6h/day on Android 14+ and would kill an
+        always-on indicator), and POST_NOTIFICATIONS (Android 13+; minSdk here is 34, so
+        this is unconditionally required, not just on newer OS versions) for the status-bar
+        notification itself — requested at runtime with a rationale flow from
+        MainActivity, not just declared here with no request logic.
+        Stage 3 adds ACCESS_FINE_LOCATION for the SSID-whitelist network-scope option
+        (reading the connected SSID on Android 10+ requires it, no way around that OS
+        restriction). Android requires a dangerous permission to be manifest-declared
+        before it can be requested at all; there's no "declare only if the feature is used"
+        mechanism short of a separate build flavor, which would be disproportionate
+        machinery for one permission, so the manifest entry itself is unconditional, but the
+        *request* is not: SettingsScreen only calls the runtime request when the user
+        actually selects the SSID-whitelist scope option, never at app launch or for any
+        other scope choice (per spec). Reading the live SSID this permission gates is Stage
+        4's job. ACCESS_COARSE_LOCATION is declared alongside it only because Android 12+
+        requires requesting both together when an app wants FINE access (lint's
+        CoarseFineLocation check); this app has no use for coarse-only location and never
+        requests it on its own.
+        Stage 4 adds ACCESS_NETWORK_STATE, required by
+        ConnectivityManager.registerDefaultNetworkCallback (the real live-connectivity signal
+        driving network-scope matching) — unlike the location/notification permissions
+        above, this one is a normal (install-time-granted) permission, not a dangerous
+        runtime one, so no separate request flow is needed for it.
+    -->
+    <uses-permission android:name="android.permission.INTERNET" />
+    <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_SPECIAL_USE" />
+    <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
+    <uses-permission android:name="android.permission.ACCESS_FINE_LOCATION" />
+    <uses-permission android:name="android.permission.ACCESS_COARSE_LOCATION" />
+
+    <application
+        android:allowBackup="true"
+        android:icon="@mipmap/ic_launcher"
+        android:label="@string/app_name"
+        android:theme="@style/Theme.UplinkStatus"
+        android:supportsRtl="true">
+        <activity
+            android:name=".MainActivity"
+            android:exported="true">
+            <intent-filter>
+                <action android:name="android.intent.action.MAIN" />
+                <category android:name="android.intent.category.LAUNCHER" />
+            </intent-filter>
+        </activity>
+
+        <!--
+            specialUse, not dataSync: this service's job (persistent connectivity-status
+            indicator, updated via TCP-connect probes) doesn't fit any of Android's named
+            FGS types (mediaPlayback, location, phoneCall, connectedDevice, etc.), and
+            dataSync's 6h/day runtime cap on Android 14+ would stop an always-on indicator
+            outright. specialUse requires the justification string below, per the
+            Android 14+ requirement (also surfaced in the Play Console data-safety form at
+            submission time, which is out of scope for this stage).
+        -->
+        <service
+            android:name=".service.UplinkStatusService"
+            android:exported="false"
+            android:foregroundServiceType="specialUse">
+            <property
+                android:name="android.app.PROPERTY_SPECIAL_USE_FGS_SUBTYPE"
+                android:value="Shows a persistent status-bar icon reflecting the device's uplink (network) connectivity health, driven by periodic TCP-connect probes; no existing foreground-service type describes this always-on connectivity-status use case." />
+        </service>
+    </application>
+
+</manifest>

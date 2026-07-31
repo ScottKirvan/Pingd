@@ -1,4 +1,4 @@
-# UplinkStatus [![starline](https://starlines.qoo.monster/assets/ScottKirvan/UplinkStatus)](https://github.com/qoomon/starline)
+﻿# UplinkStatus [![starline](https://raw.githubusercontent.com/ScottKirvan/UplinkStatus/refs/heads/starlines/ScottKirvan/UplinkStatus/starline.svg)](https://github.com/qoomon/starlines)
 <div align="center">
 
   <img src="assets/media/logo.jpg" alt="logo" width="200" height="auto" />
@@ -44,6 +44,38 @@
 </div>
 
 **UplinkStatus** is voluptatibus magni nemo est. Nulla nobis dicta iste minus dolor repellendus aspernatur atque. Earum expedita aut inventore tempora fugiat deleniti. Molestias minima nam expedita beatae totam ipsa reprehenderit animi. Occaecati quibusdam beatae ducimus voluptate ut doloribus vitae amet. Quia ut ut voluptate dignissimos adipisci dolorum rem.
+
+## Android App
+
+The `app/` module is the actual UplinkStatus Android app (Kotlin, Jetpack
+Compose, `minSdk` 34 / `targetSdk` 36): a `specialUse` foreground
+service drives a 6-frame status-bar tracer icon from TCP connect-probe
+results, with a Compose settings screen (master on/off, network scope
+incl. SSID whitelist, ping target host) backed by Jetpack DataStore.
+See
+[`notes/dev/uplink-status-indicator-spec.md`](notes/dev/uplink-status-indicator-spec.md)
+for the design it's built to,
+[`Agents/UplinkStatus_dev/STATUS.md`](Agents/UplinkStatus_dev/STATUS.md)
+for the stage-by-stage build log (including post-Stage-7 device-testing
+fixes), and [PR #6](https://github.com/ScottKirvan/UplinkStatus/pull/6)
+for the `dev` → `main` integration.
+
+**Build and test locally:**
+
+```bash
+./gradlew build   # compiles, assembles debug + release APKs, runs unit tests, lints
+./gradlew test    # unit tests only
+```
+
+Both require a local Android SDK (`compileSdk`/`targetSdk` 36, `minSdk`
+34) — install it via Android Studio, or the standalone command-line
+tools, and either set `ANDROID_HOME`/`ANDROID_SDK_ROOT` or add a
+`local.properties` file at the repo root with `sdk.dir=/path/to/sdk`
+(that file is gitignored; it's local machine config, not project
+config). No device or emulator is required — the Compose UI test runs
+on the JVM via Robolectric. `.github/workflows/android-ci.yml` runs the
+same `./gradlew build` on every push/PR that touches the Android
+project.
 
 ## Getting Started with This Template
 

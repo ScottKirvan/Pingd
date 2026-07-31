@@ -4,15 +4,25 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project state
 
-There is no app code yet. `UplinkStatus` is an Android app (status-bar
-uplink health indicator) that currently exists only as a design spec —
-implementation hasn't started. The repo was bootstrapped from
-`ScooterGitTemplate`; `README.md` and `CONTRIBUTING.md` still carry some
-template-generic language (e.g. CONTRIBUTING's "test by creating a new
-repo from your template" section refers to the template repo, not this
-project) that hasn't been rewritten for UplinkStatus specifically.
+`UplinkStatus` is an Android app (status-bar uplink health indicator)
+with a working implementation: `:core` (pure-Kotlin probe/tracer/
+visibility state machine) and `:app` (the `specialUse` foreground
+service, notification wiring, and a Compose settings screen backed by
+Jetpack DataStore). The staged Stage 0-7 build (scaffold through a
+written device-testing protocol) is tracked in
+`Agents/UplinkStatus_dev/STATUS.md`, and PR #6 (`dev` → `main`) carries
+the same history. Since Stage 7, real device testing on a Pixel 6 Pro
+has driven a further round of fixes and UX work directly against `dev`
+(not through the staged agent process) — see `STATUS.md`'s most recent
+entry for specifics (tracer sweep direction, immediate foreground
+notification, settings-panel async-race lock, on-screen status line,
+etc.). The repo was bootstrapped from `ScooterGitTemplate`; `README.md`
+and `CONTRIBUTING.md` still carry some template-generic language (e.g.
+CONTRIBUTING's "test by creating a new repo from your template" section
+refers to the template repo, not this project) that hasn't been
+rewritten for UplinkStatus specifically.
 
-**Before implementing anything app-related, read
+**Before changing app behavior, read
 `notes/dev/uplink-status-indicator-spec.md` first.** It's the
 authoritative design doc and encodes decisions that aren't obvious from
 first principles, e.g.:
@@ -30,12 +40,31 @@ first principles, e.g.:
   can't inject a status-bar icon, so this doesn't port as designed.
 
 Update that spec doc (not this file) when design decisions change.
-`notes/TODO.md` is currently unpopulated (placeholder checkboxes only).
+`notes/TODO.md` tracks known follow-ups (currently: designing a real
+app launcher/shade icon — the placeholder white square is still in
+place).
+
+Every bug fix needs a red/green regression test: write or identify a
+test that fails without the fix, confirm it fails for the right reason
+(e.g. by temporarily reverting the fix), then restore the fix and
+confirm it passes. This was a direct, standing instruction after a bug
+recurred without one — don't skip it, and don't consider a fix done
+until both halves are shown.
 
 ## Commands
 
-The only buildable thing in the repo right now is the docs site
-(VitePress, deployed to GitHub Pages from `docs/`):
+```bash
+./gradlew build   # compiles, assembles debug + release APKs, runs unit tests, lints
+./gradlew test    # unit tests only (:app debug+release, :core)
+```
+Requires a local Android SDK (`compileSdk`/`targetSdk` 36, `minSdk` 34)
+— set `ANDROID_HOME`/`ANDROID_SDK_ROOT`, or add a gitignored
+`local.properties` with `sdk.dir=/path/to/sdk`. No device or emulator is
+required for the test suite — the Compose UI tests run on the JVM via
+Robolectric. `.github/workflows/android-ci.yml` runs the same
+`./gradlew build` on every push/PR touching the Android project.
+
+The docs site (VitePress, deployed to GitHub Pages from `docs/`):
 
 ```bash
 cd docs
@@ -47,9 +76,15 @@ npm run docs:preview   # preview the built output
 The `docs.yml` workflow auto-deploys this site to Pages on pushes to
 `main` that touch `docs/**`.
 
-There is no Android project, build tooling, linter, or test suite yet —
-those will need to be scaffolded when implementation begins, following
-the spec above.
+## Git workflow
+
+- `dev` is the ongoing integration branch — Claude owns it and commits/pushes
+  directly to it.
+- `main` is never touched (no commits, no merges) without explicit
+  instruction from the user for that specific merge.
+- Claude may launch agents to work on other branches, but always reviews
+  their code, confirms tests pass, and strips any attribution lines from
+  commit messages and PR bodies before anything lands on `dev`.
 
 ## Commit / versioning conventions
 

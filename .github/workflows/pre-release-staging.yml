@@ -1,0 +1,32 @@
+name: Manual — Pre-Release Staging
+
+on:
+  workflow_dispatch:
+    inputs:
+      tag_name:
+        description: Version tag override — leave blank to infer from open release-please PR
+        required: false
+        type: string
+        default: ""
+
+permissions:
+  contents: write
+  models: read
+  pull-requests: read
+
+jobs:
+  stage:
+    uses: ScottKirvan/.github/.github/workflows/reusable-pre-release-staging.yml@main
+    with:
+      tag_name: ${{ inputs.tag_name }}
+      project_name: "UplinkStatus"
+      project_context: "UplinkStatus is an Android status-bar app that monitors uplink health using TCP probe-based network checks — giving users a persistent, real-time connectivity indicator in their status bar. Write changes in terms of what the status indicator shows, how accurately it reflects connectivity, or what users can configure."
+      header: |
+        ## UplinkStatus
+
+        > Real-time uplink health indicator for your Android status bar.
+
+        🫶❤️[Support this project](https://ko-fi.com/ScottKirvan) · 📖 [User Guide](https://scottkirvan.github.io/UplinkStatus/) · 💬 [Discord](https://discord.gg/TN6XJSNK5Y) · 🐛 [Report a Bug](https://github.com/ScottKirvan/UplinkStatus/issues/new?template=bug_report.md) · ✨ [Request Feature](https://github.com/ScottKirvan/UplinkStatus/issues/new?template=feature_request.md) · 📋 [Changelog](https://github.com/ScottKirvan/UplinkStatus/blob/main/notes/CHANGELOG.md)
+
+        ---
+    secrets: inherit

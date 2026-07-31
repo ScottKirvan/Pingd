@@ -1,0 +1,9 @@
+<!-- Notice: viewBox stays 24x24, but width/height are set to 1024 -->
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" width="1024" height="1024" fill="currentColor">
+  <!-- Your exact original path data works perfectly here! -->
+  <path fill-opacity="0.3" d="M2.4,4 L4.8,4 L4.8,20 L2.4,20 Z" />
+  <path fill-opacity="0.3" d="M6.6,4 L9.0,4 L9.0,20 L6.6,20 Z" />
+  <path fill-opacity="0.3" d="M10.8,4 L13.2,4 L13.2,20 L10.8,20 Z" />
+  <path fill-opacity="1.0" d="M15.0,4 L17.4,4 L17.4,20 L15.0,20 Z" />
+  <path fill-opacity="0.3" d="M19.2,4 L21.6,4 L21.6,20 L19.2,20 Z" />
+</svg>

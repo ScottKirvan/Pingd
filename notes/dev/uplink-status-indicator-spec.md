@@ -17,8 +17,7 @@ a separate animation timer.
 - No adaptive back-off on ping retry.
 
 ## Implementation Baseline
-Settled going into implementation, so these aren't open questions for
-whoever builds this:
+Locked decisions — not open questions:
 - **Language/UI:** Kotlin, Jetpack Compose for all in-app UI (settings
   screen and anything else the user navigates to). Compose doesn't
   apply to the notification itself or the foreground service — those
@@ -64,13 +63,10 @@ color to a single OS-applied tint and only respects alpha, so a
 same-tint opacity difference is the only way to get the dim/lit look to
 actually survive being rendered there.
 
-**Signed off:** draft vector drawables for all 6 frames are in
-`assets/media/icons/` (`ic_scan_disabled.xml`, `ic_scan_1.xml` …
-`ic_scan_5.xml`, merged in [PR #3](https://github.com/ScottKirvan/UplinkStatus/pull/3))
-and approved as the basis for implementation. They still need to move
-into an Android `res/drawable` directory when the app project is
-scaffolded, and the 0.3 dim alpha is worth a real-device sanity check,
-but the shape and duotone approach are settled.
+The vector drawables for all 6 frames (`ic_scan_disabled.xml`,
+`ic_scan_1.xml` … `ic_scan_5.xml`) live in `app/src/main/res/drawable/`,
+where the notification-building code references them as ordinary Android
+resources.
 
 "Hidden" is **not** a 7th icon — it's the absence of the icon (nothing
 shown in the status bar).
@@ -81,6 +77,12 @@ sources per cycle: a successful probe response, and a fixed timer that
 fires partway through the cycle. There is no separate animation loop and
 no formula that scales speed by latency — latency is simply how long
 step 2 below takes to happen.
+
+**The sweep is a ping-pong bounce, not a wrap.** The lit bar moves
+1→2→3→4→5, then reverses and moves back down 5→4→3→2→1, then reverses
+again — never jumping straight from bar 5 back to bar 1. Bar 1 and bar
+5 each appear once per direction change, not twice in a row. This is a
+KITT/scanner-style motion.
 
 **Probe, not ICMP.** Unprivileged Android apps can't open raw ICMP
 sockets (no `CAP_NET_RAW`), so "ping" here is a plain TCP connect-time
@@ -132,18 +134,68 @@ flowchart TD
     A[Master toggle] -->|OFF| H1[HIDDEN — icon removed]
     A -->|ON| B{On a network in scope?}
     B -->|Yes| C[ENABLED — tracer cycling]
+    B -->|Not known yet| W[No decision — hold current state]
     B -->|No| X{Hide when disabled?}
     X -->|Yes| H2[HIDDEN — icon removed]
     X -->|No| D[DISABLED — icon shown, all bars dim]
 ```
 
 - **Master toggle off → `HIDDEN`, always.** This is the whole-app
-  off switch; nothing else overrides it.
+  off switch; nothing else overrides it. It resolves immediately even
+  when the network state is still unknown, because this branch never
+  consults the network at all.
 - **Master toggle on, network in scope → `ENABLED`.** Ping-driven
   tracer runs as described above.
 - **Master toggle on, network out of scope →** the *hide when
   disabled* preference decides between `HIDDEN` (icon removed) and
   `DISABLED` (icon shown, all bars dim, tracer paused).
+- **Master toggle on, network scope not yet known → no decision.**
+  "Connectivity hasn't reported anything yet" is a third input state,
+  distinct from "reported, and we are not on a network in scope." Only
+  the latter is grounds for `DISABLED`/`HIDDEN`. The connectivity layer
+  keeps this window as close to zero as possible by reading the
+  platform's *current* networks — the whole set, and the default route —
+  synchronously when it subscribes, rather than waiting on the first
+  `NetworkCallback` to arrive, so the first decision is correct even if
+  those callbacks are slow or never come. Deriving a real, user-visible
+  verdict from the mere absence of a report would otherwise leave a
+  fresh install sitting on the paused tracer until the master toggle was
+  cycled off and on.
+
+## In-App Status Line
+The settings screen carries a one-line, plain-language status field
+("Status: connected, 42ms") describing what the service is doing right
+now. It exists to be a small honest log the user can glance at, so its
+one hard requirement is that everything it says is true at the moment it
+says it — a status field that is merely present, and technically holds
+text, is worse than none at all.
+
+It is therefore fed by a closed set of confirmed states, each reported
+from exactly one real transition:
+
+| State                                                 | Reported when                                                              |
+| ----------------------------------------------------- | -------------------------------------------------------------------------- |
+| starting up                                            | the service has started; no visibility decision has been reached yet        |
+| checking the connection                                | `ENABLED` applied and the cycle started; no probe has completed yet         |
+| connected, *N*ms                                       | a probe answered (or the automatic ack that follows one fired)              |
+| connection trouble / can't resolve the target host     | a probe attempt failed, named by which kind of failure it was               |
+| paused / waiting for a whitelisted Wi-Fi network       | `DISABLED` applied                                                          |
+| hidden                                                 | `HIDDEN` applied                                                            |
+| stopped                                                | the service instance was destroyed, so nothing will update the field again  |
+
+Until the first confirmed state arrives there is no status line on
+screen at all, rather than a default or placeholder one.
+
+Notification content never feeds this field. The notification is a
+separate surface with a different obligation: Android requires one to be
+posted immediately on service start, before anything has been decided,
+so it necessarily carries a placeholder — and a notification built to
+meet an API deadline is not evidence of a state having been reached.
+That placeholder accordingly states no verdict ("Uplink: starting…")
+rather than naming a network condition. For the same reason the first
+notification of a fresh cycle reads "checking connection," not
+"connected": the tracer sits at bar 1 because the cycle just started,
+not because anything answered.
 
 ## User Preferences
 - **Enable/disable toggle** — master on/off for the whole feature,
@@ -156,9 +208,34 @@ flowchart TD
   - Cellular only
   - Specific SSID(s) — a whitelist of one or more networks; the icon
     is only enabled while connected to a listed network.
-- **Ping target host** — default `1.1.1.1` (Cloudflare), with `8.8.8.8`
-  (Google) offered as an alternate quick-pick; user can override with
-  any custom host.
+
+  A phone normally holds several networks at once (associated with WiFi
+  while cellular data is also up), and the OS picks exactly one of them
+  as the default route for general traffic. The three modes that name a
+  transport — WiFi only, Cellular only, Specific SSID(s) — are matched
+  against *every* connected network, so "Cellular only" is in scope
+  whenever cellular is connected, whether or not it is the network
+  traffic is currently routed over; "WiFi only" likewise. Both can
+  legitimately be in scope at the same moment.
+
+  *Any connection* is the exception: it asks whether the device's
+  internet works rather than whether a transport is present, so it is
+  matched against the default route alone and is the only mode that
+  requires the OS to have validated that network. The probe opens an
+  unbound socket and therefore measures the default route, so this keeps
+  the scope decision aligned with what the probe reports.
+
+  A network counts as connected for all four modes when it declares
+  itself an internet-carrying WiFi or cellular network. The
+  special-purpose cellular connections a phone holds open regardless of
+  the mobile-data setting (IMS/VoLTE, MMS, SUPL) don't declare that, and
+  don't count. Validation is deliberately *not* required for the three
+  transport modes: a connected-but-broken network stays in scope so the
+  tracer's freeze-on-failure behavior can report it, rather than being
+  hidden as out of scope.
+- **Ping target host** — default `one.one.one.one` (Cloudflare), with
+  `dns.google` (Google) offered as an alternate quick-pick; user can
+  override with any custom host.
 
 ## Technical Notes
 - Foreground service (`FOREGROUND_SERVICE` permission). Type:
@@ -172,18 +249,38 @@ flowchart TD
   services that don't fit a named bucket — it requires a short
   justification string in the manifest and in the Play Console
   data-safety form, but it's the correct classification here.
-- `Handler`/`postDelayed` loop on the main looper; no wake lock — it's
-  acceptable for Doze to throttle timers while the screen is off, since
-  the icon only matters when the user can see it.
-- Notification: `setOngoing(true)`, `PRIORITY_LOW`. Also set real
-  accessibility text via `setContentTitle()`/`setContentText()` (e.g.
-  "Uplink: connected, 42ms") — the glanceable icon itself is
-  visual-only, but a screen reader should still get something from it.
+- `Handler`/`postDelayed` loop on a dedicated background `HandlerThread`
+  — the probe itself is a blocking call, up to 1000ms, retried
+  immediately with no back-off on failure per this doc, and the cycle
+  runner invokes it synchronously from inside the scheduler's own
+  callback; binding that to the main-thread looper would block the UI
+  thread for every probe attempt and risk an ANR during a sustained
+  outage's back-to-back retries. No wake lock — it's acceptable for
+  Doze to throttle timers while the screen is off, since the icon only
+  matters when the user can see it.
+- Notification: `setOngoing(true)`. Channel importance is
+  `IMPORTANCE_DEFAULT`, not `IMPORTANCE_LOW` — on-device testing showed
+  `IMPORTANCE_LOW` notifications don't get a status-bar tray icon at
+  all, only a shade entry, so `DEFAULT` is required for the icon to
+  show. `DEFAULT` plays a one-time notification sound on first post;
+  this is suppressed for later updates via `setOnlyAlertOnce(true)`.
+  Also set real accessibility text via
+  `setContentTitle()`/`setContentText()` (e.g. "Uplink: connected,
+  42ms") — the glanceable icon itself is visual-only, but a screen
+  reader should still get something from it.
 - `POST_NOTIFICATIONS` runtime permission (Android 13+) must be
   requested explicitly; without it the icon can't be shown at all, so
   this needs its own request/rationale flow, not just a manifest entry.
 - Network state monitored via `ConnectivityManager.NetworkCallback`;
-  transitions feed directly into the state logic above.
+  transitions feed directly into the state logic above. Two callbacks
+  are registered: one on a `NetworkRequest` matching every
+  internet-carrying WiFi/cellular network, which maintains the set of
+  connected networks the transport and SSID modes are matched against,
+  and one default-network callback, which tracks the single route
+  *Any connection* is matched against. Neither is derivable from the
+  other — the default route can be a transport the request filters out
+  entirely (ethernet, or a VPN layered over the real uplink) — and
+  losing one network never discards what is known about the others.
 - Reading the current SSID for the network-scope whitelist requires
   `ACCESS_FINE_LOCATION` (Android 10+ OS restriction — no way around
   it). Request this permission only when the user actually turns on

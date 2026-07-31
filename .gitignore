@@ -1,3 +1,16 @@
 *.code-workspace
 .obsidian/*
 .claude/
+
+# Android / Gradle
+local.properties
+.gradle/
+.kotlin/
+build/
+app/build/
+bin/
+*.iml
+.idea/
+captures/
+.cxx/
+deleteme/*
