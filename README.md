@@ -136,7 +136,7 @@ Contributions / Contact
 
 Credits
 -------
-**UplinkStatus** © 2024 [Scott Kirvan](https://github.com/ScottKirvan), licensed under the [MIT License](LICENSE.md).
+**UplinkStatus** © 2026 [Scott Kirvan](https://github.com/ScottKirvan), licensed under the [MIT License](LICENSE.md).
 Bootstrapped from [ScooterGitTemplate](https://github.com/ScottKirvan/ScooterGitTemplate).
 
 Project Link: [UplinkStatus](https://github.com/ScottKirvan/UplinkStatus)
