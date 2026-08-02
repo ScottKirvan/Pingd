@@ -1,7 +1,7 @@
 # UplinkStatus [![starline](https://raw.githubusercontent.com/ScottKirvan/UplinkStatus/refs/heads/starlines/ScottKirvan/UplinkStatus/starline.svg)](https://github.com/qoomon/starlines)
 <div align="center">
 
-  <img src="assets/media/bargraph.svg" alt="logo" width="120" height="auto" />
+  <img src="assets/media/logo.jpg" alt="logo" width="200" height="auto" />
   <h1><a href="https://github.com/ScottKirvan/UplinkStatus">UplinkStatus</a></h1>
   <h3>A status-bar icon for your uplink health</h3>
 
