@@ -1,6 +1,6 @@
 # Contributing to UplinkStatus
 
-First off, thank you for considering contributing to UplinkStatus! It's people like you that make this template better for everyone.
+First off, thank you for considering contributing to UplinkStatus! It's people like you that make this project better for everyone.
 
 ## Code of Conduct
 
@@ -33,7 +33,7 @@ Enhancement suggestions are tracked as GitHub issues. When creating an enhanceme
 
 **Before submitting a pull request:**
 
-1. Fork the repository and create your branch from `main`
+1. Fork the repository and create your branch from `dev` (the ongoing development branch — see [Branches](README.md#branches))
 2. If you've added code, add tests if applicable
 3. Ensure your code follows the existing style
 4. Make sure your commits follow our commit message conventions
@@ -54,10 +54,10 @@ We use [Conventional Commits](https://www.conventionalcommits.org/) with [Semant
 
 **Examples:**
 ```
-feat: add Python .gitignore template
-fix: correct LICENSE badge URL in README
+feat: add cellular-only network scope support
+fix: correct SSID whitelist matching against connected networks
 docs: update installation instructions
-feat!: change template initialization workflow
+fix!: change default ping target host
 ```
 
 ### Pull Request Process
@@ -70,35 +70,26 @@ feat!: change template initialization workflow
 ## Development Setup
 
 1. Fork and clone the repository
-2. Create a new branch for your feature/fix
+2. Create a new branch for your feature/fix, off `dev`
 3. Make your changes
-4. Test your changes by creating a new repository from your template
+4. Run `./gradlew build` to compile, run tests, and lint
 5. Submit a pull request
 
 ## Project Structure
 
-```
-UplinkStatus/
-├── .github/
-│   ├── gitignore-templates/  # Example .gitignore files
-│   ├── ISSUE_TEMPLATE/       # Issue templates
-│   ├── workflows/            # GitHub Actions
-│   └── PULL_REQUEST_TEMPLATE.md
-├── assets/                   # Images and CSS for GitHub Pages
-├── notes/                    # CHANGELOG, VERSION, TODO
-├── README.md
-├── LICENSE.md
-└── CONTRIBUTING.md
-```
+See the [Repo Layout](README.md#repo-layout) section in the README.
 
 ## Testing
 
-When making changes to the template initialization workflow, test by:
+```bash
+./gradlew build   # compiles, assembles debug + release APKs, runs unit tests, lints
+./gradlew test    # unit tests only
+```
 
-1. Creating a new repository from your modified template
-2. Verifying the workflow runs successfully
-3. Checking that all repository references are updated correctly
-4. Confirming the workflow deletes itself after completion
+Requires a local Android SDK — see [Development](README.md#development) in the
+README for setup. No device or emulator is required; the Compose UI tests run
+on the JVM via Robolectric. `.github/workflows/android-ci.yml` runs
+`./gradlew build` on every push/PR that touches the Android project.
 
 ## Questions?
 
