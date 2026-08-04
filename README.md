@@ -10,7 +10,7 @@
   <a href="https://github.com/ScottKirvan/UplinkStatus/graphs/contributors">
     <img src="https://img.shields.io/github/contributors/ScottKirvan/UplinkStatus" alt="contributors" />
   </a>
-  <a href="">
+  <a href="https://github.com/ScottKirvan/UplinkStatus/commits/main">
     <img src="https://img.shields.io/github/last-commit/ScottKirvan/UplinkStatus" alt="last update" />
   </a>
   <a href="https://github.com/ScottKirvan/UplinkStatus/network/members">
