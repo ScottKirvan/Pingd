@@ -286,6 +286,23 @@ not because anything answered.
   it). Request this permission only when the user actually turns on
   SSID whitelisting, not up front, so the base app doesn't need a
   location permission most users will never trigger.
+- The SSID a `NetworkCallback` delivers is redacted according to the
+  app's location permission *as of the moment that capabilities object
+  was dispatched*, and the OS never revisits that decision for an object
+  already delivered. Since granting the permission changes nothing about
+  the network itself, the OS has no reason to dispatch a replacement:
+  a device that stays on one WiFi network can keep reporting an
+  unreadable SSID indefinitely after the grant — permanently out of
+  scope under a whitelist naming that exact network. The app therefore
+  announces its own location-permission changes (from the permission
+  request result, and on activity resume for a grant made in system
+  settings), and the connectivity layer answers each one with a fresh
+  synchronous read of the platform's current networks, whose values
+  reflect the permission state as it is now. This is additive to the
+  callbacks, which remain the source of truth for every genuine network
+  change; a refresh replaces the whole picture rather than patching part
+  of it, and a platform that refuses the query leaves what is already
+  known untouched.
 - Each probe uses a fixed 1000ms timeout. On failure, retry immediately
   with the same timeout — no adaptive back-off.
 - Only call `notify()` on an ack (tracer advance) or a state transition
