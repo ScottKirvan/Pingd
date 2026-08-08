@@ -42,8 +42,10 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.alpha
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.testTag
+import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import androidx.core.content.ContextCompat
+import com.uplinkstatus.app.BuildConfig
 import com.uplinkstatus.app.permissions.LocationPermissionStatus
 import com.uplinkstatus.app.prefs.NetworkScope
 import com.uplinkstatus.app.prefs.UplinkPreferences
@@ -246,9 +248,107 @@ fun SettingsScreen(
             // The live rolling graphs of what the probes have actually been doing (ping
             // success % and latency), directly under the preview and above everything that
             // configures them -- same reasoning as the preview's placement: these report on
-            // the thing this screen configures, they aren't settings themselves. The window
-            // they cover is a setting, and lives with the others below.
+            // the thing this screen configures, they aren't settings themselves.
             HistoryGraphs()
+
+            // The two settings that directly govern what the preview and the graphs just
+            // above are showing -- pacing decides how the tracer cycle above them runs, and
+            // the window decides how far back the graphs above them look. Kept right under
+            // what they affect rather than buried with the rest of the settings below, and
+            // still gated on the master toggle like every other setting here: unlike the
+            // graphs' own reset action, these change how the *service* behaves, not just what
+            // is currently on screen, so there is nothing for them to affect while it is off.
+            Column(
+                modifier = Modifier.alpha(if (controlsEnabled) 1f else DISABLED_ALPHA),
+                verticalArrangement = Arrangement.spacedBy(24.dp),
+            ) {
+                // --- Step delay (ping pacing) ---
+                Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                    Text(text = "Ping pacing", style = MaterialTheme.typography.titleMedium)
+                    Text(
+                        text = "The wait between every step of the tracer's cycle. " +
+                            "Lower paces probes closer together; 0 is back-to-back with no added wait.",
+                        style = MaterialTheme.typography.bodySmall,
+                    )
+
+                    // Local drag position, separate from the persisted value: committing on
+                    // every onValueChange tick would lock the whole panel (via applyChange's
+                    // isPending) for the length of the drag gesture, not just its result. Keyed
+                    // on the persisted value so an external change (e.g. a future reset action)
+                    // is reflected, without a live drag being clobbered by an unrelated
+                    // recomposition in between.
+                    var sliderPosition by remember(preferences.stepDelayMs) {
+                        mutableStateOf(preferences.stepDelayMs.toFloat())
+                    }
+                    Slider(
+                        value = sliderPosition,
+                        onValueChange = { sliderPosition = it },
+                        onValueChangeFinished = {
+                            applyChange { repository.setStepDelayMs(sliderPosition.toLong()) }
+                        },
+                        valueRange = UplinkPreferences.STEP_DELAY_RANGE_MS.first.toFloat()..
+                            UplinkPreferences.STEP_DELAY_RANGE_MS.last.toFloat(),
+                        enabled = controlsEnabled,
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .testTag(TAG_STEP_DELAY_SLIDER),
+                    )
+                    Text(
+                        text = if (sliderPosition.toLong() <= 0L) {
+                            "Free wheeling (0 ms)"
+                        } else {
+                            "${sliderPosition.toLong()} ms"
+                        },
+                        style = MaterialTheme.typography.bodySmall,
+                    )
+                }
+
+                HorizontalDivider()
+
+                // --- History window (shared by both graphs above) ---
+                Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                    Text(text = "History window", style = MaterialTheme.typography.titleMedium)
+                    Text(
+                        text = "How far back the graphs above reach. One window for both of " +
+                            "them, and for the ping-success percentage.",
+                        style = MaterialTheme.typography.bodySmall,
+                    )
+
+                    // Same local-drag-position pattern as the pacing slider above, and for the
+                    // same reason: committing mid-drag would lock the panel for the whole
+                    // gesture rather than for its result.
+                    var windowSliderMinutes by remember(preferences.historyWindowMs) {
+                        mutableStateOf(historyWindowMinutes(preferences.historyWindowMs).toFloat())
+                    }
+                    Slider(
+                        value = windowSliderMinutes,
+                        onValueChange = { windowSliderMinutes = it },
+                        onValueChangeFinished = {
+                            applyChange {
+                                repository.setHistoryWindowMs(
+                                    windowSliderMinutes.roundToInt() *
+                                        UplinkPreferences.HISTORY_WINDOW_STEP_MS,
+                                )
+                            }
+                        },
+                        valueRange = HISTORY_WINDOW_MINUTES_RANGE,
+                        // Whole minutes only: the slider's own step count, rather than rounding
+                        // an arbitrary float afterwards, is what makes the value under the
+                        // thumb and the value that gets persisted the same number.
+                        steps = HISTORY_WINDOW_SLIDER_STEPS,
+                        enabled = controlsEnabled,
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .testTag(TAG_HISTORY_WINDOW_SLIDER),
+                    )
+                    Text(
+                        text = describeDuration(
+                            windowSliderMinutes.roundToInt() * UplinkPreferences.HISTORY_WINDOW_STEP_MS,
+                        ),
+                        style = MaterialTheme.typography.bodySmall,
+                    )
+                }
+            }
 
             Text(text = "Uplink status settings", style = MaterialTheme.typography.titleLarge)
 
@@ -404,96 +504,15 @@ fun SettingsScreen(
                         }
                     }
                 }
-
-                HorizontalDivider()
-
-                // --- Step delay (ping pacing) ---
-                Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
-                    Text(text = "Ping pacing", style = MaterialTheme.typography.titleMedium)
-                    Text(
-                        text = "The wait between every step of the tracer's cycle. " +
-                            "Lower paces probes closer together; 0 is back-to-back with no added wait.",
-                        style = MaterialTheme.typography.bodySmall,
-                    )
-
-                    // Local drag position, separate from the persisted value: committing on
-                    // every onValueChange tick would lock the whole panel (via applyChange's
-                    // isPending) for the length of the drag gesture, not just its result. Keyed
-                    // on the persisted value so an external change (e.g. a future reset action)
-                    // is reflected, without a live drag being clobbered by an unrelated
-                    // recomposition in between.
-                    var sliderPosition by remember(preferences.stepDelayMs) {
-                        mutableStateOf(preferences.stepDelayMs.toFloat())
-                    }
-                    Slider(
-                        value = sliderPosition,
-                        onValueChange = { sliderPosition = it },
-                        onValueChangeFinished = {
-                            applyChange { repository.setStepDelayMs(sliderPosition.toLong()) }
-                        },
-                        valueRange = UplinkPreferences.STEP_DELAY_RANGE_MS.first.toFloat()..
-                            UplinkPreferences.STEP_DELAY_RANGE_MS.last.toFloat(),
-                        enabled = controlsEnabled,
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .testTag(TAG_STEP_DELAY_SLIDER),
-                    )
-                    Text(
-                        text = if (sliderPosition.toLong() <= 0L) {
-                            "Free wheeling (0 ms)"
-                        } else {
-                            "${sliderPosition.toLong()} ms"
-                        },
-                        style = MaterialTheme.typography.bodySmall,
-                    )
-                }
-
-                HorizontalDivider()
-
-                // --- History window (shared by both graphs above) ---
-                Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
-                    Text(text = "History window", style = MaterialTheme.typography.titleMedium)
-                    Text(
-                        text = "How far back the graphs above reach. One window for both of " +
-                            "them, and for the ping-success percentage.",
-                        style = MaterialTheme.typography.bodySmall,
-                    )
-
-                    // Same local-drag-position pattern as the pacing slider above, and for the
-                    // same reason: committing mid-drag would lock the panel for the whole
-                    // gesture rather than for its result.
-                    var windowSliderMinutes by remember(preferences.historyWindowMs) {
-                        mutableStateOf(historyWindowMinutes(preferences.historyWindowMs).toFloat())
-                    }
-                    Slider(
-                        value = windowSliderMinutes,
-                        onValueChange = { windowSliderMinutes = it },
-                        onValueChangeFinished = {
-                            applyChange {
-                                repository.setHistoryWindowMs(
-                                    windowSliderMinutes.roundToInt() *
-                                        UplinkPreferences.HISTORY_WINDOW_STEP_MS,
-                                )
-                            }
-                        },
-                        valueRange = HISTORY_WINDOW_MINUTES_RANGE,
-                        // Whole minutes only: the slider's own step count, rather than rounding
-                        // an arbitrary float afterwards, is what makes the value under the
-                        // thumb and the value that gets persisted the same number.
-                        steps = HISTORY_WINDOW_SLIDER_STEPS,
-                        enabled = controlsEnabled,
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .testTag(TAG_HISTORY_WINDOW_SLIDER),
-                    )
-                    Text(
-                        text = describeDuration(
-                            windowSliderMinutes.roundToInt() * UplinkPreferences.HISTORY_WINDOW_STEP_MS,
-                        ),
-                        style = MaterialTheme.typography.bodySmall,
-                    )
-                }
             }
+
+            Text(
+                text = "Version ${BuildConfig.VERSION_NAME}",
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                modifier = Modifier.fillMaxWidth(),
+                textAlign = TextAlign.Center,
+            )
         }
     }
 }
