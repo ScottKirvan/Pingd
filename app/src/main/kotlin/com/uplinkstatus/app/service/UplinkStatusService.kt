@@ -77,6 +77,7 @@ class UplinkStatusService : Service() {
 
     internal var prober: Prober = TcpConnectProber()
     internal var probeTarget: ProbeTarget = ProbeTarget(host = ProbeTarget.DEFAULT_HOST)
+    internal var stepDelayMs: Long = ProbeCycleRunner.DEFAULT_STEP_DELAY_MS
     internal var schedulerFactory: () -> TracerScheduler = { AndroidTracerScheduler(workerHandler) }
     internal var runOnWorker: (Runnable) -> Unit = { action -> workerHandler.post(action) }
     internal lateinit var preferencesRepository: UplinkPreferencesRepository
@@ -223,6 +224,7 @@ class UplinkStatusService : Service() {
             ) { preferences, networkInScope -> preferences to networkInScope }
                 .collect { (preferences, networkInScope) ->
                     probeTarget = ProbeTarget(host = preferences.pingTargetHost)
+                    stepDelayMs = preferences.stepDelayMs
                     currentNetworkScope = preferences.networkScope
                     // decideOrNull, not decide: networkInScope is nullable ("not reported
                     // yet"), and a null answer means this emission is not grounds for any
@@ -310,6 +312,7 @@ class UplinkStatusService : Service() {
             target = probeTarget,
             scheduler = schedulerFactory(),
             listener = notificationController,
+            stepDelayMs = stepDelayMs,
         )
         cycleRunner = runner
         runOnWorker(Runnable { runner.start() })

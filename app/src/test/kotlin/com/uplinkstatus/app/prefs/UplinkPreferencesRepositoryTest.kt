@@ -3,7 +3,9 @@ package com.uplinkstatus.app.prefs
 import androidx.datastore.core.DataStore
 import androidx.datastore.preferences.core.PreferenceDataStoreFactory
 import androidx.datastore.preferences.core.Preferences
+import androidx.datastore.preferences.core.longPreferencesKey
 import com.uplinkstatus.core.probe.ProbeTarget
+import com.uplinkstatus.core.tracer.ProbeCycleRunner
 import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.test.UnconfinedTestDispatcher
@@ -53,6 +55,7 @@ class UplinkPreferencesRepositoryTest {
         assertEquals(NetworkScope.WIFI_ONLY, preferences.networkScope)
         assertEquals(emptySet<String>(), preferences.ssidWhitelist)
         assertEquals(ProbeTarget.DEFAULT_HOST, preferences.pingTargetHost)
+        assertEquals(ProbeCycleRunner.DEFAULT_STEP_DELAY_MS, preferences.stepDelayMs)
     }
 
     @Test
@@ -102,6 +105,44 @@ class UplinkPreferencesRepositoryTest {
     }
 
     @Test
+    fun `setStepDelayMs writes and reads back a custom delay`() = runTest {
+        val repository = DataStoreUplinkPreferencesRepository(newDataStore())
+
+        repository.setStepDelayMs(137L)
+
+        assertEquals(137L, repository.preferencesFlow.first().stepDelayMs)
+    }
+
+    @Test
+    fun `setStepDelayMs coerces a value outside the slider range instead of storing it verbatim`() = runTest {
+        val repository = DataStoreUplinkPreferencesRepository(newDataStore())
+
+        repository.setStepDelayMs(-50L)
+        assertEquals(UplinkPreferences.STEP_DELAY_RANGE_MS.first, repository.preferencesFlow.first().stepDelayMs)
+
+        repository.setStepDelayMs(5_000L)
+        assertEquals(UplinkPreferences.STEP_DELAY_RANGE_MS.last, repository.preferencesFlow.first().stepDelayMs)
+    }
+
+    @Test
+    fun `a persisted step delay outside the slider range is coerced back into range on read`() = runTest {
+        val dataStore = newDataStore()
+        // Simulates a value from a future app version with a wider range, or direct file
+        // tampering -- written straight to the DataStore file, bypassing setStepDelayMs's own
+        // coercion, the same way the unrecognized-network-scope test above bypasses
+        // setNetworkScope.
+        dataStore.updateData { prefs ->
+            prefs.toMutablePreferences().apply {
+                this[longPreferencesKey("step_delay_ms")] = 9_999L
+            }
+        }
+
+        val preferences = DataStoreUplinkPreferencesRepository(dataStore).preferencesFlow.first()
+
+        assertEquals(UplinkPreferences.STEP_DELAY_RANGE_MS.last, preferences.stepDelayMs)
+    }
+
+    @Test
     fun `preferences survive a fresh repository instance over the same underlying file`() = runTest {
         val dataStore = newDataStore("shared.preferences_pb")
         val firstInstance = DataStoreUplinkPreferencesRepository(dataStore)
@@ -109,6 +150,7 @@ class UplinkPreferencesRepositoryTest {
         firstInstance.setNetworkScope(NetworkScope.SSID_WHITELIST)
         firstInstance.setSsidWhitelist(setOf("HomeWifi"))
         firstInstance.setPingTargetHost(ProbeTarget.ALTERNATE_HOST)
+        firstInstance.setStepDelayMs(250L)
 
         // A second repository instance around the *same* DataStore file simulates the
         // process being killed and the app cold-starting again -- nothing here is held in
@@ -120,6 +162,7 @@ class UplinkPreferencesRepositoryTest {
         assertEquals(NetworkScope.SSID_WHITELIST, reread.networkScope)
         assertEquals(setOf("HomeWifi"), reread.ssidWhitelist)
         assertEquals(ProbeTarget.ALTERNATE_HOST, reread.pingTargetHost)
+        assertEquals(250L, reread.stepDelayMs)
     }
 
     @Test

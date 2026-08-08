@@ -240,6 +240,16 @@ class UplinkStatusServiceTest {
     }
 
     @Test
+    fun `onStartCommand wires the persisted step delay into the probe cycle`() = runTest {
+        fakePreferencesRepository.setStepDelayMs(137L)
+        fakeNetworkScopeStatus.inScope = true
+
+        controller.startCommand(0, 1)
+
+        assertEquals(137L, service.stepDelayMs)
+    }
+
+    @Test
     fun `a preference change while the service is already running is applied without restarting it`() = runTest {
         controller.startCommand(0, 1)
         assertEquals(1, fakeProber.callCount)

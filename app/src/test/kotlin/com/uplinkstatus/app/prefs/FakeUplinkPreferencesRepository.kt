@@ -46,4 +46,8 @@ internal class FakeUplinkPreferencesRepository(
     override suspend fun setPingTargetHost(host: String) {
         state.value = state.value.copy(pingTargetHost = host)
     }
+
+    override suspend fun setStepDelayMs(delayMs: Long) {
+        state.value = state.value.copy(stepDelayMs = delayMs.coerceIn(UplinkPreferences.STEP_DELAY_RANGE_MS))
+    }
 }

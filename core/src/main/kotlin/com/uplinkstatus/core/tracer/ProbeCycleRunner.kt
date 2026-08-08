@@ -5,22 +5,31 @@ import com.uplinkstatus.core.probe.ProbeTarget
 import com.uplinkstatus.core.probe.Prober
 
 /**
- * Drives the probe-driven tracer cycle described in the spec's "Core Mechanism":
+ * Drives the probe-driven tracer cycle described in the spec's "Core Mechanism": a repeating
+ * **ping, ping, fake** sequence, not a strict 1:1 ping/fake alternation --
  *
  * 1. Open a probe (TCP connect, 1000ms timeout).
  * 2. Probe succeeds -> ack -> tracer advances one step.
- * 3. Wait 500ms -> ack (automatic) -> tracer advances another step.
- * 4. Wait another 500ms (no ack).
- * 5. Back to step 1.
+ * 3. Wait [stepDelayMs] -> a second real probe (back to step 1).
+ * 4. Second probe succeeds -> ack -> tracer advances another step.
+ * 5. Wait [stepDelayMs] -> ack (automatic, no real probe) -> tracer advances a third step.
+ * 6. Wait [stepDelayMs] (no ack) -> back to step 1.
+ *
+ * Two real probes per automatic ack, not one, deliberately: a strict ping/fake alternation
+ * makes every freeze land in the same phase of the bounce, so an outage always stops the
+ * tracer on the same handful of bars -- see [realProbesSinceFakeAck].
  *
  * On probe timeout/failure: no ack fires, the tracer freezes at its current position, and
- * the loop retries immediately with a new probe (same timeout, no back-off) until one
- * succeeds — at which point acks resume and the tracer continues from wherever it froze.
+ * the loop retries immediately with a new probe (same timeout, no back-off, and no
+ * [stepDelayMs] wait before the retry) until one succeeds — at which point acks resume and
+ * the tracer continues from wherever it froze. A failure does not consume a slot in the
+ * ping/ping/fake sequence: [realProbesSinceFakeAck] only advances on a real ack, so an
+ * outage mid-sequence resumes at the same point once connectivity returns.
  *
- * This class owns no real threads and never blocks on wall-clock time itself: the 500ms
- * waits are delegated to an injected [TracerScheduler], and probe attempts are delegated
- * to an injected [Prober]. That's what makes the whole cycle - including its timing and
- * sequencing - unit-testable on the plain JVM with fakes that respond instantly, per the
+ * This class owns no real threads and never blocks on wall-clock time itself: the
+ * [stepDelayMs] waits are delegated to an injected [TracerScheduler], and probe attempts are
+ * delegated to an injected [Prober]. That's what makes the whole cycle - including its timing
+ * and sequencing - unit-testable on the plain JVM with fakes that respond instantly, per the
  * brief's requirement not to make tests slow/flaky by sleeping for real intervals.
  *
  * Failure retries are a plain `while` loop rather than recursive calls, specifically so a
@@ -55,7 +64,18 @@ class ProbeCycleRunner(
     private val scheduler: TracerScheduler,
     private val listener: CycleListener,
     private val tracer: AckTracer = AckTracer(),
+    /** The user-configurable pacing wait between every step -- real ack, automatic ack, and
+     * before the next probe alike. 0 means back-to-back with no added wait ("free wheeling");
+     * never applied before a failure retry, which stays immediate per spec regardless of this
+     * value. Must be non-negative; a negative delay isn't a real duration and every scheduler
+     * implementation this project uses treats it as an error or as an unintended "immediately"
+     * that would silently defeat the pacing this setting exists to provide. */
+    private val stepDelayMs: Long = DEFAULT_STEP_DELAY_MS,
 ) {
+
+    init {
+        require(stepDelayMs >= 0) { "stepDelayMs must be non-negative, was $stepDelayMs" }
+    }
 
     /**
      * Guards [running], [pendingTask], and every [CycleListener] callback — never held
@@ -74,6 +94,14 @@ class ProbeCycleRunner(
     private var running: Boolean = false
 
     private var pendingTask: ScheduledTask? = null
+
+    /** How many real probe successes have happened since the last automatic ack, 0 or 1 --
+     * only ever touched under [lifecycleLock], alongside [pendingTask]. Reaching
+     * [REAL_PROBES_PER_FAKE_ACK] is what triggers the automatic ack in [onStepDelayElapsed];
+     * the automatic ack itself resets this back to 0. A failed probe never touches this field
+     * at all (see the class doc's failure-retry paragraph), which is what makes an outage
+     * mid-sequence resume at the same point rather than restarting the pattern. */
+    private var realProbesSinceFakeAck: Int = 0
 
     /** Current tracer position, readable at any time (e.g. by a consumer that wants the
      * icon state without waiting for the next event). */
@@ -146,37 +174,58 @@ class ProbeCycleRunner(
         }
     }
 
-    /** Step 2: the probe-success ack, then schedules step 3 (the automatic ack) 500ms out. */
+    /** A real probe succeeded: ack, count it toward [realProbesSinceFakeAck], then schedule
+     * [onStepDelayElapsed] to decide what happens once [stepDelayMs] has passed. */
     private fun onProbeSucceeded(result: ProbeResult.Success) {
         synchronized(lifecycleLock) {
             if (!running) return
             val position = tracer.ack()
             listener.onEvent(CycleEvent.Advanced(position, AckSource.PROBE_SUCCESS, result.latencyMs))
-            pendingTask = scheduler.postDelayed(AUTO_ACK_DELAY_MS) {
-                onAutoAckDue()
+            realProbesSinceFakeAck++
+            pendingTask = scheduler.postDelayed(stepDelayMs) {
+                onStepDelayElapsed()
             }
         }
     }
 
-    /** Step 3: the automatic ack, then schedules step 4 (the non-ack gap) 500ms out. */
-    private fun onAutoAckDue() {
+    /**
+     * Fires [stepDelayMs] after *any* completed step — a real ack or the automatic ack alike
+     * — and is the one place that decides what the next step is, purely from
+     * [realProbesSinceFakeAck]: a second real probe (if only one has happened since the last
+     * automatic ack), or the automatic ack (if two have). This is what makes ping/ping/fake a
+     * single loop rather than two near-duplicate step-3/step-4 methods that would otherwise
+     * need to stay in sync by hand.
+     *
+     * The real probe branch runs outside [lifecycleLock] deliberately, same as [start]: it's
+     * about to block on [Prober.probe], and holding the lock across that would reintroduce
+     * the "stop has to wait out the outage" problem the class doc's threading contract exists
+     * to prevent.
+     */
+    private fun onStepDelayElapsed() {
+        val nextStepIsFakeAck = synchronized(lifecycleLock) {
+            if (!running) return
+            pendingTask = null
+            realProbesSinceFakeAck >= REAL_PROBES_PER_FAKE_ACK
+        }
+        if (nextStepIsFakeAck) {
+            onFakeAckDue()
+        } else {
+            runProbeAttempts()
+        }
+    }
+
+    /** The automatic ack: no real probe, just an ack and a reset of [realProbesSinceFakeAck]
+     * back to 0 so the next [onStepDelayElapsed] sends the cycle back to a real probe. */
+    private fun onFakeAckDue() {
         synchronized(lifecycleLock) {
             if (!running) return
             val position = tracer.ack()
             listener.onEvent(CycleEvent.Advanced(position, AckSource.AUTOMATIC))
-            pendingTask = scheduler.postDelayed(GAP_DELAY_MS) {
-                onGapElapsed()
+            realProbesSinceFakeAck = 0
+            pendingTask = scheduler.postDelayed(stepDelayMs) {
+                onStepDelayElapsed()
             }
         }
-    }
-
-    /** Step 4 -> step 5: the gap produces no ack; once it elapses, go back to step 1. */
-    private fun onGapElapsed() {
-        synchronized(lifecycleLock) {
-            if (!running) return
-            pendingTask = null
-        }
-        runProbeAttempts()
     }
 
     /** Delivers [event] to [listener] unless the cycle has already been stopped, returning
@@ -192,7 +241,13 @@ class ProbeCycleRunner(
     }
 
     companion object {
-        const val AUTO_ACK_DELAY_MS: Long = 500L
-        const val GAP_DELAY_MS: Long = 500L
+        /** The number of real probe successes per automatic ack -- see the class doc's
+         * "Two real probes per automatic ack, not one, deliberately" paragraph. */
+        const val REAL_PROBES_PER_FAKE_ACK: Int = 2
+
+        /** The default step delay (see [stepDelayMs]'s doc) -- unchanged from the fixed value
+         * every step used before this became user-configurable, so a fresh install's behavior
+         * doesn't silently change out from under anyone who never touches the new setting. */
+        const val DEFAULT_STEP_DELAY_MS: Long = 500L
     }
 }
