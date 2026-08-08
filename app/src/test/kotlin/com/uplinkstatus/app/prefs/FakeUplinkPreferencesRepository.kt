@@ -50,4 +50,10 @@ internal class FakeUplinkPreferencesRepository(
     override suspend fun setStepDelayMs(delayMs: Long) {
         state.value = state.value.copy(stepDelayMs = delayMs.coerceIn(UplinkPreferences.STEP_DELAY_RANGE_MS))
     }
+
+    override suspend fun setHistoryWindowMs(windowMs: Long) {
+        state.value = state.value.copy(
+            historyWindowMs = windowMs.coerceIn(UplinkPreferences.HISTORY_WINDOW_RANGE_MS),
+        )
+    }
 }

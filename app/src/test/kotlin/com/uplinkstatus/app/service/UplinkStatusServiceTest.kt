@@ -7,6 +7,7 @@ import com.uplinkstatus.app.prefs.FakeUplinkPreferencesRepository
 import com.uplinkstatus.app.prefs.NetworkScope
 import com.uplinkstatus.app.state.UplinkActivityStatus
 import com.uplinkstatus.app.state.UplinkIconDisplay
+import com.uplinkstatus.app.state.UplinkProbeHistory
 import com.uplinkstatus.app.state.UplinkRuntimeStatus
 import com.uplinkstatus.core.probe.ProbeResult
 import com.uplinkstatus.core.probe.ProbeTarget
@@ -88,6 +89,9 @@ class UplinkStatusServiceTest {
         // Same reasoning -- a previous test's last mirrored icon must not leak into this
         // one's assertions on it.
         UplinkIconDisplay.resetForTest()
+        // Same reasoning again -- and this one carries a window as well as samples, so a
+        // previous test's history-window assertion must not be what makes this one's pass.
+        UplinkProbeHistory.resetForTest()
 
         controller = Robolectric.buildService(UplinkStatusService::class.java)
         service = controller.create().get()
@@ -247,6 +251,29 @@ class UplinkStatusServiceTest {
         controller.startCommand(0, 1)
 
         assertEquals(137L, service.stepDelayMs)
+    }
+
+    @Test
+    fun `onStartCommand applies the persisted history window to the sample history`() = runTest {
+        fakePreferencesRepository.setHistoryWindowMs(2 * 60_000L)
+        fakeNetworkScopeStatus.inScope = true
+
+        controller.startCommand(0, 1)
+
+        assertEquals(2 * 60_000L, UplinkProbeHistory.history.value.windowMs)
+    }
+
+    /** The window is a live setting, not a start-up one: the collector that already re-derives
+     * visibility on every preferences emission has to carry this too, or a window narrowed
+     * while the service runs would keep retaining samples under the old one until something
+     * else happened to restart it. */
+    @Test
+    fun `a history window change while the service is running is applied without restarting it`() = runTest {
+        controller.startCommand(0, 1)
+
+        fakePreferencesRepository.setHistoryWindowMs(60_000L)
+
+        assertEquals(60_000L, UplinkProbeHistory.history.value.windowMs)
     }
 
     @Test

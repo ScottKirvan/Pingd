@@ -5,6 +5,7 @@ import androidx.compose.material3.MaterialTheme
 import androidx.datastore.preferences.core.PreferenceDataStoreFactory
 import androidx.compose.ui.test.assertCountEquals
 import androidx.compose.ui.test.assertIsEnabled
+import androidx.compose.ui.test.assertTextEquals
 import androidx.compose.ui.test.assertIsNotEnabled
 import androidx.compose.ui.test.junit4.createComposeRule
 import androidx.compose.ui.test.onAllNodesWithTag
@@ -25,6 +26,7 @@ import com.uplinkstatus.app.prefs.UplinkPreferencesRepository
 import com.uplinkstatus.app.service.UplinkStatusService
 import com.uplinkstatus.app.state.UplinkActivityStatus
 import com.uplinkstatus.app.state.UplinkIconDisplay
+import com.uplinkstatus.app.state.UplinkProbeHistory
 import com.uplinkstatus.app.state.UplinkRuntimeStatus
 import com.uplinkstatus.core.probe.ProbeTarget
 import com.uplinkstatus.core.visibility.UplinkVisibility
@@ -98,6 +100,9 @@ class SettingsScreenTest {
         // Same reasoning again -- a previous test's last mirrored icon must not leak into
         // this one's "preview absent by default" assertion below.
         UplinkIconDisplay.resetForTest()
+        // And again -- leftover samples would make the history cards show numbers before this
+        // test recorded anything.
+        UplinkProbeHistory.resetForTest()
     }
 
     private fun setContent() {
@@ -475,6 +480,46 @@ class SettingsScreenTest {
         composeTestRule.waitForIdle()
 
         composeTestRule.onNodeWithTag(TAG_SCANNER_PREVIEW).assertExists()
+    }
+
+    /**
+     * Thin wiring check, same split as the scanner preview's above -- [HistoryGraphsTest]
+     * covers the cards' own behavior; this only proves they are mounted on the real screen and
+     * fed by the real [UplinkProbeHistory], rather than existing only in their own test.
+     */
+    @Test
+    fun `the history graphs are mounted on the screen and read the live sample history`() {
+        setContent()
+
+        composeTestRule.onNodeWithTag(TAG_HISTORY_GRAPHS).assertExists()
+        composeTestRule.onNodeWithTag(TAG_PING_SUCCESS_VALUE).assertTextEquals("—")
+
+        UplinkProbeHistory.recordSuccess(latencyMs = 10, timestampMs = 0)
+        UplinkProbeHistory.recordFailure(timestampMs = 1_000)
+        composeTestRule.waitForIdle()
+
+        composeTestRule.onNodeWithTag(TAG_PING_SUCCESS_VALUE).assertTextEquals("50%")
+        composeTestRule.onNodeWithTag(TAG_LATENCY_VALUE).assertTextEquals("10 ms")
+    }
+
+    @Test
+    fun `the history window slider shows the default seven-minute window`() {
+        setContent()
+
+        composeTestRule.onNodeWithText("7 minutes").assertExists()
+    }
+
+    @Test
+    fun `setting the history window slider persists the new window`() {
+        setContent()
+
+        // Same SetProgress reasoning as the step delay slider above.
+        composeTestRule.onNodeWithTag(TAG_HISTORY_WINDOW_SLIDER).performScrollTo()
+            .performSemanticsAction(SemanticsActions.SetProgress) { it(3f) }
+        composeTestRule.waitForIdle()
+
+        assertEquals(3 * 60_000L, repository.current.historyWindowMs)
+        composeTestRule.onNodeWithText("3 minutes").assertExists()
     }
 
     @Test
