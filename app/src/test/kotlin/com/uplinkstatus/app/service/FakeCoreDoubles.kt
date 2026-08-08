@@ -33,8 +33,13 @@ internal class FakeProber(
     var callCount: Int = 0
         private set
 
+    /** Every [ProbeTarget] actually probed, in call order -- lets a test prove a running
+     * cycle picked up a new target live, not just that the service's own field changed. */
+    val targetsProbed = mutableListOf<ProbeTarget>()
+
     override fun probe(target: ProbeTarget): ProbeResult {
         callCount++
+        targetsProbed += target
         return if (queue.isNotEmpty()) queue.removeFirst() else defaultResult
     }
 }
@@ -45,7 +50,13 @@ internal class FakeProber(
 internal class FakeScheduler : TracerScheduler {
     val scheduled = mutableListOf<() -> Unit>()
 
+    /** Every delay value passed to [postDelayed], in call order -- lets a test prove a
+     * running cycle picked up a new step delay live, not just that the service's own field
+     * changed. */
+    val delays = mutableListOf<Long>()
+
     override fun postDelayed(delayMs: Long, action: () -> Unit): ScheduledTask {
+        delays += delayMs
         scheduled += action
         return ScheduledTask { scheduled.remove(action) }
     }

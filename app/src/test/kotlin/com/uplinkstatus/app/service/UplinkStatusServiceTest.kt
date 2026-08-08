@@ -253,6 +253,47 @@ class UplinkStatusServiceTest {
         assertEquals(137L, service.stepDelayMs)
     }
 
+    /**
+     * Regression test: `applyVisibility(ENABLED)` deliberately no-ops when the cycle is
+     * already running -- re-confirming ENABLED must not reset bar position or session state
+     * over an unrelated preference edit. But that no-op used to mean a *running* cycle never
+     * saw a step-delay change at all: the service's own [UplinkStatusService.stepDelayMs]
+     * field updated, but the already-constructed [com.uplinkstatus.core.tracer.ProbeCycleRunner]
+     * captured the old value at construction and never re-read it. The user-visible symptom
+     * was "changing the pacing slider does nothing" for as long as the tracer kept running.
+     */
+    @Test
+    fun `changing the step delay while already running reaches the live cycle, not just the service field`() = runTest {
+        controller.startCommand(0, 1)
+        assertEquals(1, fakeProber.callCount)
+        // One step (500ms, the default) is already pending at this point, scheduled *before*
+        // the change below -- updating stepDelayMs can't rewrite a callback already handed to
+        // the scheduler. What matters is the *next* one, scheduled once this one fires.
+
+        fakePreferencesRepository.setStepDelayMs(137L)
+        assertEquals(137L, service.stepDelayMs) // the field updates -- this was never the bug
+
+        fakeScheduler.delays.clear()
+        fakeScheduler.scheduled.toList().forEach { it() } // let the already-pending step fire
+
+        // The bug: did the running cycle's *next* scheduled step actually use the new value?
+        assertEquals(listOf(137L), fakeScheduler.delays)
+    }
+
+    /** Same bug, same fix, the other setting it affects: a ping-target-host change made while
+     * the tracer is already running must reach the live cycle's next probe, not only the
+     * service's own field. */
+    @Test
+    fun `changing the ping target host while already running reaches the live cycle, not just the service field`() = runTest {
+        controller.startCommand(0, 1)
+        assertEquals(1, fakeProber.callCount)
+
+        fakePreferencesRepository.setPingTargetHost("custom.example.invalid")
+        fakeScheduler.scheduled.toList().forEach { it() } // let the next step fire
+
+        assertTrue(fakeProber.targetsProbed.any { it.host == "custom.example.invalid" })
+    }
+
     @Test
     fun `onStartCommand applies the persisted history window to the sample history`() = runTest {
         fakePreferencesRepository.setHistoryWindowMs(2 * 60_000L)

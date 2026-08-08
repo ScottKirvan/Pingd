@@ -212,7 +212,7 @@ class ProbeCycleRunnerTest {
             target,
             FakeTracerScheduler(),
             RecordingCycleListener(),
-            stepDelayMs = -1L,
+            initialStepDelayMs = -1L,
         )
     }
 
@@ -228,6 +228,57 @@ class ProbeCycleRunnerTest {
         // The only scheduled delay is the one after the eventual success -- nothing was
         // scheduled for either failed attempt, regardless of how large stepDelayMs is.
         assertEquals(listOf(1000L), scheduler.history)
+    }
+
+    // --- Live-updatable target and pacing (a cycle already running, not a fresh one) ------
+
+    /**
+     * Regression test for the "changing the pacing slider does nothing" defect: a caller
+     * whose visibility logic treats "already running" as a no-op (see
+     * `UplinkStatusService.applyVisibility`'s `ENABLED` branch) has no way to reach an
+     * already-constructed cycle except through [ProbeCycleRunner.updateStepDelayMs]. Without
+     * it, a `stepDelayMs` preference change made while the tracer was running would silently
+     * apply to nothing until an unrelated event happened to stop and restart the cycle.
+     */
+    @Test
+    fun `updateStepDelayMs changes the delay used for the next scheduled step`() {
+        val prober = FakeProber(ProbeResult.Success(1), ProbeResult.Success(2))
+        val scheduler = FakeTracerScheduler()
+        val listener = RecordingCycleListener()
+        val cycleRunner = runner(prober, scheduler, listener, stepDelayMs = 500L)
+
+        cycleRunner.start()
+        assertEquals(listOf(500L), scheduler.history)
+
+        // The already-pending step keeps the delay it was scheduled with -- there is nothing
+        // to rewrite mid-wait. What has to change is the *next* one.
+        cycleRunner.updateStepDelayMs(137L)
+        scheduler.fireNext()
+
+        assertEquals(listOf(500L, 137L), scheduler.history)
+    }
+
+    @Test
+    fun `updateTarget changes the host used for the next probe`() {
+        val prober = FakeProber(ProbeResult.Success(1), ProbeResult.Success(2))
+        val scheduler = FakeTracerScheduler()
+        val listener = RecordingCycleListener()
+        val cycleRunner = runner(prober, scheduler, listener)
+
+        cycleRunner.start()
+        val newTarget = ProbeTarget(host = "custom.example.invalid")
+
+        cycleRunner.updateTarget(newTarget)
+        scheduler.fireNext() // the already-pending step -> the second, now-updated probe
+
+        assertEquals(listOf(target, newTarget), prober.targetsProbed)
+    }
+
+    @Test(expected = IllegalArgumentException::class)
+    fun `updateStepDelayMs rejects a negative value, same as the constructor`() {
+        val cycleRunner = runner(FakeProber(ProbeResult.Success(1)), FakeTracerScheduler(), RecordingCycleListener())
+
+        cycleRunner.updateStepDelayMs(-1L)
     }
 
     // --- Freeze-on-failure / resume-on-success --------------------------------------

@@ -226,6 +226,18 @@ class UplinkStatusService : Service() {
                 .collect { (preferences, networkInScope) ->
                     probeTarget = ProbeTarget(host = preferences.pingTargetHost)
                     stepDelayMs = preferences.stepDelayMs
+                    // applyVisibility's ENABLED branch deliberately no-ops while a cycle is
+                    // already running -- re-confirming ENABLED must not reset bar position or
+                    // session state over an unrelated preference edit (see its own doc). That
+                    // means a *new* ProbeCycleRunner picking up the two fields just above is
+                    // not enough on its own: an already-running one never gets reconstructed,
+                    // so it would otherwise keep the target/delay it was born with for as long
+                    // as it keeps running. Nudging it live (a no-op if cycleRunner is null --
+                    // nothing to push into yet, and startCycle() below will read the fresh
+                    // fields whenever it does run) is what makes changing either setting take
+                    // effect immediately instead of only at the next unrelated restart.
+                    cycleRunner?.updateTarget(probeTarget)
+                    cycleRunner?.updateStepDelayMs(stepDelayMs)
                     currentNetworkScope = preferences.networkScope
                     // The history graphs' shared window. Applied here rather than from the
                     // settings screen so the retention the samples are actually recorded under
@@ -318,10 +330,10 @@ class UplinkStatusService : Service() {
     private fun startCycle() {
         val runner = ProbeCycleRunner(
             prober = prober,
-            target = probeTarget,
+            initialTarget = probeTarget,
             scheduler = schedulerFactory(),
             listener = notificationController,
-            stepDelayMs = stepDelayMs,
+            initialStepDelayMs = stepDelayMs,
         )
         cycleRunner = runner
         runOnWorker(Runnable { runner.start() })
