@@ -17,6 +17,7 @@ import androidx.compose.ui.test.performClick
 import androidx.compose.ui.test.performScrollTo
 import androidx.compose.ui.test.performSemanticsAction
 import androidx.compose.ui.test.performTextInput
+import com.uplinkstatus.app.BuildConfig
 import com.uplinkstatus.app.R
 import com.uplinkstatus.app.prefs.DataStoreUplinkPreferencesRepository
 import com.uplinkstatus.app.prefs.FakeUplinkPreferencesRepository
@@ -317,6 +318,12 @@ class SettingsScreenTest {
         composeTestRule.onNodeWithTag(TAG_HIDE_WHEN_DISABLED_TOGGLE).assertIsNotEnabled()
         composeTestRule.onNodeWithTag(TAG_NETWORK_SCOPE_DROPDOWN).performScrollTo().assertIsNotEnabled()
         composeTestRule.onNodeWithTag(TAG_PING_TARGET_DROPDOWN).performScrollTo().assertIsNotEnabled()
+        // Positioned up by the graphs rather than down with the rest of the settings, but
+        // still governs the *service's* behavior (pacing, retention), not just what is
+        // currently on screen -- so it stays gated on the master toggle like everything else
+        // here, unlike the graphs' own reset action.
+        composeTestRule.onNodeWithTag(TAG_STEP_DELAY_SLIDER).performScrollTo().assertIsNotEnabled()
+        composeTestRule.onNodeWithTag(TAG_HISTORY_WINDOW_SLIDER).performScrollTo().assertIsNotEnabled()
     }
 
     @Test
@@ -451,6 +458,15 @@ class SettingsScreenTest {
 
         assertEquals(0L, repository.current.stepDelayMs)
         composeTestRule.onNodeWithText("Free wheeling (0 ms)").assertExists()
+    }
+
+    @Test
+    fun `the app version is shown at the bottom of the screen`() {
+        setContent()
+
+        composeTestRule.onNodeWithText("Version " + BuildConfig.VERSION_NAME)
+            .performScrollTo()
+            .assertExists()
     }
 
     @Test
