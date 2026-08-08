@@ -11,8 +11,10 @@ import androidx.compose.ui.test.onAllNodesWithTag
 import androidx.compose.ui.test.onAllNodesWithText
 import androidx.compose.ui.test.onNodeWithTag
 import androidx.compose.ui.test.onNodeWithText
+import androidx.compose.ui.semantics.SemanticsActions
 import androidx.compose.ui.test.performClick
 import androidx.compose.ui.test.performScrollTo
+import androidx.compose.ui.test.performSemanticsAction
 import androidx.compose.ui.test.performTextInput
 import com.uplinkstatus.app.R
 import com.uplinkstatus.app.prefs.DataStoreUplinkPreferencesRepository
@@ -409,6 +411,41 @@ class SettingsScreenTest {
         composeTestRule.waitForIdle()
 
         assertEquals("probe.example.com", repository.current.pingTargetHost)
+    }
+
+    @Test
+    fun `the step delay slider shows the default value`() {
+        setContent()
+
+        composeTestRule.onNodeWithText("500 ms").assertExists()
+    }
+
+    @Test
+    fun `setting the step delay slider persists the new value`() {
+        setContent()
+
+        // SetProgress (not a pixel-based drag gesture) is the reliable way to exercise a
+        // Compose Slider under Robolectric -- it's the same semantics action an accessibility
+        // service would invoke, and it drives both onValueChange and onValueChangeFinished,
+        // matching a real release-at-this-value interaction rather than a mid-drag tick.
+        composeTestRule.onNodeWithTag(TAG_STEP_DELAY_SLIDER).performScrollTo()
+            .performSemanticsAction(SemanticsActions.SetProgress) { it(137f) }
+        composeTestRule.waitForIdle()
+
+        assertEquals(137L, repository.current.stepDelayMs)
+        composeTestRule.onNodeWithText("137 ms").assertExists()
+    }
+
+    @Test
+    fun `a step delay of zero reads as free wheeling, not zero milliseconds`() {
+        setContent()
+
+        composeTestRule.onNodeWithTag(TAG_STEP_DELAY_SLIDER).performScrollTo()
+            .performSemanticsAction(SemanticsActions.SetProgress) { it(0f) }
+        composeTestRule.waitForIdle()
+
+        assertEquals(0L, repository.current.stepDelayMs)
+        composeTestRule.onNodeWithText("Free wheeling (0 ms)").assertExists()
     }
 
     @Test

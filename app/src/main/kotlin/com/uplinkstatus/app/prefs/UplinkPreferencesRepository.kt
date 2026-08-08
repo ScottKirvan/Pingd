@@ -5,10 +5,12 @@ import androidx.datastore.core.DataStore
 import androidx.datastore.preferences.core.Preferences
 import androidx.datastore.preferences.core.booleanPreferencesKey
 import androidx.datastore.preferences.core.edit
+import androidx.datastore.preferences.core.longPreferencesKey
 import androidx.datastore.preferences.core.stringPreferencesKey
 import androidx.datastore.preferences.core.stringSetPreferencesKey
 import androidx.datastore.preferences.preferencesDataStore
 import com.uplinkstatus.core.probe.ProbeTarget
+import com.uplinkstatus.core.tracer.ProbeCycleRunner
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.map
 
@@ -31,6 +33,7 @@ interface UplinkPreferencesRepository {
     suspend fun setNetworkScope(scope: NetworkScope)
     suspend fun setSsidWhitelist(ssids: Set<String>)
     suspend fun setPingTargetHost(host: String)
+    suspend fun setStepDelayMs(delayMs: Long)
 }
 
 /** The single, app-wide Preferences DataStore file. Both [UplinkStatusService] and the
@@ -57,6 +60,13 @@ class DataStoreUplinkPreferencesRepository(
             ssidWhitelist = prefs[SSID_WHITELIST] ?: emptySet(),
             pingTargetHost = prefs[PING_TARGET_HOST]?.takeIf { it.isNotBlank() }
                 ?: ProbeTarget.DEFAULT_HOST,
+            // A value outside the slider's own range can only get into the store from a
+            // future app version's wider range (or direct file tampering) -- coerced back
+            // into range rather than trusted verbatim, same reasoning as networkScope's
+            // valueOf fallback above.
+            stepDelayMs = prefs[STEP_DELAY_MS]
+                ?.coerceIn(UplinkPreferences.STEP_DELAY_RANGE_MS)
+                ?: ProbeCycleRunner.DEFAULT_STEP_DELAY_MS,
         )
     }
 
@@ -80,11 +90,16 @@ class DataStoreUplinkPreferencesRepository(
         dataStore.edit { it[PING_TARGET_HOST] = host }
     }
 
+    override suspend fun setStepDelayMs(delayMs: Long) {
+        dataStore.edit { it[STEP_DELAY_MS] = delayMs.coerceIn(UplinkPreferences.STEP_DELAY_RANGE_MS) }
+    }
+
     companion object {
         private val MASTER_TOGGLE_ENABLED = booleanPreferencesKey("master_toggle_enabled")
         private val HIDE_WHEN_DISABLED = booleanPreferencesKey("hide_when_disabled")
         private val NETWORK_SCOPE = stringPreferencesKey("network_scope")
         private val SSID_WHITELIST = stringSetPreferencesKey("ssid_whitelist")
         private val PING_TARGET_HOST = stringPreferencesKey("ping_target_host")
+        private val STEP_DELAY_MS = longPreferencesKey("step_delay_ms")
     }
 }

@@ -23,9 +23,10 @@ class ProbeCycleRunnerTest {
         scheduler: FakeTracerScheduler,
         listener: RecordingCycleListener,
         tracer: AckTracer = AckTracer(),
-    ) = ProbeCycleRunner(prober, target, scheduler, listener, tracer)
+        stepDelayMs: Long = ProbeCycleRunner.DEFAULT_STEP_DELAY_MS,
+    ) = ProbeCycleRunner(prober, target, scheduler, listener, tracer, stepDelayMs)
 
-    // --- Ack cycle timing/sequencing -----------------------------------------------
+    // --- Ack cycle timing/sequencing: ping, ping, fake ------------------------------
 
     @Test
     fun `probe success immediately fires an ack and advances the tracer`() {
@@ -43,7 +44,7 @@ class ProbeCycleRunnerTest {
     }
 
     @Test
-    fun `after probe success ack, schedules the automatic ack 500ms later`() {
+    fun `after the first probe success, schedules the step delay before a second real probe`() {
         val prober = FakeProber(ProbeResult.Success(42))
         val scheduler = FakeTracerScheduler()
         val listener = RecordingCycleListener()
@@ -52,20 +53,96 @@ class ProbeCycleRunnerTest {
 
         assertEquals(listOf(500L), scheduler.history)
         assertTrue(scheduler.hasPending())
+        // Only one real probe so far -- the second one is what the pending delay leads to.
+        assertEquals(1, prober.callCount)
     }
 
     @Test
-    fun `automatic ack fires 500ms after probe success and advances the tracer again`() {
-        val prober = FakeProber(ProbeResult.Success(42))
+    fun `the second real probe fires after the step delay and advances the tracer again`() {
+        val prober = FakeProber(ProbeResult.Success(42), ProbeResult.Success(17))
         val scheduler = FakeTracerScheduler()
         val listener = RecordingCycleListener()
 
         runner(prober, scheduler, listener).start()
-        scheduler.fireNext() // the 500ms automatic-ack timer fires
+        scheduler.fireNext() // step delay elapses -> second real probe
+
+        assertEquals(2, prober.callCount)
+        assertEquals(
+            listOf(
+                CycleEvent.Advanced(BarPosition.BAR_2, AckSource.PROBE_SUCCESS, latencyMs = 42),
+                CycleEvent.Advanced(BarPosition.BAR_3, AckSource.PROBE_SUCCESS, latencyMs = 17),
+            ),
+            listener.events,
+        )
+    }
+
+    @Test
+    fun `the automatic ack fires only after two real probe successes, not after the first`() {
+        val prober = FakeProber(ProbeResult.Success(42), ProbeResult.Success(17))
+        val scheduler = FakeTracerScheduler()
+        val listener = RecordingCycleListener()
+
+        runner(prober, scheduler, listener).start()
+        scheduler.fireNext() // second real probe
+        scheduler.fireNext() // step delay after the second real probe -> automatic ack
 
         assertEquals(
             listOf(
                 CycleEvent.Advanced(BarPosition.BAR_2, AckSource.PROBE_SUCCESS, latencyMs = 42),
+                CycleEvent.Advanced(BarPosition.BAR_3, AckSource.PROBE_SUCCESS, latencyMs = 17),
+                CycleEvent.Advanced(BarPosition.BAR_4, AckSource.AUTOMATIC, latencyMs = null),
+            ),
+            listener.events,
+        )
+        // Still only two real probes -- the automatic ack never touches the prober.
+        assertEquals(2, prober.callCount)
+    }
+
+    @Test
+    fun `the delay after the automatic ack leads directly to a new real probe -- no separate silent gap step`() {
+        val prober = FakeProber(ProbeResult.Success(10), ProbeResult.Success(20), ProbeResult.Success(30))
+        val scheduler = FakeTracerScheduler()
+        val listener = RecordingCycleListener()
+
+        runner(prober, scheduler, listener).start()
+        scheduler.fireNext() // second real probe
+        scheduler.fireNext() // automatic ack
+
+        val eventsBeforeNextDelay = listener.events.size
+        scheduler.fireNext() // the delay after the automatic ack elapses
+
+        // Straight into a new real probe -- not a distinct no-op step first.
+        assertEquals(eventsBeforeNextDelay + 1, listener.events.size)
+        assertEquals(AckSource.PROBE_SUCCESS, (listener.events.last() as CycleEvent.Advanced).source)
+        assertEquals(3, prober.callCount)
+    }
+
+    @Test
+    fun `a full ping, ping, fake cycle repeats and advances three positions per cycle`() {
+        val prober = FakeProber(
+            ProbeResult.Success(10),
+            ProbeResult.Success(20),
+            ProbeResult.Success(30),
+            ProbeResult.Success(40),
+        )
+        val scheduler = FakeTracerScheduler()
+        val listener = RecordingCycleListener()
+
+        runner(prober, scheduler, listener).start() // cycle 1: real probe 1
+        scheduler.fireNext() // cycle 1: real probe 2
+        scheduler.fireNext() // cycle 1: automatic ack
+        scheduler.fireNext() // cycle 2: real probe 1
+        scheduler.fireNext() // cycle 2: real probe 2
+        scheduler.fireNext() // cycle 2: automatic ack
+
+        assertEquals(4, prober.callCount)
+        assertEquals(
+            listOf(
+                CycleEvent.Advanced(BarPosition.BAR_2, AckSource.PROBE_SUCCESS, latencyMs = 10),
+                CycleEvent.Advanced(BarPosition.BAR_3, AckSource.PROBE_SUCCESS, latencyMs = 20),
+                CycleEvent.Advanced(BarPosition.BAR_4, AckSource.AUTOMATIC, latencyMs = null),
+                CycleEvent.Advanced(BarPosition.BAR_5, AckSource.PROBE_SUCCESS, latencyMs = 30),
+                CycleEvent.Advanced(BarPosition.BAR_4, AckSource.PROBE_SUCCESS, latencyMs = 40),
                 CycleEvent.Advanced(BarPosition.BAR_3, AckSource.AUTOMATIC, latencyMs = null),
             ),
             listener.events,
@@ -73,49 +150,84 @@ class ProbeCycleRunnerTest {
     }
 
     @Test
-    fun `after the automatic ack, schedules a second 500ms gap that produces no ack`() {
-        val prober = FakeProber(ProbeResult.Success(42), ProbeResult.Success(10))
-        val scheduler = FakeTracerScheduler()
-        val listener = RecordingCycleListener()
-
-        runner(prober, scheduler, listener).start()
-        scheduler.fireNext() // automatic ack
-
-        assertEquals(listOf(500L, 500L), scheduler.history)
-
-        val eventsBeforeGap = listener.events.size
-        scheduler.fireNext() // the non-ack gap elapses -> triggers the next probe
-
-        // The gap itself must not have produced any new ack — only the next probe cycle's
-        // own success does (and that adds exactly one Advanced event here).
-        assertEquals(eventsBeforeGap + 1, listener.events.size)
-        assertEquals(AckSource.PROBE_SUCCESS, (listener.events.last() as CycleEvent.Advanced).source)
-    }
-
-    @Test
-    fun `a full successful cycle repeats step 1 through 5 and advances two positions per cycle`() {
+    fun `an outage between the two real probes does not restart the ping, ping, fake sequence`() {
+        // Regression test for the "a failure doesn't consume a pattern slot" rule: one real
+        // success, then a run of failures, then the retry that finally succeeds should be
+        // treated as the *second* real probe (triggering the automatic ack next) -- not as a
+        // fresh first probe that would need another full pair before the automatic ack.
         val prober = FakeProber(
             ProbeResult.Success(10),
+            ProbeResult.Failure,
+            ProbeResult.Failure,
             ProbeResult.Success(20),
         )
         val scheduler = FakeTracerScheduler()
         val listener = RecordingCycleListener()
 
-        runner(prober, scheduler, listener).start() // cycle 1, step 1-2
-        scheduler.fireNext() // cycle 1, step 3
-        scheduler.fireNext() // cycle 1, step 4-5 -> cycle 2, step 1-2
-        scheduler.fireNext() // cycle 2, step 3
+        runner(prober, scheduler, listener).start() // real probe 1 (success)
+        scheduler.fireNext() // real probe 2: two failures, then a success, all in this one step
+        scheduler.fireNext() // step delay after that success -> should be the automatic ack
 
-        assertEquals(2, prober.callCount)
         assertEquals(
-            listOf(
-                CycleEvent.Advanced(BarPosition.BAR_2, AckSource.PROBE_SUCCESS, latencyMs = 10),
-                CycleEvent.Advanced(BarPosition.BAR_3, AckSource.AUTOMATIC, latencyMs = null),
-                CycleEvent.Advanced(BarPosition.BAR_4, AckSource.PROBE_SUCCESS, latencyMs = 20),
-                CycleEvent.Advanced(BarPosition.BAR_5, AckSource.AUTOMATIC, latencyMs = null),
-            ),
-            listener.events,
+            AckSource.AUTOMATIC,
+            (listener.events.last() as CycleEvent.Advanced).source,
         )
+    }
+
+    // --- Configurable step delay -----------------------------------------------------
+
+    @Test
+    fun `a custom step delay is used instead of the default`() {
+        val prober = FakeProber(ProbeResult.Success(1))
+        val scheduler = FakeTracerScheduler()
+        val listener = RecordingCycleListener()
+
+        runner(prober, scheduler, listener, stepDelayMs = 137L).start()
+
+        assertEquals(listOf(137L), scheduler.history)
+    }
+
+    @Test
+    fun `a step delay of zero is still scheduled through the scheduler, not skipped`() {
+        // "Free wheeling" means no *added* wait, not that pacing stops going through the
+        // scheduler abstraction -- ProbeCycleRunner must stay ignorant of wall-clock time
+        // either way, per the class doc.
+        val prober = FakeProber(ProbeResult.Success(1), ProbeResult.Success(2))
+        val scheduler = FakeTracerScheduler()
+        val listener = RecordingCycleListener()
+
+        runner(prober, scheduler, listener, stepDelayMs = 0L).start()
+
+        assertEquals(listOf(0L), scheduler.history)
+        assertTrue(scheduler.hasPending())
+
+        scheduler.fireNext()
+        assertEquals(2, prober.callCount)
+    }
+
+    @Test(expected = IllegalArgumentException::class)
+    fun `a negative step delay is rejected`() {
+        ProbeCycleRunner(
+            FakeProber(ProbeResult.Success(1)),
+            target,
+            FakeTracerScheduler(),
+            RecordingCycleListener(),
+            stepDelayMs = -1L,
+        )
+    }
+
+    @Test
+    fun `a failure retry is never paced by the step delay, even with a large configured delay`() {
+        val prober = FakeProber(ProbeResult.Failure, ProbeResult.Failure, ProbeResult.Success(1))
+        val scheduler = FakeTracerScheduler()
+        val listener = RecordingCycleListener()
+
+        runner(prober, scheduler, listener, stepDelayMs = 1000L).start()
+
+        assertEquals(3, prober.callCount)
+        // The only scheduled delay is the one after the eventual success -- nothing was
+        // scheduled for either failed attempt, regardless of how large stepDelayMs is.
+        assertEquals(listOf(1000L), scheduler.history)
     }
 
     // --- Freeze-on-failure / resume-on-success --------------------------------------

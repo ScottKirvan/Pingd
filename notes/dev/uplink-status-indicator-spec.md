@@ -73,10 +73,10 @@ shown in the status bar).
 
 ## Core Mechanism — Probe-Driven Tracer
 The tracer advances one bar position per "ack." Acks come from two
-sources per cycle: a successful probe response, and a fixed timer that
-fires partway through the cycle. There is no separate animation loop and
-no formula that scales speed by latency — latency is simply how long
-step 2 below takes to happen.
+sources: a successful probe response, and a fixed timer that fires
+between steps. There is no separate animation loop and no formula that
+scales speed by latency — latency is simply how long a probe attempt
+takes to return.
 
 **The sweep is a ping-pong bounce, not a wrap.** The lit bar moves
 1→2→3→4→5, then reverses and moves back down 5→4→3→2→1, then reverses
@@ -104,21 +104,45 @@ override is a hostname and it fails to resolve, treat that as a distinct
 generic probe-failure case — a DNS problem and a network-down problem
 shouldn't look the same to the user.
 
-Cycle, repeating while enabled:
+Cycle, repeating while enabled — **ping, ping, fake**, not a strict 1:1
+alternation:
 
 1. Open a probe (TCP connect to the target host:443, timeout: 1000ms).
 2. Probe succeeds → **ack** → tracer advances one step, icon updates.
    A slower response means a longer visible pause on this step — that
    delay *is* the latency indicator, nothing else scales it.
-3. Wait 500ms → **ack** (automatic) → tracer advances another step.
-4. Wait another 500ms (no ack).
-5. Back to step 1.
+3. Wait the step delay (see below) → back to step 1 for a second real
+   probe.
+4. Second probe succeeds → **ack** → tracer advances another step.
+5. Wait the step delay → **ack** (automatic, no real probe) → tracer
+   advances a third step.
+6. Wait the step delay (no ack) → back to step 1.
+
+Two real probes before each automatic ack, not one, deliberately: a
+strict ping/fake/ping/fake alternation makes every freeze (see below)
+land in the same phase of the bounce, so an outage always stops the
+tracer on the same handful of bars. Breaking the 1:1 alternation
+spreads freezes across more of the sweep instead.
+
+**Step delay:** the wait between every step above — after a real ack,
+after the automatic ack, and before the next probe — is one **user-
+configurable** value, not a fixed 500ms. Settings screen: a slider,
+0–1000ms, default 500ms. 0ms means back-to-back with no added wait
+("free wheeling") — each step still takes however long its own probe
+attempt does, but nothing artificially paces them further apart. The
+same value governs every step; there's no separate rate for the real
+vs. the automatic step.
 
 **On probe timeout/failure:** no ack fires. The tracer freezes on its
 current bar — it does not advance and does not show a distinct "lost"
 frame. The loop retries immediately with a new probe (same 1000ms
-timeout, no back-off) until one succeeds, at which point acks resume
-and the tracer continues from wherever it froze.
+timeout, no back-off, and no step delay before the retry — the step
+delay paces *completed* steps, not failure retries) until one succeeds,
+at which point acks resume and the tracer continues from wherever it
+froze. A failure does not consume a slot in the ping/ping/fake
+sequence — the sequence only advances on a real ack, so an outage
+mid-sequence resumes at the same point once connectivity returns,
+rather than restarting the pattern.
 
 ## Bar Position Persistence
 Position persists only for the lifetime of the running process. An app
@@ -217,6 +241,40 @@ more than the notification's own dim-all-bars frame is, per [Icon
 States](#icon-states-6-total) above. Whenever the master toggle is off,
 this is what applies.
 
+## In-App History Graphs
+The settings screen carries two live rolling graphs, immediately below
+the scanner preview and above the rest of the settings — a ping success
+percentage and a latency trend, both over a shared, user-configurable
+history window (default 7 minutes, matching Starlink's own status
+display, which this is modeled on).
+
+Both graphs are driven by real probe attempts only — the TCP-connect
+probes described in [Core Mechanism](#core-mechanism--probe-driven-tracer)
+above. The automatic ("fake") ack in the ping/ping/fake cycle is not a
+probe attempt and contributes no sample to either graph; counting it
+would silently inflate the success percentage and misrepresent the
+latency trend with data that was never actually measured.
+
+- **Ping success (%)** — the percentage of real probe attempts, within
+  the window, that succeeded. Every real attempt counts, success or
+  failure — including repeated immediate-retry failures during a
+  sustained outage.
+- **Latency (ms)** — a windowed trend line built from successful
+  probes' measured round-trip time. A failed probe is a **gap** in the
+  line, not a zero and not a skipped/interpolated point — a gap is the
+  honest representation of "no measurement," the same principle the
+  tracer's own freeze-in-place behavior already follows for a single
+  failed probe.
+
+The window length is one setting shared by both graphs (and by the
+success-percentage calculation) — not two independently configurable
+windows for two views into the same underlying sample history. It is
+also user-resettable: an explicit action clears the accumulated sample
+history immediately, independent of restarting the service. Absent an
+explicit reset, the sample history is session-only, matching bar
+position's own per-process lifetime — a fresh service start begins with
+no samples, not samples carried over from a previous run.
+
 ## User Preferences
 - **Enable/disable toggle** — master on/off for the whole feature,
   without uninstalling the app.
@@ -256,6 +314,11 @@ this is what applies.
 - **Ping target host** — default `one.one.one.one` (Cloudflare), with
   `dns.google` (Google) offered as an alternate quick-pick; user can
   override with any custom host.
+- **Step delay** — 0–1000ms slider, default 500ms; see [Core
+  Mechanism](#core-mechanism--probe-driven-tracer) above.
+- **History window** — how far back the two [history
+  graphs](#in-app-history-graphs) look, and the window the ping-success
+  percentage is computed over; default 7 minutes.
 
 ## Technical Notes
 - Foreground service (`FOREGROUND_SERVICE` permission). Type:

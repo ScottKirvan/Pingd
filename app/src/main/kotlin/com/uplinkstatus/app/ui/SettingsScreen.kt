@@ -24,6 +24,7 @@ import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.MenuAnchorType
 import androidx.compose.material3.OutlinedTextField
+import androidx.compose.material3.Slider
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
@@ -73,6 +74,7 @@ const val TAG_PING_TARGET_ALTERNATE = "settings_ping_target_alternate"
 const val TAG_PING_TARGET_CUSTOM_OPTION = "settings_ping_target_custom_option"
 const val TAG_PING_TARGET_CUSTOM_INPUT = "settings_ping_target_custom_input"
 const val TAG_PING_TARGET_CUSTOM_SAVE = "settings_ping_target_custom_save"
+const val TAG_STEP_DELAY_SLIDER = "settings_step_delay_slider"
 const val TAG_STATUS_LINE = "settings_status_line"
 
 /** Test tag for a whitelist entry's remove button; one per SSID, so it's parameterized. */
@@ -379,6 +381,49 @@ fun SettingsScreen(
                             )
                         }
                     }
+                }
+
+                HorizontalDivider()
+
+                // --- Step delay (ping pacing) ---
+                Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                    Text(text = "Ping pacing", style = MaterialTheme.typography.titleMedium)
+                    Text(
+                        text = "The wait between every step of the tracer's cycle. " +
+                            "Lower paces probes closer together; 0 is back-to-back with no added wait.",
+                        style = MaterialTheme.typography.bodySmall,
+                    )
+
+                    // Local drag position, separate from the persisted value: committing on
+                    // every onValueChange tick would lock the whole panel (via applyChange's
+                    // isPending) for the length of the drag gesture, not just its result. Keyed
+                    // on the persisted value so an external change (e.g. a future reset action)
+                    // is reflected, without a live drag being clobbered by an unrelated
+                    // recomposition in between.
+                    var sliderPosition by remember(preferences.stepDelayMs) {
+                        mutableStateOf(preferences.stepDelayMs.toFloat())
+                    }
+                    Slider(
+                        value = sliderPosition,
+                        onValueChange = { sliderPosition = it },
+                        onValueChangeFinished = {
+                            applyChange { repository.setStepDelayMs(sliderPosition.toLong()) }
+                        },
+                        valueRange = UplinkPreferences.STEP_DELAY_RANGE_MS.first.toFloat()..
+                            UplinkPreferences.STEP_DELAY_RANGE_MS.last.toFloat(),
+                        enabled = controlsEnabled,
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .testTag(TAG_STEP_DELAY_SLIDER),
+                    )
+                    Text(
+                        text = if (sliderPosition.toLong() <= 0L) {
+                            "Free wheeling (0 ms)"
+                        } else {
+                            "${sliderPosition.toLong()} ms"
+                        },
+                        style = MaterialTheme.typography.bodySmall,
+                    )
                 }
             }
         }
