@@ -7,6 +7,7 @@ import android.content.Context
 import com.uplinkstatus.app.R
 import com.uplinkstatus.app.prefs.NetworkScope
 import com.uplinkstatus.app.state.UplinkActivityStatus
+import com.uplinkstatus.app.state.UplinkIconDisplay
 import com.uplinkstatus.core.tracer.AckSource
 import com.uplinkstatus.core.tracer.BarPosition
 import com.uplinkstatus.core.tracer.CycleEvent
@@ -49,6 +50,9 @@ class UplinkNotificationControllerTest {
         // the "building a notification claims nothing" assertions below) can't be satisfied
         // or broken by whatever an unrelated test left behind.
         UplinkActivityStatus.resetForTest()
+        // Same reasoning -- a previous test's last mirrored icon must not leak into this
+        // one's "nothing reported yet" or "reported null" assertions.
+        UplinkIconDisplay.resetForTest()
     }
 
     private fun postedNotification(): Notification? =
@@ -328,5 +332,76 @@ class UplinkNotificationControllerTest {
             UplinkActivityStatus.Activity.Connected(latencyMs = 11),
             UplinkActivityStatus.activity.value,
         )
+    }
+
+    // --- UplinkIconDisplay mirrors exactly what icon this class just built, unconditionally --
+
+    /**
+     * The deliberate contrast with the "architectural regression guard" test above: that one
+     * proves building notification content claims nothing about connectivity, and this one
+     * proves it *does* always mirror the icon it built -- the two obligations are different on
+     * purpose (see [UplinkNotificationController.buildNotification]'s doc), and a reader
+     * skimming only the status-line test could otherwise assume neither side effect happens
+     * for the starting/disabled placeholders.
+     */
+    @Test
+    fun `every notification builder mirrors its icon to UplinkIconDisplay, even the starting placeholder`() {
+        controller.notificationForStarting()
+        assertEquals(R.drawable.ic_scan_disabled, UplinkIconDisplay.iconRes.value)
+
+        controller.notificationForEnabled(BarPosition.BAR_5)
+        assertEquals(R.drawable.ic_scan_5, UplinkIconDisplay.iconRes.value)
+
+        controller.notificationForDisabled(NetworkScope.WIFI_ONLY)
+        assertEquals(R.drawable.ic_scan_disabled, UplinkIconDisplay.iconRes.value)
+    }
+
+    @Test
+    fun `an ack mirrors the new bar position`() {
+        controller.onEvent(CycleEvent.Advanced(BarPosition.BAR_4, AckSource.PROBE_SUCCESS, latencyMs = 30))
+
+        assertEquals(R.drawable.ic_scan_4, UplinkIconDisplay.iconRes.value)
+    }
+
+    @Test
+    fun `a freeze mirrors the frozen-in-place icon, unchanged from the last ack`() {
+        controller.onEvent(CycleEvent.Advanced(BarPosition.BAR_2, AckSource.PROBE_SUCCESS, latencyMs = 5))
+        controller.onEvent(CycleEvent.Frozen(BarPosition.BAR_2, FreezeReason.PROBE_FAILURE))
+
+        assertEquals(R.drawable.ic_scan_2, UplinkIconDisplay.iconRes.value)
+    }
+
+    @Test
+    fun `a repeated freeze with the same reason is suppressed -- and does not re-mirror either`() {
+        controller.onEvent(CycleEvent.Frozen(BarPosition.BAR_3, FreezeReason.PROBE_FAILURE))
+        // Overwrite directly to prove the second, suppressed Frozen genuinely does not run
+        // buildNotification() again -- if it did, this would be clobbered back to BAR_3.
+        UplinkIconDisplay.report(R.drawable.ic_scan_1)
+
+        controller.onEvent(CycleEvent.Frozen(BarPosition.BAR_3, FreezeReason.PROBE_FAILURE))
+
+        assertEquals(R.drawable.ic_scan_1, UplinkIconDisplay.iconRes.value)
+    }
+
+    @Test
+    fun `hide reports null -- HIDDEN is the absence of the icon, not a seventh frame`() {
+        controller.onEvent(CycleEvent.Advanced(BarPosition.BAR_1, AckSource.PROBE_SUCCESS, latencyMs = 5))
+        assertEquals(R.drawable.ic_scan_1, UplinkIconDisplay.iconRes.value)
+
+        controller.hide()
+
+        assertNull(UplinkIconDisplay.iconRes.value)
+    }
+
+    @Test
+    fun `an ack still mirrors the icon when POST_NOTIFICATIONS has been revoked`() {
+        // Same reasoning as the analogous UplinkActivityStatus test above: buildNotification()
+        // runs before notify()'s permission check, so the mirror reflects what the app knows
+        // the icon to be regardless of whether Android actually shows the real notification.
+        shadowOf(RuntimeEnvironment.getApplication()).denyPermissions(Manifest.permission.POST_NOTIFICATIONS)
+
+        controller.onEvent(CycleEvent.Advanced(BarPosition.BAR_2, AckSource.PROBE_SUCCESS, latencyMs = 11))
+
+        assertEquals(R.drawable.ic_scan_2, UplinkIconDisplay.iconRes.value)
     }
 }

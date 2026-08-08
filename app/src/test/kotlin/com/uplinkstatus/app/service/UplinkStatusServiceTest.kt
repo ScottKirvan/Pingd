@@ -6,6 +6,7 @@ import com.uplinkstatus.app.R
 import com.uplinkstatus.app.prefs.FakeUplinkPreferencesRepository
 import com.uplinkstatus.app.prefs.NetworkScope
 import com.uplinkstatus.app.state.UplinkActivityStatus
+import com.uplinkstatus.app.state.UplinkIconDisplay
 import com.uplinkstatus.app.state.UplinkRuntimeStatus
 import com.uplinkstatus.core.probe.ProbeResult
 import com.uplinkstatus.core.probe.ProbeTarget
@@ -84,6 +85,9 @@ class UplinkStatusServiceTest {
         // several tests below assert on directly, so a previous test's last claim must not
         // leak in.
         UplinkActivityStatus.resetForTest()
+        // Same reasoning -- a previous test's last mirrored icon must not leak into this
+        // one's assertions on it.
+        UplinkIconDisplay.resetForTest()
 
         controller = Robolectric.buildService(UplinkStatusService::class.java)
         service = controller.create().get()
@@ -141,6 +145,15 @@ class UplinkStatusServiceTest {
             shadowOf(notificationManager).getNotification(UplinkNotificationController.NOTIFICATION_ID),
         )
         assertEquals(R.drawable.ic_scan_2, latest.smallIcon.resId)
+        // End-to-end confirmation that UplinkIconDisplay -- the settings screen's live
+        // scanner-preview mirror -- tracks the real notification through the whole service,
+        // not just at UplinkNotificationController's own unit-test level. Checked against
+        // the *latest* icon, not the initial BAR_1 placeholder above: with the fake scheduler
+        // running synchronously, the ack that produces `latest` has already happened by the
+        // time applyVisibility() returns, and UplinkIconDisplay -- unlike the captured
+        // `initialForeground` snapshot -- always reflects the current value, not a moment
+        // frozen in time.
+        assertEquals(R.drawable.ic_scan_2, UplinkIconDisplay.iconRes.value)
     }
 
     @Test
@@ -177,6 +190,10 @@ class UplinkStatusServiceTest {
         assertTrue(shadowService().isForegroundStopped)
         assertTrue(shadowService().notificationShouldRemoved)
         assertTrue(shadowService().isStoppedBySelf)
+        // Same end-to-end confirmation as the ENABLED test above, for the other end of the
+        // mirror: HIDDEN must reach UplinkIconDisplay as null, not just remove the real
+        // notification.
+        assertNull(UplinkIconDisplay.iconRes.value)
     }
 
     @Test
