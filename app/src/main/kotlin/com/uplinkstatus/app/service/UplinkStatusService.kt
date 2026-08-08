@@ -18,6 +18,7 @@ import com.uplinkstatus.app.prefs.uplinkPreferencesDataStore
 import com.uplinkstatus.app.state.ConnectivityNetworkScopeStatus
 import com.uplinkstatus.app.state.NetworkScopeStatus
 import com.uplinkstatus.app.state.UplinkActivityStatus
+import com.uplinkstatus.app.state.UplinkProbeHistory
 import com.uplinkstatus.app.state.UplinkRuntimeStatus
 import com.uplinkstatus.core.probe.ProbeTarget
 import com.uplinkstatus.core.probe.Prober
@@ -226,6 +227,14 @@ class UplinkStatusService : Service() {
                     probeTarget = ProbeTarget(host = preferences.pingTargetHost)
                     stepDelayMs = preferences.stepDelayMs
                     currentNetworkScope = preferences.networkScope
+                    // The history graphs' shared window. Applied here rather than from the
+                    // settings screen so the retention the samples are actually recorded under
+                    // follows the preference wherever it was changed from -- and because this
+                    // is already the one collector that turns persisted preferences into
+                    // running behavior. A window change made while this service is stopped
+                    // (HIDDEN) is picked up on its next start, which the settings screen's own
+                    // ensureServiceRunning() nudge triggers immediately anyway.
+                    UplinkProbeHistory.setWindowMs(preferences.historyWindowMs)
                     // decideOrNull, not decide: networkInScope is nullable ("not reported
                     // yet"), and a null answer means this emission is not grounds for any
                     // user-visible change at all. Skipping it leaves onStartCommand's

@@ -4,6 +4,7 @@ import androidx.datastore.core.DataStore
 import androidx.datastore.preferences.core.PreferenceDataStoreFactory
 import androidx.datastore.preferences.core.Preferences
 import androidx.datastore.preferences.core.longPreferencesKey
+import com.uplinkstatus.core.history.ProbeHistory
 import com.uplinkstatus.core.probe.ProbeTarget
 import com.uplinkstatus.core.tracer.ProbeCycleRunner
 import kotlinx.coroutines.ExperimentalCoroutinesApi
@@ -56,6 +57,7 @@ class UplinkPreferencesRepositoryTest {
         assertEquals(emptySet<String>(), preferences.ssidWhitelist)
         assertEquals(ProbeTarget.DEFAULT_HOST, preferences.pingTargetHost)
         assertEquals(ProbeCycleRunner.DEFAULT_STEP_DELAY_MS, preferences.stepDelayMs)
+        assertEquals(ProbeHistory.DEFAULT_WINDOW_MS, preferences.historyWindowMs)
     }
 
     @Test
@@ -140,6 +142,52 @@ class UplinkPreferencesRepositoryTest {
         val preferences = DataStoreUplinkPreferencesRepository(dataStore).preferencesFlow.first()
 
         assertEquals(UplinkPreferences.STEP_DELAY_RANGE_MS.last, preferences.stepDelayMs)
+    }
+
+    @Test
+    fun `setHistoryWindowMs writes and reads back a custom window`() = runTest {
+        val repository = DataStoreUplinkPreferencesRepository(newDataStore())
+
+        repository.setHistoryWindowMs(3 * 60_000L)
+
+        assertEquals(3 * 60_000L, repository.preferencesFlow.first().historyWindowMs)
+    }
+
+    @Test
+    fun `setHistoryWindowMs coerces a value outside the slider range instead of storing it verbatim`() = runTest {
+        val repository = DataStoreUplinkPreferencesRepository(newDataStore())
+
+        repository.setHistoryWindowMs(0L)
+        assertEquals(
+            UplinkPreferences.HISTORY_WINDOW_RANGE_MS.first,
+            repository.preferencesFlow.first().historyWindowMs,
+        )
+
+        repository.setHistoryWindowMs(24 * 60 * 60_000L)
+        assertEquals(
+            UplinkPreferences.HISTORY_WINDOW_RANGE_MS.last,
+            repository.preferencesFlow.first().historyWindowMs,
+        )
+    }
+
+    /**
+     * Coercion on *read* matters more here than for most preferences: [UplinkPreferences]'s own
+     * `init` rejects an out-of-range window, so a stored value trusted verbatim would turn a
+     * file written by a future app version (or tampered with directly) into an exception thrown
+     * inside the preferences flow every service and the settings screen collect.
+     */
+    @Test
+    fun `a persisted history window outside the slider range is coerced back into range on read`() = runTest {
+        val dataStore = newDataStore()
+        dataStore.updateData { prefs ->
+            prefs.toMutablePreferences().apply {
+                this[longPreferencesKey("history_window_ms")] = 0L
+            }
+        }
+
+        val preferences = DataStoreUplinkPreferencesRepository(dataStore).preferencesFlow.first()
+
+        assertEquals(UplinkPreferences.HISTORY_WINDOW_RANGE_MS.first, preferences.historyWindowMs)
     }
 
     @Test

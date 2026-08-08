@@ -54,6 +54,7 @@ import com.uplinkstatus.app.state.UplinkActivityStatus
 import com.uplinkstatus.app.state.describe
 import com.uplinkstatus.app.state.UplinkRuntimeStatus
 import com.uplinkstatus.core.probe.ProbeTarget
+import kotlin.math.roundToInt
 import kotlinx.coroutines.launch
 
 // Compose test tags: stable identifiers for UI tests, since some of the controls below
@@ -75,6 +76,7 @@ const val TAG_PING_TARGET_CUSTOM_OPTION = "settings_ping_target_custom_option"
 const val TAG_PING_TARGET_CUSTOM_INPUT = "settings_ping_target_custom_input"
 const val TAG_PING_TARGET_CUSTOM_SAVE = "settings_ping_target_custom_save"
 const val TAG_STEP_DELAY_SLIDER = "settings_step_delay_slider"
+const val TAG_HISTORY_WINDOW_SLIDER = "settings_history_window_slider"
 const val TAG_STATUS_LINE = "settings_status_line"
 
 /** Test tag for a whitelist entry's remove button; one per SSID, so it's parameterized. */
@@ -83,6 +85,19 @@ fun ssidRemoveButtonTag(ssid: String) = "settings_ssid_remove_$ssid"
 /** Visual weight for a disabled control group -- Material's own convention for "present but
  * not interactive," not an arbitrary number. */
 private const val DISABLED_ALPHA = 0.38f
+
+/** Whole minutes of [UplinkPreferences.historyWindowMs], for the slider that edits it. */
+private fun historyWindowMinutes(windowMs: Long): Int =
+    (windowMs / UplinkPreferences.HISTORY_WINDOW_STEP_MS).toInt()
+
+private val HISTORY_WINDOW_MINUTES_RANGE: ClosedFloatingPointRange<Float> =
+    historyWindowMinutes(UplinkPreferences.HISTORY_WINDOW_RANGE_MS.first).toFloat()..
+        historyWindowMinutes(UplinkPreferences.HISTORY_WINDOW_RANGE_MS.last).toFloat()
+
+/** `Slider.steps` counts the stops *between* the endpoints, so a 1..30-minute slider that
+ * lands on whole minutes has 28 of them. */
+private val HISTORY_WINDOW_SLIDER_STEPS: Int =
+    (HISTORY_WINDOW_MINUTES_RANGE.endInclusive - HISTORY_WINDOW_MINUTES_RANGE.start).toInt() - 1
 
 /**
  * Stage 3's real settings screen — replaces Stage 0's throwaway `PlaceholderScreen`. Covers
@@ -227,6 +242,13 @@ fun SettingsScreen(
             // deliberately: it's a glanceable preview of the thing this whole screen
             // configures, not a setting itself, so it reads before any of them.
             ScannerPreview()
+
+            // The live rolling graphs of what the probes have actually been doing (ping
+            // success % and latency), directly under the preview and above everything that
+            // configures them -- same reasoning as the preview's placement: these report on
+            // the thing this screen configures, they aren't settings themselves. The window
+            // they cover is a setting, and lives with the others below.
+            HistoryGraphs()
 
             Text(text = "Uplink status settings", style = MaterialTheme.typography.titleLarge)
 
@@ -422,6 +444,52 @@ fun SettingsScreen(
                         } else {
                             "${sliderPosition.toLong()} ms"
                         },
+                        style = MaterialTheme.typography.bodySmall,
+                    )
+                }
+
+                HorizontalDivider()
+
+                // --- History window (shared by both graphs above) ---
+                Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                    Text(text = "History window", style = MaterialTheme.typography.titleMedium)
+                    Text(
+                        text = "How far back the graphs above reach. One window for both of " +
+                            "them, and for the ping-success percentage.",
+                        style = MaterialTheme.typography.bodySmall,
+                    )
+
+                    // Same local-drag-position pattern as the pacing slider above, and for the
+                    // same reason: committing mid-drag would lock the panel for the whole
+                    // gesture rather than for its result.
+                    var windowSliderMinutes by remember(preferences.historyWindowMs) {
+                        mutableStateOf(historyWindowMinutes(preferences.historyWindowMs).toFloat())
+                    }
+                    Slider(
+                        value = windowSliderMinutes,
+                        onValueChange = { windowSliderMinutes = it },
+                        onValueChangeFinished = {
+                            applyChange {
+                                repository.setHistoryWindowMs(
+                                    windowSliderMinutes.roundToInt() *
+                                        UplinkPreferences.HISTORY_WINDOW_STEP_MS,
+                                )
+                            }
+                        },
+                        valueRange = HISTORY_WINDOW_MINUTES_RANGE,
+                        // Whole minutes only: the slider's own step count, rather than rounding
+                        // an arbitrary float afterwards, is what makes the value under the
+                        // thumb and the value that gets persisted the same number.
+                        steps = HISTORY_WINDOW_SLIDER_STEPS,
+                        enabled = controlsEnabled,
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .testTag(TAG_HISTORY_WINDOW_SLIDER),
+                    )
+                    Text(
+                        text = describeDuration(
+                            windowSliderMinutes.roundToInt() * UplinkPreferences.HISTORY_WINDOW_STEP_MS,
+                        ),
                         style = MaterialTheme.typography.bodySmall,
                     )
                 }

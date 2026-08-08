@@ -1,5 +1,6 @@
 package com.uplinkstatus.app.prefs
 
+import com.uplinkstatus.core.history.ProbeHistory
 import com.uplinkstatus.core.probe.ProbeTarget
 import com.uplinkstatus.core.tracer.ProbeCycleRunner
 
@@ -24,10 +25,19 @@ data class UplinkPreferences(
      * [ProbeCycleRunner.DEFAULT_STEP_DELAY_MS] so a fresh install's behavior is identical to
      * what every install had before this became configurable. */
     val stepDelayMs: Long = ProbeCycleRunner.DEFAULT_STEP_DELAY_MS,
+    /** How far back the settings screen's history graphs reach. One setting shared by both
+     * graphs -- the latency trend's time axis, the ping-success line's, and the success
+     * percentage's own rolling window are all this same value, per spec, not three
+     * independently configurable views of the same samples. Default
+     * [ProbeHistory.DEFAULT_WINDOW_MS] (7 minutes). */
+    val historyWindowMs: Long = ProbeHistory.DEFAULT_WINDOW_MS,
 ) {
     init {
         require(stepDelayMs in STEP_DELAY_RANGE_MS) {
             "stepDelayMs must be within $STEP_DELAY_RANGE_MS, was $stepDelayMs"
+        }
+        require(historyWindowMs in HISTORY_WINDOW_RANGE_MS) {
+            "historyWindowMs must be within $HISTORY_WINDOW_RANGE_MS, was $historyWindowMs"
         }
     }
 
@@ -35,5 +45,20 @@ data class UplinkPreferences(
         /** The settings screen's slider range for [stepDelayMs] -- 0 ("free wheeling") to
          * 1000ms, per spec. */
         val STEP_DELAY_RANGE_MS: LongRange = 0L..1000L
+
+        /** One minute of granularity for [historyWindowMs]; the settings screen's slider is
+         * denominated in whole minutes. */
+        const val HISTORY_WINDOW_STEP_MS: Long = 60_000L
+
+        /**
+         * The settings screen's slider range for [historyWindowMs]: 1 to 30 minutes.
+         *
+         * The lower bound is a window still wide enough to show a trend at the slowest pacing
+         * (a 1000ms step delay is roughly one probe per second, so even a minute is ~60
+         * samples). The upper bound is bounded by memory rather than by principle -- see
+         * [ProbeHistory.MAX_SAMPLES], which a 30-minute window stays comfortably inside at any
+         * pacing a user is likely to leave running.
+         */
+        val HISTORY_WINDOW_RANGE_MS: LongRange = HISTORY_WINDOW_STEP_MS..(30 * HISTORY_WINDOW_STEP_MS)
     }
 }

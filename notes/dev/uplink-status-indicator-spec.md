@@ -269,12 +269,45 @@ latency trend with data that was never actually measured.
 
 The window length is one setting shared by both graphs (and by the
 success-percentage calculation) — not two independently configurable
-windows for two views into the same underlying sample history. It is
+windows for two views into the same underlying sample history. Settings
+screen: a slider, 1–30 minutes in whole-minute stops, default 7. It is
 also user-resettable: an explicit action clears the accumulated sample
-history immediately, independent of restarting the service. Absent an
-explicit reset, the sample history is session-only, matching bar
-position's own per-process lifetime — a fresh service start begins with
-no samples, not samples carried over from a previous run.
+history immediately, independent of restarting the service. That action
+sits with the graphs rather than with the preferences, and is *not*
+gated on the master toggle the way the preference controls are —
+clearing what is displayed has to work exactly when the user wants a
+clean slate, including while the icon is switched off.
+
+Absent an explicit reset, the sample history is session-only, matching
+bar position's own per-process lifetime — a fresh service start begins
+with no samples, not samples carried over from a previous run. Process
+lifetime, specifically, not cycle lifetime: the history deliberately
+survives the probe cycle stopping and restarting (a network dropping out
+of scope and coming back), since the failures around exactly that
+transition are what a connectivity history is for.
+
+**Each card states a windowed number, and its caption names the span
+that number actually covers.** The ping-success card's number is
+inherently windowed; the latency card's is therefore the window's
+*average* round-trip time rather than the latest single reading, so that
+one caption honestly describes both. (The instantaneous latency already
+has a home — the [status line](#in-app-status-line).) The caption itself
+names the configured window only once the retained samples genuinely
+span it; until then it names the shorter span that really exists, since
+a card reading "last 7 minutes" thirty seconds into a session would be
+describing six and a half minutes of data that does not exist. Before
+the first probe the numbers are blank rather than zero: "nothing
+measured yet" and "every probe failed" are different states and only one
+of them is bad news.
+
+Sample retention is additionally capped in absolute count, not just by
+time — the window is a duration, and free-wheeling pacing (a 0ms step
+delay) produces probes as fast as the network answers, which a
+time-bounded-only buffer would let grow with nothing but wall-clock time
+to stop it. The cap sits well above what any pacing at the widest window
+reaches in normal use; when it does bite, the oldest samples go first
+and the caption reports the shorter span actually covered, so the effect
+is a shorter graph rather than a mislabeled one.
 
 ## User Preferences
 - **Enable/disable toggle** — master on/off for the whole feature,
@@ -319,7 +352,7 @@ no samples, not samples carried over from a previous run.
   Mechanism](#core-mechanism--probe-driven-tracer) above.
 - **History window** — how far back the two [history
   graphs](#in-app-history-graphs) look, and the window the ping-success
-  percentage is computed over; default 7 minutes.
+  percentage is computed over; 1–30 minute slider, default 7 minutes.
 
 ## Technical Notes
 - Foreground service (`FOREGROUND_SERVICE` permission). Type:

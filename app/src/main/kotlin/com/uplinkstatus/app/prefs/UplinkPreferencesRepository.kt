@@ -9,6 +9,7 @@ import androidx.datastore.preferences.core.longPreferencesKey
 import androidx.datastore.preferences.core.stringPreferencesKey
 import androidx.datastore.preferences.core.stringSetPreferencesKey
 import androidx.datastore.preferences.preferencesDataStore
+import com.uplinkstatus.core.history.ProbeHistory
 import com.uplinkstatus.core.probe.ProbeTarget
 import com.uplinkstatus.core.tracer.ProbeCycleRunner
 import kotlinx.coroutines.flow.Flow
@@ -34,6 +35,7 @@ interface UplinkPreferencesRepository {
     suspend fun setSsidWhitelist(ssids: Set<String>)
     suspend fun setPingTargetHost(host: String)
     suspend fun setStepDelayMs(delayMs: Long)
+    suspend fun setHistoryWindowMs(windowMs: Long)
 }
 
 /** The single, app-wide Preferences DataStore file. Both [UplinkStatusService] and the
@@ -67,6 +69,12 @@ class DataStoreUplinkPreferencesRepository(
             stepDelayMs = prefs[STEP_DELAY_MS]
                 ?.coerceIn(UplinkPreferences.STEP_DELAY_RANGE_MS)
                 ?: ProbeCycleRunner.DEFAULT_STEP_DELAY_MS,
+            // Same reasoning as stepDelayMs above -- an out-of-range stored value is coerced
+            // back rather than trusted, which also keeps UplinkPreferences' own range
+            // requirement from turning a tampered/newer-version file into a crash on read.
+            historyWindowMs = prefs[HISTORY_WINDOW_MS]
+                ?.coerceIn(UplinkPreferences.HISTORY_WINDOW_RANGE_MS)
+                ?: ProbeHistory.DEFAULT_WINDOW_MS,
         )
     }
 
@@ -94,6 +102,12 @@ class DataStoreUplinkPreferencesRepository(
         dataStore.edit { it[STEP_DELAY_MS] = delayMs.coerceIn(UplinkPreferences.STEP_DELAY_RANGE_MS) }
     }
 
+    override suspend fun setHistoryWindowMs(windowMs: Long) {
+        dataStore.edit {
+            it[HISTORY_WINDOW_MS] = windowMs.coerceIn(UplinkPreferences.HISTORY_WINDOW_RANGE_MS)
+        }
+    }
+
     companion object {
         private val MASTER_TOGGLE_ENABLED = booleanPreferencesKey("master_toggle_enabled")
         private val HIDE_WHEN_DISABLED = booleanPreferencesKey("hide_when_disabled")
@@ -101,5 +115,6 @@ class DataStoreUplinkPreferencesRepository(
         private val SSID_WHITELIST = stringSetPreferencesKey("ssid_whitelist")
         private val PING_TARGET_HOST = stringPreferencesKey("ping_target_host")
         private val STEP_DELAY_MS = longPreferencesKey("step_delay_ms")
+        private val HISTORY_WINDOW_MS = longPreferencesKey("history_window_ms")
     }
 }
