@@ -171,7 +171,7 @@ class UplinkStatusServiceTest {
     }
 
     @Test
-    fun `DISABLED stops the cycle and shows the sixth (all-dim) icon, not a running tracer`() {
+    fun `DISABLED stops the visible tracer and shows the sixth (all-dim) icon, not a running tracer`() {
         service.applyVisibility(UplinkVisibility.ENABLED)
         val callsWhileEnabled = fakeProber.callCount
 
@@ -179,9 +179,83 @@ class UplinkStatusServiceTest {
 
         val foregroundNotification = checkNotNull(shadowService().lastForegroundNotification)
         assertEquals(R.drawable.ic_scan_disabled, foregroundNotification.smallIcon.resId)
-        // No further probes after DISABLED stops the cycle -- confirms it's actually
-        // stopped, not just visually paused while still running underneath.
-        assertEquals(callsWhileEnabled, fakeProber.callCount)
+        // Exactly one more probe happened -- the new background history loop's own first
+        // attempt (see the class below) -- not the visible cycle continuing to advance the
+        // bar/notification. The icon stays the fixed dim frame regardless.
+        assertEquals(callsWhileEnabled + 1, fakeProber.callCount)
+        assertEquals(R.drawable.ic_scan_disabled, UplinkIconDisplay.iconRes.value)
+    }
+
+    /**
+     * Regression test for the reported bug: on a real device, going out of network scope (e.g.
+     * airplane mode under a "cellular only" scope) froze the history graphs instead of letting
+     * them keep recording the outage -- exactly the kind of event a connectivity history exists
+     * to show. `DISABLED` now keeps a throttled, independent probe loop running specifically to
+     * feed [UplinkProbeHistory] while the visible tracer is paused.
+     */
+    @Test
+    fun `DISABLED keeps recording real probe attempts into the history graphs`() {
+        service.applyVisibility(UplinkVisibility.ENABLED)
+        val attemptsWhileEnabled = UplinkProbeHistory.history.value.attemptCount
+
+        service.applyVisibility(UplinkVisibility.DISABLED)
+
+        assertEquals(attemptsWhileEnabled + 1, UplinkProbeHistory.history.value.attemptCount)
+
+        fakeScheduler.scheduled.toList().forEach { it() }
+
+        assertEquals(attemptsWhileEnabled + 2, UplinkProbeHistory.history.value.attemptCount)
+    }
+
+    @Test
+    fun `the background history loop paces every attempt at least 250ms apart, regardless of a lower step delay`() = runTest {
+        fakePreferencesRepository.setStepDelayMs(0L)
+        controller.startCommand(0, 1)
+        fakeNetworkScopeStatus.inScope = false // ENABLED -> DISABLED
+
+        fakeScheduler.delays.clear()
+        fakeScheduler.scheduled.toList().forEach { it() }
+
+        assertEquals(listOf(250L), fakeScheduler.delays)
+    }
+
+    @Test
+    fun `the background history loop uses the configured step delay when it is above the floor`() = runTest {
+        fakePreferencesRepository.setStepDelayMs(600L)
+        controller.startCommand(0, 1)
+        fakeNetworkScopeStatus.inScope = false // ENABLED -> DISABLED
+
+        fakeScheduler.delays.clear()
+        fakeScheduler.scheduled.toList().forEach { it() }
+
+        assertEquals(listOf(600L), fakeScheduler.delays)
+    }
+
+    @Test
+    fun `going back to ENABLED stops the background history loop so probing is not doubled up`() {
+        service.applyVisibility(UplinkVisibility.DISABLED)
+        val attemptsWhileDisabled = UplinkProbeHistory.history.value.attemptCount
+
+        service.applyVisibility(UplinkVisibility.ENABLED)
+        val attemptsJustAfterEnabled = UplinkProbeHistory.history.value.attemptCount
+
+        // Firing every callback the background loop might still have pending must not add a
+        // second attempt on top of what the now-live visible cycle already produced.
+        fakeScheduler.scheduled.toList().forEach { it() }
+
+        assertEquals(attemptsJustAfterEnabled + 1, UplinkProbeHistory.history.value.attemptCount)
+        assertTrue(attemptsWhileDisabled < attemptsJustAfterEnabled)
+    }
+
+    @Test
+    fun `HIDDEN stops the background history loop too -- master toggle off means the entire service stops`() {
+        service.applyVisibility(UplinkVisibility.DISABLED)
+        val attemptsWhileDisabled = UplinkProbeHistory.history.value.attemptCount
+
+        service.applyVisibility(UplinkVisibility.HIDDEN)
+        fakeScheduler.scheduled.toList().forEach { it() }
+
+        assertEquals(attemptsWhileDisabled, UplinkProbeHistory.history.value.attemptCount)
     }
 
     @Test
@@ -357,7 +431,10 @@ class UplinkStatusServiceTest {
 
         val foregroundNotification = checkNotNull(shadowService().lastForegroundNotification)
         assertEquals(R.drawable.ic_scan_disabled, foregroundNotification.smallIcon.resId)
-        assertEquals(callsWhileInScope, fakeProber.callCount)
+        // The visible tracer really did stop -- exactly one more probe happened (the
+        // background history loop's own first attempt while DISABLED), not the visible
+        // cycle continuing to advance the icon.
+        assertEquals(callsWhileInScope + 1, fakeProber.callCount)
     }
 
     @Test
@@ -365,13 +442,53 @@ class UplinkStatusServiceTest {
         fakePreferencesRepository.setHideWhenDisabled(false)
         fakeNetworkScopeStatus.inScope = false
         controller.startCommand(0, 1)
-        assertEquals(0, fakeProber.callCount)
+        // The background history loop's own first probe attempt while DISABLED -- not the
+        // visible tracer, which never starts while out of scope.
+        assertEquals(1, fakeProber.callCount)
 
         fakeNetworkScopeStatus.inScope = true
 
-        assertEquals(1, fakeProber.callCount)
+        assertEquals(2, fakeProber.callCount)
         val foregroundNotification = checkNotNull(shadowService().lastForegroundNotification)
         assertEquals(R.drawable.ic_scan_1, foregroundNotification.smallIcon.resId)
+    }
+
+    // --- History graph markers: master-toggle transitions -----------------------------------
+
+    @Test
+    fun `turning the master toggle off records a marker in the history graphs`() = runTest {
+        controller.startCommand(0, 1)
+        assertTrue(UplinkProbeHistory.history.value.markers.isEmpty())
+
+        fakePreferencesRepository.setMasterToggleEnabled(false)
+
+        assertEquals(1, UplinkProbeHistory.history.value.markers.size)
+    }
+
+    @Test
+    fun `a fresh start with the master toggle already on does not itself count as a transition`() = runTest {
+        controller.startCommand(0, 1)
+
+        assertTrue(UplinkProbeHistory.history.value.markers.isEmpty())
+    }
+
+    @Test
+    fun `an unrelated preference change while enabled does not add a spurious marker`() = runTest {
+        controller.startCommand(0, 1)
+
+        fakePreferencesRepository.setStepDelayMs(137L)
+
+        assertTrue(UplinkProbeHistory.history.value.markers.isEmpty())
+    }
+
+    @Test
+    fun `turning the master toggle off does not clear the samples already recorded`() = runTest {
+        controller.startCommand(0, 1)
+        val attemptsBeforeToggleOff = UplinkProbeHistory.history.value.attemptCount
+
+        fakePreferencesRepository.setMasterToggleEnabled(false)
+
+        assertEquals(attemptsBeforeToggleOff, UplinkProbeHistory.history.value.attemptCount)
     }
 
     // --- Issue #22: a fresh start must not spend "nothing reported yet" as a real verdict ---

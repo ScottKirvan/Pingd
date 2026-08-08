@@ -53,12 +53,17 @@ data class SparklinePoint(
  *
  * This class therefore never reads a clock. That's what keeps it a pure, deterministic
  * function of the samples it was given, but it also has a real consequence worth stating: if
- * probing stops entirely (service paused/hidden), nothing prunes, and the history stays as it
- * was at the last attempt rather than draining to empty. That is deliberate — it's the same
- * freeze-in-place honesty the tracer itself uses for a failed probe, it keeps the graphs
- * readable across a transition instead of blanking them, and the caller labels what is shown
- * with the span it actually covers rather than claiming the full window. The first sample
- * after the gap prunes everything the window has outlived, so it is self-correcting.
+ * nothing records a sample for a while, nothing prunes, and the history stays as it was at the
+ * last attempt rather than draining to empty. That is deliberate — it's the same freeze-in-place
+ * honesty the tracer itself uses for a failed probe, it keeps the graphs readable across a
+ * transition instead of blanking them, and the caller labels what is shown with the span it
+ * actually covers rather than claiming the full window. The first sample after the gap prunes
+ * everything the window has outlived, so it is self-correcting. In practice this only happens
+ * while the whole app is switched off (the master toggle) — `UplinkStatusService` keeps a
+ * throttled probe running even while the visible tracer is paused for being out of network
+ * scope, specifically so an out-of-scope period doesn't go blind here — and [recordMarker] gives
+ * the genuinely-off case its own visible marker rather than leaving it indistinguishable from an
+ * ordinary gap in the data.
  *
  * ### Session lifetime
  * There is no save/restore path here, by design and for the same reason
@@ -69,6 +74,15 @@ data class SparklinePoint(
 data class ProbeHistory(
     val windowMs: Long = DEFAULT_WINDOW_MS,
     val samples: List<ProbeSample> = emptyList(),
+    /** Timestamps of master-toggle transitions (the whole app switched off, or back on) that
+     * happened while retained -- see [recordMarker]. These are not probe attempts and never
+     * affect [successPercent]/[averageLatencyMs]/either sparkline's data; they exist purely so
+     * the UI can draw a vertical break where one happened, distinguishing "the app was off, we
+     * simply don't know" from a real measured outage. Pruned by the same [windowMs] as
+     * [samples], and dropped by [cleared] right along with them -- the user's explicit reset
+     * means a clean slate, and a stale marker from before it would misdescribe what's on screen
+     * afterward just as much as a stale sample would. */
+    val markers: List<Long> = emptyList(),
 ) {
 
     init {
@@ -121,13 +135,57 @@ data class ProbeHistory(
      * the success percentage exists to reflect. */
     fun recordFailure(timestampMs: Long): ProbeHistory = appended(ProbeSample(timestampMs, latencyMs = null))
 
-    /** Same samples under a new retention window, immediately pruned to it — so shortening the
-     * window takes effect at once rather than at the next probe. */
-    fun withWindowMs(windowMs: Long): ProbeHistory =
-        ProbeHistory(windowMs = windowMs, samples = pruned(samples, windowMs))
+    /** Records a master-toggle transition (the whole app switched off, or back on) — see
+     * [markers]. [timestampMs] is expected to be no earlier than the newest existing sample or
+     * marker, same ordering contract as [recordSuccess]/[recordFailure]. */
+    fun recordMarker(timestampMs: Long): ProbeHistory {
+        val newest = maxOf(timestampMs, samples.lastOrNull()?.timestampMs ?: timestampMs, markers.lastOrNull() ?: timestampMs)
+        val cutoff = newest - windowMs
+        return copy(
+            samples = prunedSamples(samples, cutoff),
+            markers = prunedMarkers(markers + timestampMs, cutoff),
+        )
+    }
 
-    /** Drops every sample, keeping the window — the user's explicit "reset history" action. */
-    fun cleared(): ProbeHistory = copy(samples = emptyList())
+    /** Same samples and markers under a new retention window, immediately pruned to it — so
+     * shortening the window takes effect at once rather than at the next probe. */
+    fun withWindowMs(windowMs: Long): ProbeHistory {
+        val newest = maxOf(samples.lastOrNull()?.timestampMs ?: Long.MIN_VALUE, markers.lastOrNull() ?: Long.MIN_VALUE)
+        if (newest == Long.MIN_VALUE) return copy(windowMs = windowMs)
+        val cutoff = newest - windowMs
+        return ProbeHistory(
+            windowMs = windowMs,
+            samples = prunedSamples(samples, cutoff),
+            markers = prunedMarkers(markers, cutoff),
+        )
+    }
+
+    /** Drops every sample and marker, keeping the window — the user's explicit "reset history"
+     * action. */
+    fun cleared(): ProbeHistory = copy(samples = emptyList(), markers = emptyList())
+
+    /**
+     * Where each retained [markers] timestamp falls across the currently retained samples' own
+     * span, as a fraction from 0 (oldest retained sample) to 1 (newest) — the same axis
+     * [latencySparkline] and [successSparkline] plot against, so the UI can draw a vertical
+     * break at exactly the right point with no scaling decision of its own left to make.
+     *
+     * A marker outside the samples' own span (before the oldest retained one, or after the
+     * newest -- e.g. the app has been off since before that) contributes nothing: there is no
+     * meaningful position for it on an axis defined by samples that don't reach that far.
+     */
+    fun markerFractions(): List<Float> {
+        if (markers.isEmpty() || samples.size < 2) return emptyList()
+        val oldest = samples.first().timestampMs
+        val span = spanMs
+        return markers.mapNotNull { marker ->
+            if (marker < oldest || marker > samples.last().timestampMs) {
+                null
+            } else {
+                (marker - oldest).toFloat() / span
+            }
+        }
+    }
 
     /**
      * The latency trend, one point per retained sample: [SparklinePoint.y] is the sample's
@@ -199,20 +257,33 @@ data class ProbeHistory(
         }
     }
 
-    private fun appended(sample: ProbeSample): ProbeHistory =
-        copy(samples = pruned(samples + sample, windowMs))
+    private fun appended(sample: ProbeSample): ProbeHistory {
+        val cutoff = sample.timestampMs - windowMs
+        return copy(
+            samples = prunedSamples(samples + sample, cutoff),
+            markers = prunedMarkers(markers, cutoff),
+        )
+    }
 
     companion object {
-        /** Drops everything older than [windowMs] before the newest sample, then anything
-         * still over [MAX_SAMPLES]. Relies on [all] being in timestamp order, which is how the
-         * cycle produces them. */
-        private fun pruned(all: List<ProbeSample>, windowMs: Long): List<ProbeSample> {
+        /** Drops everything older than [cutoff], then anything still over [MAX_SAMPLES]. Relies
+         * on [all] being in timestamp order, which is how the cycle produces them. */
+        private fun prunedSamples(all: List<ProbeSample>, cutoff: Long): List<ProbeSample> {
             if (all.isEmpty()) return all
-            val cutoff = all.last().timestampMs - windowMs
             var firstKept = all.indexOfFirst { it.timestampMs >= cutoff }
             if (firstKept < 0) firstKept = all.size
             val overflow = (all.size - firstKept) - MAX_SAMPLES
             if (overflow > 0) firstKept += overflow
+            return if (firstKept == 0) all else all.subList(firstKept, all.size).toList()
+        }
+
+        /** Same rule as [prunedSamples], minus the [MAX_SAMPLES] cap -- markers are rare,
+         * user-driven events (a master-toggle flip), not one-per-probe, so there's nothing here
+         * that could grow unbounded the way free-wheeling pacing can for samples. */
+        private fun prunedMarkers(all: List<Long>, cutoff: Long): List<Long> {
+            if (all.isEmpty()) return all
+            var firstKept = all.indexOfFirst { it >= cutoff }
+            if (firstKept < 0) firstKept = all.size
             return if (firstKept == 0) all else all.subList(firstKept, all.size).toList()
         }
 

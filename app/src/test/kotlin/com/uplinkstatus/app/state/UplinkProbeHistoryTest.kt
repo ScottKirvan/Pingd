@@ -91,6 +91,27 @@ class UplinkProbeHistoryTest {
         assertNotEquals(before, UplinkProbeHistory.history.value)
     }
 
+    @Test
+    fun `recordMasterToggleTransition adds a marker without counting as an attempt`() {
+        UplinkProbeHistory.recordSuccess(latencyMs = 10, timestampMs = 0)
+        UplinkProbeHistory.recordMasterToggleTransition(timestampMs = 500)
+        UplinkProbeHistory.recordSuccess(latencyMs = 20, timestampMs = 1_000)
+
+        val history = UplinkProbeHistory.history.value
+        assertEquals(2, history.attemptCount)
+        assertEquals(listOf(500L), history.markers)
+    }
+
+    @Test
+    fun `reset clears markers along with samples`() {
+        UplinkProbeHistory.recordSuccess(latencyMs = 10, timestampMs = 0)
+        UplinkProbeHistory.recordMasterToggleTransition(timestampMs = 500)
+
+        UplinkProbeHistory.reset()
+
+        assertTrue(UplinkProbeHistory.history.value.markers.isEmpty())
+    }
+
     /**
      * The default timestamp source has to be monotonic and has to produce a *duration* the
      * window can be measured against — `SystemClock.elapsedRealtime`, not the wall clock,

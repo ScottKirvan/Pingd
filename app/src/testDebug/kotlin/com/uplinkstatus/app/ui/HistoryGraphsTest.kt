@@ -146,6 +146,22 @@ class HistoryGraphsTest {
         composeTestRule.onNodeWithTag(TAG_PING_SUCCESS_VALUE).assertTextEquals("50%")
     }
 
+    // --- Markers: master-toggle transitions -------------------------------------------------
+
+    @Test
+    fun `a master-toggle marker does not affect the displayed values or caption, and does not crash rendering`() {
+        setContent()
+
+        UplinkProbeHistory.recordSuccess(latencyMs = 10, timestampMs = 0)
+        UplinkProbeHistory.recordMasterToggleTransition(timestampMs = 500)
+        UplinkProbeHistory.recordSuccess(latencyMs = 30, timestampMs = 1_000)
+        composeTestRule.waitForIdle()
+
+        composeTestRule.onNodeWithTag(TAG_PING_SUCCESS_VALUE).assertTextEquals("100%")
+        composeTestRule.onNodeWithTag(TAG_LATENCY_VALUE).assertTextEquals("20 ms")
+        assertEquals(1, UplinkProbeHistory.history.value.markers.size)
+    }
+
     // --- Reset ---------------------------------------------------------------------------------
 
     @Test
@@ -153,6 +169,7 @@ class HistoryGraphsTest {
         setContent()
 
         seed(count = 4, failures = 1)
+        UplinkProbeHistory.recordMasterToggleTransition(timestampMs = 4_000)
         composeTestRule.waitForIdle()
         composeTestRule.onNodeWithTag(TAG_PING_SUCCESS_VALUE).assertTextEquals("75%")
 
@@ -160,6 +177,7 @@ class HistoryGraphsTest {
         composeTestRule.waitForIdle()
 
         assertEquals(0, UplinkProbeHistory.history.value.attemptCount)
+        assertEquals(0, UplinkProbeHistory.history.value.markers.size)
         composeTestRule.onNodeWithTag(TAG_PING_SUCCESS_VALUE).assertTextEquals("—")
         composeTestRule.onAllNodesWithText("no probes yet").assertCountEquals(2)
     }

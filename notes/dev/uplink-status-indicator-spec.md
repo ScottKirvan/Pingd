@@ -309,6 +309,54 @@ reaches in normal use; when it does bite, the oldest samples go first
 and the caption reports the shorter span actually covered, so the effect
 is a shorter graph rather than a mislabeled one.
 
+### Recording continues through `DISABLED`
+The visible tracer pauses while `DISABLED` (network out of scope) — per
+the [state logic](#enabled--disabled--hidden--state-logic) above, there
+is nothing for it to show. The history graphs do **not** pause with it:
+an out-of-scope period (a WiFi-only phone losing WiFi, a cellular-only
+phone losing signal or going into airplane mode) is exactly the kind of
+outage a connectivity history exists to show, so going blind for its
+duration would defeat the graphs' own purpose. A second, independent
+probe loop keeps recording real samples into the same history for as
+long as the master toggle stays on, entirely separate from the visible
+tracer's own ack/bar-position machinery — it drives no icon, posts no
+notification update, and the status line stays on "paused, out of
+scope" throughout.
+
+That loop paces every attempt — success or failure alike — at least
+250ms apart, regardless of the configured step-delay preference (which
+can go as low as 0, "free wheeling," for the visible tracer). Without a
+floor independent of that setting, total connectivity loss (no network
+interface to even attempt a route over, as opposed to an ordinary
+"target isn't answering" outage) fails a connect attempt almost
+instantly, and an unthrottled retry loop against that would spin as fast
+as the CPU allows for as long as the outage lasts — directly working
+against this app's own battery-conscious design. If the step delay is
+configured above 250ms, that larger value is used instead, so the
+history-only loop is never *more* aggressive than the tracer the user
+already configured.
+
+Master toggle **off** is different: it stops the entire service,
+history recording included, exactly as before this section was added —
+there is nothing left running to keep the loop above fed once the whole
+feature is switched off. Only `DISABLED` (out of scope, master toggle
+still on) gets the keep-recording treatment.
+
+### Master-toggle markers
+Turning the master toggle off draws a vertical marker in both graphs at
+the point it happened, distinct from the data itself — a marker is not a
+probe attempt and never affects the success percentage, the latency
+average, or either sparkline's plotted points. This is deliberately
+*not* a gap the way a failed probe is: the whole app was off, so there
+is no honest way to say anything happened at all, and the marker exists
+so that silence reads as "the app was switched off here," not as an
+unexplained flatline indistinguishable from a real outage a moment
+before. Only the *off* transition is marked, not the resumption — the
+graphs already read as continuing to move once real samples start
+arriving again, so a second marker there would add nothing. Markers are
+pruned by the same window as samples, and are cleared by the graphs'
+own reset action right along with them.
+
 ## User Preferences
 - **Enable/disable toggle** — master on/off for the whole feature,
   without uninstalling the app.
