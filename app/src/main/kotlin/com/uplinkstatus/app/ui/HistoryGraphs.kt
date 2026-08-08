@@ -43,6 +43,7 @@ private const val NO_VALUE = "—"
 
 private val SPARKLINE_HEIGHT = 48.dp
 private val SPARKLINE_STROKE = 2.dp
+private val MARKER_STROKE = 1.dp
 
 /**
  * The settings screen's two live history graphs — ping success percentage and latency trend —
@@ -68,6 +69,10 @@ private val SPARKLINE_STROKE = 2.dp
 fun HistoryGraphs(modifier: Modifier = Modifier) {
     val history by UplinkProbeHistory.history.collectAsState()
     val caption = historySpanCaption(history)
+    // Shared by both cards -- one history, one set of master-toggle transitions, same axis
+    // both sparklines already plot against. See ProbeHistory.markerFractions' own doc for why
+    // this is never mistaken for a real measured gap.
+    val markers = history.markerFractions()
 
     Column(
         modifier = modifier.fillMaxWidth().testTag(TAG_HISTORY_GRAPHS),
@@ -78,6 +83,7 @@ fun HistoryGraphs(modifier: Modifier = Modifier) {
             value = history.successPercent?.let { "${it.roundToInt()}%" } ?: NO_VALUE,
             caption = caption,
             points = history.successSparkline(),
+            markers = markers,
             lineColor = MaterialTheme.colorScheme.primary,
             cardTag = TAG_PING_SUCCESS_CARD,
             valueTag = TAG_PING_SUCCESS_VALUE,
@@ -87,6 +93,7 @@ fun HistoryGraphs(modifier: Modifier = Modifier) {
             value = history.averageLatencyMs?.let { "$it ms" } ?: NO_VALUE,
             caption = caption,
             points = history.latencySparkline(),
+            markers = markers,
             lineColor = MaterialTheme.colorScheme.tertiary,
             cardTag = TAG_LATENCY_CARD,
             valueTag = TAG_LATENCY_VALUE,
@@ -115,6 +122,7 @@ private fun HistoryGraphCard(
     value: String,
     caption: String,
     points: List<SparklinePoint>,
+    markers: List<Float>,
     lineColor: Color,
     cardTag: String,
     valueTag: String,
@@ -140,7 +148,9 @@ private fun HistoryGraphCard(
             }
             Sparkline(
                 points = points,
+                markers = markers,
                 color = lineColor,
+                markerColor = MaterialTheme.colorScheme.outline,
                 modifier = Modifier.weight(1f).height(SPARKLINE_HEIGHT),
             )
         }
@@ -157,6 +167,11 @@ private fun HistoryGraphCard(
  * sample of a session) is drawn as a dot — a one-point path draws nothing at all, which would
  * make a genuinely measured value invisible.
  *
+ * [markers] (from [ProbeHistory.markerFractions]) draw as thin vertical lines behind the data,
+ * one per master-toggle-off transition retained in the window -- a visually distinct "we
+ * weren't measuring here" mark, never a gap in [points] itself, since a marker is not a probe
+ * attempt and must not be mistaken for one.
+ *
  * Purely arithmetic: every value arrives already reduced to the unit square by [ProbeHistory],
  * so there is no scaling or aggregation decision left here to disagree with the numbers above
  * it.
@@ -164,7 +179,9 @@ private fun HistoryGraphCard(
 @Composable
 private fun Sparkline(
     points: List<SparklinePoint>,
+    markers: List<Float>,
     color: Color,
+    markerColor: Color,
     modifier: Modifier = Modifier,
 ) {
     Canvas(modifier = modifier) {
@@ -174,6 +191,17 @@ private fun Sparkline(
         // instead of being clipped in half at the edge.
         val inset = stroke / 2f
         val usableHeight = (size.height - stroke).coerceAtLeast(0f)
+
+        // Drawn first, so the data line above stays the visually dominant element.
+        markers.forEach { fraction ->
+            val x = fraction * size.width
+            drawLine(
+                color = markerColor,
+                start = Offset(x, 0f),
+                end = Offset(x, size.height),
+                strokeWidth = MARKER_STROKE.toPx(),
+            )
+        }
 
         var current = mutableListOf<Offset>()
         val segments = mutableListOf<List<Offset>>()

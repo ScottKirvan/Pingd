@@ -352,6 +352,86 @@ class ProbeHistoryTest {
         assertEquals(1f, points.last().x, 0.001f)
     }
 
+    // --- Markers: master-toggle transitions -----------------------------------------------
+
+    @Test
+    fun `a marker does not count as an attempt and does not affect the percentage or latency`() {
+        val history = ProbeHistory(windowMs = window)
+            .recordSuccess(0, latencyMs = 10)
+            .recordMarker(500)
+            .recordSuccess(1_000, latencyMs = 20)
+
+        assertEquals(2, history.attemptCount)
+        assertEquals(15L, history.averageLatencyMs)
+        assertEquals(listOf(500L), history.markers)
+    }
+
+    @Test
+    fun `markers are pruned by the same window as samples`() {
+        val history = ProbeHistory(windowMs = 10_000)
+            .recordMarker(0)
+            .recordSuccess(20_000, latencyMs = 10)
+
+        assertTrue(history.markers.isEmpty())
+    }
+
+    @Test
+    fun `narrowing the window prunes markers immediately too`() {
+        val history = ProbeHistory(windowMs = 60_000)
+            .recordSuccess(0, latencyMs = 10)
+            .recordMarker(1_000)
+            .recordSuccess(50_000, latencyMs = 20)
+
+        val narrowed = history.withWindowMs(10_000)
+
+        assertTrue(narrowed.markers.isEmpty())
+    }
+
+    @Test
+    fun `clearing drops markers along with samples`() {
+        val history = ProbeHistory(windowMs = window)
+            .recordSuccess(0, latencyMs = 10)
+            .recordMarker(500)
+
+        assertTrue(history.cleared().markers.isEmpty())
+    }
+
+    @Test
+    fun `marker fractions are positioned across the same axis the sparklines use`() {
+        val history = ProbeHistory(windowMs = window)
+            .recordSuccess(0, latencyMs = 10)
+            .recordMarker(2_500)
+            .recordSuccess(10_000, latencyMs = 20)
+
+        assertEquals(listOf(0.25f), history.markerFractions())
+    }
+
+    @Test
+    fun `a marker outside the retained samples' own span contributes no fraction`() {
+        // The samples span 0..1000; a marker from before the app was even installed (or from
+        // after every retained sample -- e.g. the app was switched off and nothing has probed
+        // since) has no meaningful position on that axis.
+        val before = ProbeHistory(windowMs = window)
+            .recordMarker(0)
+            .recordSuccess(500, latencyMs = 10)
+            .recordSuccess(1_000, latencyMs = 20)
+        assertTrue(before.markerFractions().isEmpty())
+
+        val after = ProbeHistory(windowMs = window)
+            .recordSuccess(0, latencyMs = 10)
+            .recordSuccess(500, latencyMs = 20)
+            .recordMarker(1_000)
+        assertTrue(after.markerFractions().isEmpty())
+    }
+
+    @Test
+    fun `fewer than two samples means no axis to place a marker on`() {
+        assertTrue(ProbeHistory(windowMs = window).recordMarker(0).markerFractions().isEmpty())
+        assertTrue(
+            ProbeHistory(windowMs = window).recordSuccess(0, 10).recordMarker(0).markerFractions().isEmpty(),
+        )
+    }
+
     // --- Guard rails ----------------------------------------------------------------------
 
     @Test(expected = IllegalArgumentException::class)

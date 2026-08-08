@@ -59,6 +59,15 @@ object UplinkProbeHistory {
         state.update { it.recordFailure(timestampMs) }
     }
 
+    /** The master toggle flipped (off, or back on) — recorded so the history graphs can draw a
+     * vertical marker at the point the whole app stopped or resumed measuring, distinct from an
+     * ordinary gap in the data (see [ProbeHistory.recordMarker]'s doc). Called from
+     * [com.uplinkstatus.app.service.UplinkStatusService], the one place that already observes
+     * the persisted master-toggle preference changing. */
+    fun recordMasterToggleTransition(timestampMs: Long = nowMs()) {
+        state.update { it.recordMarker(timestampMs) }
+    }
+
     /** Applies the user's history-window preference, pruning anything it has already outlived
      * so a shortened window takes effect immediately rather than at the next probe. */
     fun setWindowMs(windowMs: Long) {
