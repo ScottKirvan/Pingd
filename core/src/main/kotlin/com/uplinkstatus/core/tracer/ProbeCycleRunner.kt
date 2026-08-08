@@ -57,10 +57,23 @@ import com.uplinkstatus.core.probe.Prober
  * probe's own timeout, not within however long the outage lasts. That guarantee is what
  * keeps a torn-down consumer (e.g. a stopped foreground service) from having a notification
  * resurrected underneath it by a cycle it already stopped.
+ *
+ * ### Live-updatable target and pacing
+ *
+ * [target] and [stepDelayMs] are settable ([updateTarget]/[updateStepDelayMs]) from any
+ * thread, at any time, precisely so a caller whose visibility logic treats "already running"
+ * as a no-op (see `UplinkStatusService.applyVisibility`'s `ENABLED` branch) still has a way to
+ * push a settings change into a cycle that is already underway. Without this, a ping-target
+ * or step-delay preference change made while the tracer was already running would silently
+ * do nothing until some unrelated event happened to stop and restart the cycle — the actual
+ * bug this pair of methods exists to fix. Deliberately *not* routed through a full
+ * stop-then-[start], which would also reset bar position and the notification's remembered
+ * session state ([CycleListener]-side), disruption this class has no reason to cause for what
+ * is, from the tracer's own point of view, just a pacing/target tweak.
  */
 class ProbeCycleRunner(
     private val prober: Prober,
-    private val target: ProbeTarget,
+    initialTarget: ProbeTarget,
     private val scheduler: TracerScheduler,
     private val listener: CycleListener,
     private val tracer: AckTracer = AckTracer(),
@@ -70,11 +83,52 @@ class ProbeCycleRunner(
      * value. Must be non-negative; a negative delay isn't a real duration and every scheduler
      * implementation this project uses treats it as an error or as an unintended "immediately"
      * that would silently defeat the pacing this setting exists to provide. */
-    private val stepDelayMs: Long = DEFAULT_STEP_DELAY_MS,
+    initialStepDelayMs: Long = DEFAULT_STEP_DELAY_MS,
 ) {
 
     init {
-        require(stepDelayMs >= 0) { "stepDelayMs must be non-negative, was $stepDelayMs" }
+        // A property initializer assigns straight to the backing field in Kotlin, bypassing
+        // any custom setter entirely -- confirmed against the compiled bytecode, not assumed
+        // -- so stepDelayMs's own setter below only ever validates a *later* updateStepDelayMs
+        // call. The constructor's own value needs this separate check to be rejected at all.
+        require(initialStepDelayMs >= 0) {
+            "stepDelayMs must be non-negative, was $initialStepDelayMs"
+        }
+    }
+
+    /** The probe target, read fresh on every attempt in [runProbeAttempts]. `@Volatile`
+     * because [updateTarget] is called from whichever thread reacts to a preferences change
+     * (not the thread running the cycle), and that write has to become visible to the next
+     * read without both sides sharing a lock -- the read happens deliberately outside
+     * [lifecycleLock] (see [runProbeAttempts]'s doc), the same reason [running] is `@Volatile`
+     * rather than lock-guarded. */
+    @Volatile
+    var target: ProbeTarget = initialTarget
+        private set
+
+    /** The pacing wait, read fresh each time a step schedules the next one. `@Volatile` for
+     * the same cross-thread-write reason as [target]. The custom setter validates every
+     * later [updateStepDelayMs] call; the constructor's own initial value is validated
+     * separately, in `init` above -- see that block's doc for why both are needed. */
+    @Volatile
+    var stepDelayMs: Long = initialStepDelayMs
+        private set(value) {
+            require(value >= 0) { "stepDelayMs must be non-negative, was $value" }
+            field = value
+        }
+
+    /** Pushes a new probe target into an already-running cycle -- see the class doc's
+     * "Live-updatable target and pacing" section. A no-op call (the same target again) is
+     * harmless: the field write is unconditional and cheap either way. */
+    fun updateTarget(newTarget: ProbeTarget) {
+        target = newTarget
+    }
+
+    /** Pushes a new pacing delay into an already-running cycle -- see the class doc's
+     * "Live-updatable target and pacing" section. Throws the same way the constructor does
+     * for a negative value, via [stepDelayMs]'s own setter. */
+    fun updateStepDelayMs(newStepDelayMs: Long) {
+        stepDelayMs = newStepDelayMs
     }
 
     /**
