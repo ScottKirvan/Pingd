@@ -14,6 +14,7 @@ import com.uplinkstatus.app.MainActivity
 import com.uplinkstatus.app.R
 import com.uplinkstatus.app.prefs.NetworkScope
 import com.uplinkstatus.app.state.UplinkActivityStatus
+import com.uplinkstatus.app.state.UplinkIconDisplay
 import com.uplinkstatus.core.tracer.BarPosition
 import com.uplinkstatus.core.tracer.CycleEvent
 import com.uplinkstatus.core.tracer.CycleListener
@@ -55,8 +56,12 @@ import com.uplinkstatus.core.tracer.FreezeReason
  * post Android requires the moment the service starts, before any state is known.
  *
  * This class reports the states it genuinely observes — acks and freezes — to
- * [UplinkActivityStatus], but *only* from [onEvent]. Building notification content reports
- * nothing, deliberately: see [buildNotification].
+ * [UplinkActivityStatus], but *only* from [onEvent]; building notification content never
+ * reports a connectivity claim there, deliberately: see [buildNotification]. It separately
+ * reports every icon it builds, unconditionally, to [UplinkIconDisplay] — a claim about
+ * connectivity and a mirror of "what icon is showing" are different obligations, and
+ * [buildNotification] runs for the starting placeholder too, which has nothing to claim but
+ * still has an icon.
  *
  * Open (and [onEvent] separately marked `open`) purely so [UplinkStatusServiceTest] can
  * inject a thin recording subclass that observes every [CycleEvent] this class receives
@@ -197,6 +202,7 @@ open class UplinkNotificationController(
      * the icon down. */
     fun hide() {
         notificationManager.cancel(NOTIFICATION_ID)
+        UplinkIconDisplay.report(null)
     }
 
     private fun buildEnabledNotification(position: BarPosition, latencyMs: Long?): Notification {
@@ -248,6 +254,12 @@ open class UplinkNotificationController(
         // it as such is exactly how the status line ends up asserting states the app never
         // reached. Status reporting happens at the real transitions instead: acks and
         // freezes in onEvent above, visibility decisions in UplinkStatusService.
+        //
+        // UplinkIconDisplay *is* fed unconditionally here, deliberately unlike the status
+        // line: it exists purely to mirror the icon this notification is about to carry, not
+        // to make a claim about connectivity, so every call reaching this point -- including
+        // the starting placeholder -- is exactly the moment its mirror should update too.
+        UplinkIconDisplay.report(iconRes)
         return NotificationCompat.Builder(context, CHANNEL_ID)
             .setSmallIcon(iconRes)
             .setContentTitle(context.getString(R.string.notification_title))

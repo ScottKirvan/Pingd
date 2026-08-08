@@ -219,6 +219,13 @@ fun SettingsScreen(
                 .padding(24.dp),
             verticalArrangement = Arrangement.spacedBy(24.dp),
         ) {
+            // A live duplicate of the status-bar icon itself, driven straight from
+            // UplinkIconDisplay -- the same state UplinkNotificationController updates
+            // every time it changes the real notification's icon. Sits above the title
+            // deliberately: it's a glanceable preview of the thing this whole screen
+            // configures, not a setting itself, so it reads before any of them.
+            ScannerPreview()
+
             Text(text = "Uplink status settings", style = MaterialTheme.typography.titleLarge)
 
             SettingsToggleRow(

@@ -14,6 +14,7 @@ import androidx.compose.ui.test.onNodeWithText
 import androidx.compose.ui.test.performClick
 import androidx.compose.ui.test.performScrollTo
 import androidx.compose.ui.test.performTextInput
+import com.uplinkstatus.app.R
 import com.uplinkstatus.app.prefs.DataStoreUplinkPreferencesRepository
 import com.uplinkstatus.app.prefs.FakeUplinkPreferencesRepository
 import com.uplinkstatus.app.prefs.NetworkScope
@@ -21,6 +22,7 @@ import com.uplinkstatus.app.prefs.UplinkPreferences
 import com.uplinkstatus.app.prefs.UplinkPreferencesRepository
 import com.uplinkstatus.app.service.UplinkStatusService
 import com.uplinkstatus.app.state.UplinkActivityStatus
+import com.uplinkstatus.app.state.UplinkIconDisplay
 import com.uplinkstatus.app.state.UplinkRuntimeStatus
 import com.uplinkstatus.core.probe.ProbeTarget
 import com.uplinkstatus.core.visibility.UplinkVisibility
@@ -91,6 +93,9 @@ class SettingsScreenTest {
         // Same reasoning as UplinkRuntimeStatus above -- a previous test's last status text
         // must not leak into this one's "status line absent by default" assertion.
         UplinkActivityStatus.resetForTest()
+        // Same reasoning again -- a previous test's last mirrored icon must not leak into
+        // this one's "preview absent by default" assertion below.
+        UplinkIconDisplay.resetForTest()
     }
 
     private fun setContent() {
@@ -411,6 +416,28 @@ class SettingsScreenTest {
         setContent()
 
         composeTestRule.onAllNodesWithTag(TAG_STATUS_LINE).assertCountEquals(0)
+    }
+
+    /**
+     * Thin wiring check -- [ScannerPreviewTest] already covers the composable's own reaction
+     * to [UplinkIconDisplay] in isolation; this only has to prove it's actually mounted on the
+     * real [SettingsScreen], not a second copy of that logic.
+     */
+    @Test
+    fun `no scanner preview is shown before any icon has been reported`() {
+        setContent()
+
+        composeTestRule.onAllNodesWithTag(TAG_SCANNER_PREVIEW).assertCountEquals(0)
+    }
+
+    @Test
+    fun `the scanner preview mirrors the icon UplinkIconDisplay reports, live`() {
+        setContent()
+
+        UplinkIconDisplay.report(R.drawable.ic_scan_3)
+        composeTestRule.waitForIdle()
+
+        composeTestRule.onNodeWithTag(TAG_SCANNER_PREVIEW).assertExists()
     }
 
     @Test

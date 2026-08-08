@@ -197,6 +197,26 @@ notification of a fresh cycle reads "checking connection," not
 "connected": the tracer sits at bar 1 because the cycle just started,
 not because anything answered.
 
+## In-App Scanner Preview
+The settings screen also carries a live visual duplicate of the
+status-bar icon itself, centered horizontally at the top of the screen
+at roughly a quarter of the screen's width. It exists so the icon's
+current frame is visible while looking at the settings screen, without
+having to pull down the notification shade or glance at the status bar.
+
+Its one hard requirement mirrors the status line's: it must always show
+literally the same frame the notification is showing, not a separate
+animation or a second interpretation of the tracer's state derived some
+other way. It is fed from the same drawable resource the notification's
+icon was just built from, updated at the same moment — never computed
+independently from bar position or visibility state.
+
+When the real icon is absent (`HIDDEN`), the preview shows nothing at
+all, the same way the status bar does — this is not a seventh frame any
+more than the notification's own dim-all-bars frame is, per [Icon
+States](#icon-states-6-total) above. Whenever the master toggle is off,
+this is what applies.
+
 ## User Preferences
 - **Enable/disable toggle** — master on/off for the whole feature,
   without uninstalling the app.
