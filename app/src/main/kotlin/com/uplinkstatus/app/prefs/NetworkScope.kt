@@ -1,8 +1,9 @@
 package com.uplinkstatus.app.prefs
 
 /**
- * The four network-scope modes from the spec's "User Preferences" section. [WIFI_ONLY] is
- * the documented default (battery consideration). [SSID_WHITELIST] is the one mode that
+ * The four network-scope modes from the spec's "User Preferences" section. [ANY_CONNECTION] is
+ * the documented default -- WiFi or cellular, whichever is actually carrying traffic.
+ * [SSID_WHITELIST] is the one mode that
  * needs `ACCESS_FINE_LOCATION` to actually read the connected SSID — that permission
  * request happens at the point the user selects this mode (see `SettingsScreen`), not
  * unconditionally.
