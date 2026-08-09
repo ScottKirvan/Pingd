@@ -52,7 +52,7 @@ class UplinkPreferencesRepositoryTest {
 
         assertEquals(true, preferences.masterToggleEnabled)
         assertEquals(false, preferences.hideWhenDisabled)
-        assertEquals(NetworkScope.WIFI_ONLY, preferences.networkScope)
+        assertEquals(NetworkScope.ANY_CONNECTION, preferences.networkScope)
         assertEquals(emptySet<String>(), preferences.ssidWhitelist)
         assertEquals(ProbeTarget.DEFAULT_HOST, preferences.pingTargetHost)
         assertEquals(ProbeCycleRunner.DEFAULT_STEP_DELAY_MS, preferences.stepDelayMs)
@@ -178,6 +178,6 @@ class UplinkPreferencesRepositoryTest {
 
         val preferences = DataStoreUplinkPreferencesRepository(dataStore).preferencesFlow.first()
 
-        assertEquals(NetworkScope.WIFI_ONLY, preferences.networkScope)
+        assertEquals(NetworkScope.ANY_CONNECTION, preferences.networkScope)
     }
 }
