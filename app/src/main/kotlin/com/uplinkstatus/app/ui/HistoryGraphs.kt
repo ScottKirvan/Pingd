@@ -133,7 +133,12 @@ private fun HistoryGraphCard(
             verticalAlignment = Alignment.CenterVertically,
             horizontalArrangement = Arrangement.spacedBy(16.dp),
         ) {
-            Column(modifier = Modifier.weight(1f)) {
+            // No weight here, deliberately: this column should take exactly the width its
+            // own content (title/big number/caption) needs, not an even half of the row --
+            // the sparkline is what's supposed to dominate the card, the same "trailing
+            // sparkline" proportions the Starlink display this is modeled on uses. An equal
+            // 1f/1f split left the graph confined to roughly the right half of the card.
+            Column {
                 Text(text = title, style = MaterialTheme.typography.titleSmall)
                 Text(
                     text = value,
@@ -151,6 +156,9 @@ private fun HistoryGraphCard(
                 markers = markers,
                 color = lineColor,
                 markerColor = MaterialTheme.colorScheme.outline,
+                // Fills whatever width the text column (above) didn't claim -- the only
+                // weighted child in this Row, so it gets 100% of the remainder rather than
+                // splitting it.
                 modifier = Modifier.weight(1f).height(SPARKLINE_HEIGHT),
             )
         }
