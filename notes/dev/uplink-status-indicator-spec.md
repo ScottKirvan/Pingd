@@ -10,9 +10,10 @@ a separate animation timer.
 
 ## Scope
 - Persistent status-bar icon (not a home-screen widget).
-- Default network scope: WiFi only (battery consideration). User can
-  widen scope to any connection, restrict to cellular, or whitelist
-  specific SSIDs — see [User Preferences](#user-preferences).
+- Default network scope: any connection (WiFi or cellular, whichever is
+  actually carrying traffic). User can narrow scope to WiFi only or
+  cellular only, or whitelist specific SSIDs — see [User
+  Preferences](#user-preferences).
 - Discrete icon-frame swaps only — no smooth/animated rendering.
 - No adaptive back-off on ping retry.
 
@@ -281,8 +282,8 @@ no samples, not samples carried over from a previous run.
 - **Hide when disabled** — governs only the out-of-scope case above;
   it has no effect on the master toggle, which always hides.
 - **Network scope** — one of:
-  - WiFi only *(default)*
-  - Any connection (WiFi + cellular)
+  - Any connection (WiFi + cellular) *(default)*
+  - WiFi only
   - Cellular only
   - Specific SSID(s) — a whitelist of one or more networks; the icon
     is only enabled while connected to a listed network.

@@ -454,10 +454,12 @@ class UplinkStatusServiceTest {
 
     @Test
     fun `a real DISABLED decision is the only thing that reports paused`() {
+        // Not reached through the preferences flow, so this exercises currentNetworkScope's
+        // own field default (ANY_CONNECTION) rather than a value read from a preference.
         service.applyVisibility(UplinkVisibility.DISABLED)
 
         assertEquals(
-            UplinkActivityStatus.Activity.Paused(NetworkScope.WIFI_ONLY),
+            UplinkActivityStatus.Activity.Paused(NetworkScope.ANY_CONNECTION),
             UplinkActivityStatus.activity.value,
         )
     }
