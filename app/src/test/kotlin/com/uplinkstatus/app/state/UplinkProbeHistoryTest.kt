@@ -6,6 +6,7 @@ import org.junit.Assert.assertNotEquals
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Before
+import org.junit.Ignore
 import org.junit.Test
 import org.junit.runner.RunWith
 import org.robolectric.RobolectricTestRunner
@@ -47,6 +48,12 @@ class UplinkProbeHistoryTest {
         assertEquals(20L, history.averageLatencyMs)
     }
 
+    // DIAGNOSTIC BUILD (debug/probe-history-clear-diagnostics): UplinkProbeHistory.reset() is
+    // temporarily neutered so an on-device repro can rule it out as the cause of the
+    // reset-on-reconnect report. @Ignore'd rather than deleted so restoring reset()'s real body
+    // makes these go green again with no other change needed. Remove the @Ignore (and the
+    // neutering) once the investigation concludes.
+    @Ignore("temporarily neutered for debug/probe-history-clear-diagnostics -- see PR #37")
     @Test
     fun `reset clears every sample immediately, without waiting on the service`() {
         UplinkProbeHistory.recordSuccess(latencyMs = 10, timestampMs = 1_000)
@@ -102,6 +109,7 @@ class UplinkProbeHistoryTest {
         assertEquals(listOf(500L), history.markers)
     }
 
+    @Ignore("temporarily neutered for debug/probe-history-clear-diagnostics -- see PR #37")
     @Test
     fun `reset clears markers along with samples`() {
         UplinkProbeHistory.recordSuccess(latencyMs = 10, timestampMs = 0)

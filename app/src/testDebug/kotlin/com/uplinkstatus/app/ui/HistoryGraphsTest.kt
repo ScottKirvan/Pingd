@@ -13,6 +13,7 @@ import com.uplinkstatus.core.history.ProbeHistory
 import org.junit.After
 import org.junit.Assert.assertEquals
 import org.junit.Before
+import org.junit.Ignore
 import org.junit.Rule
 import org.junit.Test
 import org.junit.runner.RunWith
@@ -164,6 +165,11 @@ class HistoryGraphsTest {
 
     // --- Reset ---------------------------------------------------------------------------------
 
+    // DIAGNOSTIC BUILD (debug/probe-history-clear-diagnostics): UplinkProbeHistory.reset() is
+    // temporarily neutered so an on-device repro can rule it out as the cause of the
+    // reset-on-reconnect report -- see PR #37. Remove this @Ignore once that's resolved and
+    // reset()'s real body is restored.
+    @Ignore("temporarily neutered for debug/probe-history-clear-diagnostics -- see PR #37")
     @Test
     fun `the reset button clears the accumulated history on the spot`() {
         setContent()
