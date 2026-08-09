@@ -267,6 +267,18 @@ latency trend with data that was never actually measured.
   tracer's own freeze-in-place behavior already follows for a single
   failed probe.
 
+Both sparklines' time axis is anchored to the *configured window*, not
+stretched to fill from whatever span of samples happens to be retained
+so far. The newest retained sample always sits at the right edge; a
+handful of recent samples early in a session (or just after a reset, or
+just after a long gap prunes old data) sit clustered near that edge with
+real empty space to their left, and the line only spans the full width
+once the window is genuinely full — the same behavior a strip chart or
+oscilloscope trace has. Scaling to the retained span instead (an earlier
+version of this behavior) stretched however little data existed to fill
+the whole card every time, which looked exactly like the graph had just
+reset even when nothing was actually cleared.
+
 The window length is one setting shared by both graphs (and by the
 success-percentage calculation) — not two independently configurable
 windows for two views into the same underlying sample history. Settings

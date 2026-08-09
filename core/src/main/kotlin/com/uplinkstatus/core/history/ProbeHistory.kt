@@ -23,8 +23,10 @@ data class ProbeSample(
 
 /**
  * A single point of a rendered sparkline, already reduced to the unit square so the drawing
- * code has no aggregation or scaling decisions left to make: [x] runs 0 (oldest retained
- * sample) to 1 (newest), [y] runs 0 (bottom of the plot) to 1 (top).
+ * code has no aggregation or scaling decisions left to make: [x] runs 0 (the left edge of the
+ * *configured window*, not merely the oldest retained sample -- see
+ * [ProbeHistory.windowFraction]) to 1 (the newest retained sample), [y] runs 0 (bottom of the
+ * plot) to 1 (top).
  *
  * A `null` [y] is a **gap** — "nothing was measured here" — and must be rendered as a break in
  * the line, never as zero and never by interpolating across it. That's the whole reason this
@@ -45,11 +47,13 @@ data class SparklinePoint(
  * "mutation" here returns a new instance instead, which makes that publication safe without a
  * lock and makes every rule below testable as plain function output.
  *
- * ### The time axis is the retained samples' own span, not wall-clock "now"
+ * ### The time axis is never wall-clock "now"
  * [windowMs] is a *maximum* retention span: recording a sample drops anything older than
- * [windowMs] before it. Everything derived (the percentage, the average, both sparklines'
- * `x` axis) is then computed over the samples that are actually retained, whose span is at
- * most [windowMs] and, early in a session, much less.
+ * [windowMs] before it. The percentage and the average are computed over whatever is actually
+ * retained, whose span is at most [windowMs] and, early in a session, much less. Both
+ * sparklines' `x` axis is different on purpose: it's scaled to the full configured [windowMs],
+ * anchored to the newest retained sample, not stretched to fill from whatever is currently
+ * retained -- see [windowFraction]'s own doc for why that distinction matters.
  *
  * This class therefore never reads a clock. That's what keeps it a pure, deterministic
  * function of the samples it was given, but it also has a real consequence worth stating: if
@@ -165,31 +169,46 @@ data class ProbeHistory(
     fun cleared(): ProbeHistory = copy(samples = emptyList(), markers = emptyList())
 
     /**
-     * Where each retained [markers] timestamp falls across the currently retained samples' own
-     * span, as a fraction from 0 (oldest retained sample) to 1 (newest) — the same axis
-     * [latencySparkline] and [successSparkline] plot against, so the UI can draw a vertical
-     * break at exactly the right point with no scaling decision of its own left to make.
+     * Where a timestamp falls on the axis both sparklines plot against: 0 is the left edge of
+     * the *configured window* — [windowMs] before [newest] — and 1 is [newest] itself, anchored
+     * to the right edge regardless of how much of the window actually has data in it yet.
      *
-     * A marker outside the samples' own span (before the oldest retained one, or after the
-     * newest -- e.g. the app has been off since before that) contributes nothing: there is no
-     * meaningful position for it on an axis defined by samples that don't reach that far.
+     * This is the whole reason the axis is scaled by [windowMs] and not by [spanMs]: scaling to
+     * the retained span would stretch however little data exists so far to fill the entire
+     * width, which reads as the graph having just reset every time it's sparse (right after a
+     * reset, early in a session, or just after a gap prunes old data) even though nothing was
+     * actually cleared. Scaling to the window instead means a handful of recent samples sit
+     * clustered near the right edge with real empty space to their left, and the graph fills in
+     * and starts scrolling only once the window is genuinely full — the same behavior a strip
+     * chart or oscilloscope trace has, and the only one that doesn't misrepresent "not much time
+     * has passed" as "everything just started over."
+     */
+    private fun windowFraction(timestampMs: Long, newest: Long): Float =
+        1f - (newest - timestampMs).toFloat() / windowMs
+
+    /**
+     * Where each retained [markers] timestamp falls on the same window-anchored axis
+     * [latencySparkline] and [successSparkline] plot against (see [windowFraction]), so the UI
+     * can draw a vertical break at exactly the right point with no scaling decision of its own
+     * left to make.
+     *
+     * A marker outside the window relative to the newest retained sample (effectively
+     * unreachable in practice, since both are pruned by the same window) contributes nothing:
+     * there is no meaningful position for it on an axis that doesn't reach that far.
      */
     fun markerFractions(): List<Float> {
-        if (markers.isEmpty() || samples.size < 2) return emptyList()
-        val oldest = samples.first().timestampMs
-        val span = spanMs
+        if (markers.isEmpty() || samples.isEmpty()) return emptyList()
+        val newest = samples.last().timestampMs
         return markers.mapNotNull { marker ->
-            if (marker < oldest || marker > samples.last().timestampMs) {
-                null
-            } else {
-                (marker - oldest).toFloat() / span
-            }
+            windowFraction(marker, newest).takeIf { it in 0f..1f }
         }
     }
 
     /**
      * The latency trend, one point per retained sample: [SparklinePoint.y] is the sample's
-     * latency scaled against the retained min/max, and `null` for a failed probe.
+     * latency scaled against the retained min/max, and `null` for a failed probe. [SparklinePoint.x]
+     * is [windowFraction] — see its doc for why the axis is anchored to the configured window
+     * rather than stretched to fill from whatever span is currently retained.
      *
      * One point per *sample*, never aggregated, precisely so a failure stays a visible gap
      * exactly where it happened. When every retained latency is identical (or only one
@@ -201,10 +220,9 @@ data class ProbeHistory(
         val latencies = samples.mapNotNull { it.latencyMs }
         val min = latencies.minOrNull()
         val max = latencies.maxOrNull()
-        val span = spanMs
-        val oldest = samples.first().timestampMs
+        val newest = samples.last().timestampMs
         return samples.map { sample ->
-            val x = if (span <= 0L) 1f else (sample.timestampMs - oldest).toFloat() / span
+            val x = windowFraction(sample.timestampMs, newest)
             val y = sample.latencyMs?.let { latency ->
                 if (min == null || max == null || max == min) {
                     FLAT_LINE_Y
@@ -217,10 +235,12 @@ data class ProbeHistory(
     }
 
     /**
-     * The success-rate trend: the retained span cut into equal time buckets, each carrying the
-     * fraction of that bucket's attempts that succeeded (0..1 — an absolute scale, not
-     * autoscaled, since a percentage means something on its own). A bucket with no attempts in
-     * it is a gap, same rule as the latency line.
+     * The success-rate trend: the *configured window* — not just the currently retained span,
+     * see [windowFraction] — cut into equal time buckets, each carrying the fraction of that
+     * bucket's attempts that succeeded (0..1 — an absolute scale, not autoscaled, since a
+     * percentage means something on its own). A bucket with no attempts in it is a gap, same
+     * rule as the latency line — which is exactly what every bucket earlier than the data
+     * actually reaches renders as, early in a session or just after a reset.
      *
      * Bucketed rather than one point per sample because a per-sample success line can only
      * ever be 0 or 1 — a square wave that says nothing about the *rate*, which is the whole
@@ -236,16 +256,14 @@ data class ProbeHistory(
         val buckets = (samples.size / MIN_SAMPLES_PER_BUCKET).coerceIn(1, maxBuckets)
         val attempts = IntArray(buckets)
         val successes = IntArray(buckets)
-        val span = spanMs
-        val oldest = samples.first().timestampMs
+        val newest = samples.last().timestampMs
 
         samples.forEach { sample ->
-            val index = if (span <= 0L) {
-                buckets - 1
-            } else {
-                val fraction = (sample.timestampMs - oldest).toDouble() / span
-                (fraction * buckets).toInt().coerceIn(0, buckets - 1)
-            }
+            // coerceIn also covers buckets == 1: every fraction lands in the only bucket,
+            // index 0. windowFraction never divides by zero (windowMs is always positive),
+            // unlike the old span-based version this replaced.
+            val fraction = windowFraction(sample.timestampMs, newest)
+            val index = (fraction * buckets).toInt().coerceIn(0, buckets - 1)
             attempts[index]++
             if (sample.succeeded) successes[index]++
         }
