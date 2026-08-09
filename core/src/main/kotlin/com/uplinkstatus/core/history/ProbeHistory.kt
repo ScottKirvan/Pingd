@@ -312,16 +312,34 @@ data class ProbeHistory(
         /**
          * Hard cap on retained samples, independent of [windowMs].
          *
-         * At the default 500ms step delay the cycle produces roughly one probe per second, so
-         * even a 30-minute window stays well under this. It only becomes reachable at the
-         * other end of the pacing slider, where "free wheeling" (0ms) lets probes run
-         * back-to-back as fast as the network answers — an unbounded list there would grow
-         * with nothing but wall-clock time to stop it. When the cap does bite, the oldest
-         * samples go first, so the graphs cover a shorter span than the window asks for; the
-         * caption reports the span actually covered rather than the window, so this shortens
+         * Sized for the *fastest realistic production rate*, not the default steady-state one.
+         * A successful probe is naturally paced by the step-delay setting, but a **failed**
+         * probe retries immediately with no back-off at all, per spec -- and a DNS-resolution
+         * failure specifically (the exact condition a device sees for a moment while
+         * reconnecting after a total outage, before its resolver is reachable again) can return
+         * in low single-digit milliseconds, nowhere near the full connect timeout a generic
+         * failure waits out. A burst of those during precisely that reconnect window can produce
+         * thousands of samples in a couple of real seconds -- confirmed on-device: `attemptCount`
+         * was observed pinned at the *previous* cap (4096) after well under ten minutes of mixed
+         * normal use and reconnect testing, far faster than steady-state pacing alone explains.
+         * Against a cap sized only for steady state, a burst like that doesn't just shorten the
+         * graph (the honest, intended behavior when the cap bites during ordinary free-wheeling
+         * use) -- it can evict an entire window's worth of prior good data in a couple of
+         * seconds, which reads exactly like the history being cleared even though nothing ever
+         * called [cleared].
+         *
+         * This value is chosen so that reproducing the same mixed-use rate observed above for
+         * the *entire* widest configurable window (30 minutes) still would not reach it, leaving
+         * comfortable headroom beyond that for a genuine failure burst without wiping out
+         * everything before it. Each retained sample is two `Long`s plus small object overhead,
+         * so this costs a few hundred KB at worst, not a memory concern on a phone.
+         *
+         * When the cap does still bite (a burst sustained far longer than a reconnect blip), the
+         * oldest samples go first, so the graphs cover a shorter span than the window asks for;
+         * the caption reports the span actually covered rather than the window, so this shortens
          * what is shown without misdescribing it.
          */
-        const val MAX_SAMPLES: Int = 4096
+        const val MAX_SAMPLES: Int = 20_000
 
         /** Upper bound on [successSparkline]'s bucket count — enough resolution for a card-sized
          * sparkline without plotting points finer than the eye can separate. */
