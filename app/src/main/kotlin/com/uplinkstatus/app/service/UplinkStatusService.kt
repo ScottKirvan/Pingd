@@ -121,7 +121,7 @@ class UplinkStatusService : Service() {
      * many existing tests that call `applyVisibility(UplinkVisibility.ENABLED)` directly, with
      * no scope argument, keep working -- [notificationForDisabled] still needs to know it to
      * pick SSID-whitelist-specific text. */
-    private var currentNetworkScope: NetworkScope = NetworkScope.WIFI_ONLY
+    private var currentNetworkScope: NetworkScope = NetworkScope.ANY_CONNECTION
 
     /** Whether [applyVisibility] has run at least once for *this* service instance, i.e.
      * whether a real visibility decision exists yet. Only used to keep [onStartCommand] from

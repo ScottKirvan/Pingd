@@ -563,8 +563,8 @@ private fun NetworkScopeDropdown(
     onSelect: (NetworkScope) -> Unit,
 ) {
     val options = listOf(
-        Triple(NetworkScope.WIFI_ONLY, "Wi-Fi only (default)", TAG_SCOPE_WIFI_ONLY),
-        Triple(NetworkScope.ANY_CONNECTION, "Any connection (Wi-Fi + cellular)", TAG_SCOPE_ANY_CONNECTION),
+        Triple(NetworkScope.WIFI_ONLY, "Wi-Fi only", TAG_SCOPE_WIFI_ONLY),
+        Triple(NetworkScope.ANY_CONNECTION, "Any connection (Wi-Fi + cellular) (default)", TAG_SCOPE_ANY_CONNECTION),
         Triple(NetworkScope.CELLULAR_ONLY, "Cellular only", TAG_SCOPE_CELLULAR_ONLY),
         Triple(NetworkScope.SSID_WHITELIST, "Specific Wi-Fi networks (SSID whitelist)", TAG_SCOPE_SSID_WHITELIST),
     )
