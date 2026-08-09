@@ -1,5 +1,6 @@
 package com.uplinkstatus.app.ui
 
+import android.os.SystemClock
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
@@ -8,12 +9,18 @@ import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.material3.Card
+import androidx.compose.material3.CardDefaults
+import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableLongStateOf
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.geometry.Offset
@@ -23,10 +30,12 @@ import androidx.compose.ui.graphics.StrokeCap
 import androidx.compose.ui.graphics.StrokeJoin
 import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.platform.testTag
+import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.unit.dp
 import com.uplinkstatus.app.state.UplinkProbeHistory
 import com.uplinkstatus.core.history.ProbeHistory
 import com.uplinkstatus.core.history.SparklinePoint
+import kotlinx.coroutines.delay
 import kotlin.math.roundToInt
 
 const val TAG_HISTORY_GRAPHS = "settings_history_graphs"
@@ -78,6 +87,9 @@ fun HistoryGraphs(modifier: Modifier = Modifier) {
         modifier = modifier.fillMaxWidth().testTag(TAG_HISTORY_GRAPHS),
         verticalArrangement = Arrangement.spacedBy(8.dp),
     ) {
+        // TEMPORARY diagnostic-only panel -- see UplinkProbeHistory's top-of-file note and
+        // debug/probe-history-clear-diagnostics. Remove before merging.
+        DiagnosticsPanel()
         HistoryGraphCard(
             title = "Ping success",
             value = history.successPercent?.let { "${it.roundToInt()}%" } ?: NO_VALUE,
@@ -111,6 +123,63 @@ fun HistoryGraphs(modifier: Modifier = Modifier) {
                 modifier = Modifier.testTag(TAG_HISTORY_RESET_BUTTON),
             ) {
                 Text("Reset history")
+            }
+        }
+    }
+}
+
+/**
+ * TEMPORARY diagnostic-only panel for the "graph clears on reconnect" investigation -- not
+ * meant to ship, see debug/probe-history-clear-diagnostics and [UplinkProbeHistory]'s
+ * top-of-file note. Puts the same evidence `adb logcat -s UplinkProbeHistory` would show
+ * directly on screen, since adb isn't always reachable mid-test:
+ *
+ * - "Session started Xs ago," ticking live once a second. If this ever jumps back down
+ *   instead of counting up smoothly, the app process restarted -- the only way
+ *   [UplinkProbeHistory]'s in-memory data can vanish other than an explicit reset() call
+ *   (which this diagnostic build has neutered, see [UplinkProbeHistory.reset]).
+ * - The last several diagnostic log lines, newest at the top, so whatever happened right
+ *   before/during a "reset" is visible without having to scroll.
+ */
+@Composable
+private fun DiagnosticsPanel(modifier: Modifier = Modifier) {
+    val log by UplinkProbeHistory.diagnosticLog.collectAsState()
+    var nowMs by remember { mutableLongStateOf(SystemClock.elapsedRealtime()) }
+    LaunchedEffect(Unit) {
+        while (true) {
+            nowMs = SystemClock.elapsedRealtime()
+            delay(1_000)
+        }
+    }
+    val ageSeconds = (nowMs - UplinkProbeHistory.diagnosticSessionStartMs) / 1000
+
+    Card(
+        modifier = modifier.fillMaxWidth(),
+        colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.errorContainer),
+    ) {
+        Column(
+            modifier = Modifier.padding(12.dp),
+            verticalArrangement = Arrangement.spacedBy(4.dp),
+        ) {
+            Text(
+                text = "DIAGNOSTICS (temporary build, remove before merging)",
+                style = MaterialTheme.typography.titleSmall,
+                color = MaterialTheme.colorScheme.onErrorContainer,
+            )
+            Text(
+                text = "Session started ${ageSeconds}s ago -- watch this: a jump back to " +
+                    "~0s means the app process restarted.",
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onErrorContainer,
+            )
+            HorizontalDivider()
+            log.asReversed().forEach { line ->
+                Text(
+                    text = line,
+                    style = MaterialTheme.typography.bodySmall,
+                    fontFamily = FontFamily.Monospace,
+                    color = MaterialTheme.colorScheme.onErrorContainer,
+                )
             }
         }
     }

@@ -9,11 +9,15 @@ import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.update
 
 // TEMPORARY diagnostic instrumentation for the "graph clears on reconnect" investigation --
-// not meant to ship. See debug/probe-history-clear-diagnostics. `adb logcat -s
-// UplinkProbeHistory` while reproducing:
-//   - "singleton created" should appear exactly once per app launch. A second occurrence
-//     during a single test session proves the process (and this object) restarted, which is
-//     the only way this class's data can vanish other than an explicit reset() call.
+// not meant to ship. See debug/probe-history-clear-diagnostics. Surfaced two ways: `adb
+// logcat -s UplinkProbeHistory` if available, and (since adb isn't always at hand mid-test) a
+// small on-screen panel on the settings screen itself, fed by [UplinkProbeHistory.diagnosticLog]
+// -- see [DiagnosticsPanel] in the ui package.
+//   - "singleton created" / the on-screen session age resetting to ~0 -- should happen exactly
+//     once per app launch. A second occurrence (or the on-screen age visibly jumping back to
+//     "0s ago" instead of counting up smoothly) during one test session proves the process (and
+//     this object) restarted, which is the only way this class's data can vanish other than an
+//     explicit reset() call.
 //   - "reset() called" would prove the button (or something calling the same function) fired
 //     -- reset() itself is neutered below (state.update removed) so even if this does fire,
 //     it cannot actually be the cause of a clear seen alongside this log line.
@@ -22,6 +26,10 @@ import kotlinx.coroutines.flow.update
 //     real prune-to-near-empty (e.g. a genuine outage longer than the window) is
 //     distinguishable from anything else.
 private const val DIAG_TAG = "UplinkProbeHistory"
+
+/** Cap on [UplinkProbeHistory.diagnosticLog]'s retained entries -- just enough to see the
+ * relevant sequence around one repro without scrolling forever. */
+private const val DIAG_LOG_MAX_ENTRIES = 30
 
 /**
  * The rolling record of what the app's **real** probes actually did, published so the settings
@@ -60,9 +68,19 @@ private const val DIAG_TAG = "UplinkProbeHistory"
 object UplinkProbeHistory {
     private val state = MutableStateFlow(ProbeHistory())
 
+    /** DIAGNOSTIC ONLY (see top-of-file note). When this singleton was constructed -- read by
+     * the on-screen diagnostics panel to show "session started Xs ago," live. If that number
+     * ever jumps back down instead of counting up smoothly, the process restarted. */
+    val diagnosticSessionStartMs: Long = SystemClock.elapsedRealtime()
+
+    private val diagLogState = MutableStateFlow<List<String>>(emptyList())
+
+    /** DIAGNOSTIC ONLY (see top-of-file note). The on-screen panel's feed -- newest last. */
+    val diagnosticLog: StateFlow<List<String>> = diagLogState.asStateFlow()
+
     init {
         // See this file's top-of-file diagnostic note.
-        Log.w(DIAG_TAG, "singleton created (identity=${System.identityHashCode(this)})")
+        diagLog("singleton created (identity=${System.identityHashCode(this)})", Log.WARN)
     }
 
     val history: StateFlow<ProbeHistory> = state.asStateFlow()
@@ -103,7 +121,7 @@ object UplinkProbeHistory {
      * conclusively *not* this function that did it. Restore the `state.update { it.cleared() }`
      * body before merging. */
     fun reset() {
-        Log.e(DIAG_TAG, "reset() called -- NEUTERED for diagnostics, state NOT actually cleared")
+        diagLog("reset() called -- NEUTERED for diagnostics, state NOT actually cleared", Log.ERROR)
     }
 
     /** Process-wide singleton; tests must reset it between runs. Production code never calls
@@ -123,15 +141,23 @@ object UplinkProbeHistory {
         state.update { before ->
             val after = transform(before)
             if (after.attemptCount < before.attemptCount) {
-                Log.e(
-                    DIAG_TAG,
+                diagLog(
                     "SHRANK on $label: attemptCount ${before.attemptCount} -> ${after.attemptCount}, " +
                         "markers ${before.markers.size} -> ${after.markers.size}, windowMs=${after.windowMs}",
+                    Log.ERROR,
                 )
             } else {
-                Log.d(DIAG_TAG, "$label: attemptCount=${after.attemptCount} markers=${after.markers.size}")
+                diagLog("$label: attemptCount=${after.attemptCount} markers=${after.markers.size}", Log.DEBUG)
             }
             after
         }
+    }
+
+    /** DIAGNOSTIC ONLY (see top-of-file note). Writes to both logcat (if reachable) and
+     * [diagnosticLog] (always reachable, straight from the settings screen). */
+    private fun diagLog(message: String, priority: Int) {
+        Log.println(priority, DIAG_TAG, message)
+        val ageSeconds = (SystemClock.elapsedRealtime() - diagnosticSessionStartMs) / 1000
+        diagLogState.update { (it + "+${ageSeconds}s: $message").takeLast(DIAG_LOG_MAX_ENTRIES) }
     }
 }
