@@ -315,10 +315,23 @@ Sample retention is additionally capped in absolute count, not just by
 time — the window is a duration, and free-wheeling pacing (a 0ms step
 delay) produces probes as fast as the network answers, which a
 time-bounded-only buffer would let grow with nothing but wall-clock time
-to stop it. The cap sits well above what any pacing at the widest window
-reaches in normal use; when it does bite, the oldest samples go first
-and the caption reports the shorter span actually covered, so the effect
-is a shorter graph rather than a mislabeled one.
+to stop it. The cap is sized for the fastest *realistic* production
+rate, not steady-state pacing: a failed probe retries immediately with
+no back-off at all, and a DNS-resolution failure specifically — the
+exact condition seen for a moment while reconnecting after a total
+outage, before the resolver is reachable again — can return in low
+single-digit milliseconds. A burst of those right at a reconnect can
+produce thousands of samples in a couple of real seconds; against a cap
+sized only for steady state, that burst alone could evict an entire
+prior window's worth of good data in moments, which reads exactly like
+the history being cleared even though nothing ever reset it (confirmed
+on-device as the cause of an early "the graph resets on reconnect"
+report). The cap has headroom well beyond what the widest window at any
+pacing reaches in ordinary use, so a burst like that doesn't touch older
+data; when it does still bite (a burst sustained far longer than a
+reconnect blip), the oldest samples go first and the caption reports
+the shorter span actually covered, so the effect is a shorter graph
+rather than a mislabeled one.
 
 ### Recording continues through `DISABLED`
 The visible tracer pauses while `DISABLED` (network out of scope) — per

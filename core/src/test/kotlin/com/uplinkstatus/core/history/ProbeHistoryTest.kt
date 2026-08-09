@@ -175,6 +175,31 @@ class ProbeHistoryTest {
         )
     }
 
+    /**
+     * Regression test for the on-device "the graph resets itself right when reconnecting"
+     * report. A failed probe retries immediately with no back-off at all, per spec, and a
+     * DNS-resolution failure specifically -- the exact condition seen for a moment while
+     * reconnecting after a total outage, before the resolver is reachable again -- can return
+     * in low single-digit milliseconds. A burst of those can rack up thousands of samples in a
+     * couple of real seconds; against a cap sized only for steady-state pacing, that burst
+     * alone could evict an entire prior window's worth of good data, which reads exactly like
+     * the history being cleared even though nothing ever called [ProbeHistory.cleared].
+     * [MAX_SAMPLES] must have enough headroom that a burst like this doesn't touch older data.
+     */
+    @Test
+    fun `a rapid failure burst right after reconnecting does not evict prior good data`() {
+        var history = ProbeHistory(windowMs = 30 * 60_000L) // the widest configurable window
+        repeat(600) { index -> history = history.recordSuccess(index * 1_000L, latencyMs = 20) }
+
+        // A burst of near-instantaneous failures, 1ms apart -- large enough to have exceeded
+        // the old 4096 cap on its own, let alone combined with the 600 samples before it.
+        repeat(5_000) { index -> history = history.recordFailure(600_000L + index) }
+
+        assertEquals(5_600, history.attemptCount)
+        // The very first sample recorded, from well before the burst, is still there.
+        assertEquals(0L, history.samples.first().timestampMs)
+    }
+
     @Test
     fun `span is what the retained samples actually cover, never more than the window`() {
         assertEquals(0L, ProbeHistory(windowMs = window).spanMs)
