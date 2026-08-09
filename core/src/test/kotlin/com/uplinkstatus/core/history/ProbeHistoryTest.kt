@@ -227,8 +227,10 @@ class ProbeHistoryTest {
     }
 
     @Test
-    fun `latency points are positioned by when they happened, across the retained span`() {
-        val history = ProbeHistory(windowMs = window)
+    fun `latency points are positioned by when they happened, scaled to a fully-packed window`() {
+        // windowMs set to exactly the samples' own span: the window is entirely full, so this
+        // is the case where the window-anchored axis and "spans the retained data" coincide.
+        val history = ProbeHistory(windowMs = 10_000)
             .recordSuccess(0, latencyMs = 10)
             .recordSuccess(2_500, latencyMs = 20)
             .recordSuccess(10_000, latencyMs = 30)
@@ -280,9 +282,9 @@ class ProbeHistoryTest {
 
     @Test
     fun `the success line plots a rate per time bucket, not a zero-or-one square wave`() {
-        // 8 attempts over 8 seconds, 6 of them successful, split evenly across two buckets:
-        // bucket 1 has 3/4, bucket 2 has 3/4.
-        var history = ProbeHistory(windowMs = window)
+        // 8 attempts over a fully-packed 7-second window, 6 of them successful, split evenly
+        // across two buckets: bucket 1 has 3/4, bucket 2 has 3/4.
+        var history = ProbeHistory(windowMs = 7_000)
         listOf(true, true, true, false, true, true, true, false).forEachIndexed { index, ok ->
             val at = index * 1_000L
             history = if (ok) history.recordSuccess(at, latencyMs = 10) else history.recordFailure(at)
@@ -297,7 +299,7 @@ class ProbeHistoryTest {
 
     @Test
     fun `success buckets use an absolute zero-to-one scale, not an autoscaled one`() {
-        var history = ProbeHistory(windowMs = window)
+        var history = ProbeHistory(windowMs = 7_000)
         repeat(8) { index -> history = history.recordSuccess(index * 1_000L, latencyMs = 10) }
 
         // All-success buckets sit at the top of the scale, and would still sit at the top if
@@ -322,8 +324,10 @@ class ProbeHistoryTest {
     @Test
     fun `a time bucket with no attempts in it is a gap, same rule as the latency line`() {
         // A long silence in the middle (nothing probed between t=1s and t=59s) must read as
-        // "no data here," not as an interpolated rate nobody measured.
-        var history = ProbeHistory(windowMs = 120_000)
+        // "no data here," not as an interpolated rate nobody measured. windowMs set to exactly
+        // the data's own span (a fully-packed window) so the two clusters land cleanly in
+        // separate buckets.
+        var history = ProbeHistory(windowMs = 60_750)
         repeat(4) { index -> history = history.recordSuccess(index * 250L, latencyMs = 10) }
         repeat(4) { index -> history = history.recordFailure(60_000L + index * 250L) }
 
@@ -334,7 +338,7 @@ class ProbeHistoryTest {
         assertEquals(0f, points.last().y!!, 0.001f)
 
         // With more buckets than the two clusters can fill, the middle really is empty.
-        var sparse = ProbeHistory(windowMs = 120_000)
+        var sparse = ProbeHistory(windowMs = 61_900)
         repeat(20) { index -> sparse = sparse.recordSuccess(index * 100L, latencyMs = 10) }
         repeat(20) { index -> sparse = sparse.recordFailure(60_000L + index * 100L) }
         val sparsePoints = sparse.successSparkline(maxBuckets = 10)
@@ -342,14 +346,47 @@ class ProbeHistoryTest {
     }
 
     @Test
-    fun `success buckets span the full axis from oldest to newest`() {
-        var history = ProbeHistory(windowMs = window)
+    fun `success buckets span the full axis from oldest to newest once the window is genuinely full`() {
+        var history = ProbeHistory(windowMs = 39_000)
         repeat(40) { index -> history = history.recordSuccess(index * 1_000L, latencyMs = 10) }
 
         val points = history.successSparkline(maxBuckets = 5)
 
         assertEquals(0f, points.first().x, 0.001f)
         assertEquals(1f, points.last().x, 0.001f)
+    }
+
+    // --- Window-anchored axis: recent data clusters at the right, not stretched to fill -----
+
+    @Test
+    fun `a short session's latency points cluster near the right edge instead of stretching to fill the width`() {
+        val history = ProbeHistory(windowMs = 60_000)
+            .recordSuccess(0, latencyMs = 10)
+            .recordSuccess(1_000, latencyMs = 20)
+
+        val points = history.latencySparkline()
+
+        // Only 1 of the configured 60 seconds has actually elapsed -- the points sit close
+        // together near x = 1, with real empty space to their left, rather than being
+        // stretched across the whole width the way scaling to the retained span used to draw
+        // them (which looked identical to a graph that had just been reset, every time it was
+        // sparse -- see this class's own "time axis" doc).
+        assertTrue(points[0].x > 0.9f)
+        assertEquals(1f, points[1].x, 0.001f)
+    }
+
+    @Test
+    fun `a short session's success buckets leave everything earlier than the real data as gaps`() {
+        var history = ProbeHistory(windowMs = 60_000)
+        repeat(8) { index -> history = history.recordSuccess(index * 100L, latencyMs = 10) }
+
+        val points = history.successSparkline(maxBuckets = 6)
+
+        // 700ms of real data inside a 60-second window: bucketed toward the right/newest edge,
+        // with every earlier bucket left as a gap rather than the data being spread out to
+        // cover buckets that represent time nothing has actually reached yet.
+        assertTrue(points.dropLast(1).all { it.y == null })
+        assertNotNull(points.last().y)
     }
 
     // --- Markers: master-toggle transitions -----------------------------------------------
@@ -397,8 +434,10 @@ class ProbeHistoryTest {
     }
 
     @Test
-    fun `marker fractions are positioned across the same axis the sparklines use`() {
-        val history = ProbeHistory(windowMs = window)
+    fun `marker fractions are positioned across the same window-anchored axis the sparklines use`() {
+        // windowMs set to exactly the samples' own span (a fully-packed window), so this is
+        // the case where the window-anchored axis and "spans the retained data" coincide.
+        val history = ProbeHistory(windowMs = 10_000)
             .recordSuccess(0, latencyMs = 10)
             .recordMarker(2_500)
             .recordSuccess(10_000, latencyMs = 20)
@@ -407,29 +446,40 @@ class ProbeHistoryTest {
     }
 
     @Test
-    fun `a marker outside the retained samples' own span contributes no fraction`() {
-        // The samples span 0..1000; a marker from before the app was even installed (or from
-        // after every retained sample -- e.g. the app was switched off and nothing has probed
-        // since) has no meaningful position on that axis.
-        val before = ProbeHistory(windowMs = window)
-            .recordMarker(0)
-            .recordSuccess(500, latencyMs = 10)
-            .recordSuccess(1_000, latencyMs = 20)
-        assertTrue(before.markerFractions().isEmpty())
-
-        val after = ProbeHistory(windowMs = window)
-            .recordSuccess(0, latencyMs = 10)
-            .recordSuccess(500, latencyMs = 20)
-            .recordMarker(1_000)
-        assertTrue(after.markerFractions().isEmpty())
+    fun `no samples at all means no axis to place a marker on`() {
+        assertTrue(ProbeHistory(windowMs = window).recordMarker(0).markerFractions().isEmpty())
     }
 
     @Test
-    fun `fewer than two samples means no axis to place a marker on`() {
-        assertTrue(ProbeHistory(windowMs = window).recordMarker(0).markerFractions().isEmpty())
-        assertTrue(
-            ProbeHistory(windowMs = window).recordSuccess(0, 10).recordMarker(0).markerFractions().isEmpty(),
+    fun `a single sample is enough to place a marker on the window-anchored axis`() {
+        val history = ProbeHistory(windowMs = window).recordSuccess(0, latencyMs = 10).recordMarker(0)
+
+        assertEquals(listOf(1f), history.markerFractions())
+    }
+
+    @Test
+    fun `a marker positioned outside the window is defensively excluded from the fractions`() {
+        // In normal use, pruning already keeps every retained marker inside the window by the
+        // time this is called, so this constructs the state directly (bypassing recordMarker)
+        // to exercise the guard on its own -- the only realistic way it would otherwise trigger
+        // is a caller violating the "records arrive in order" contract.
+        val history = ProbeHistory(
+            windowMs = 1_000,
+            samples = listOf(ProbeSample(timestampMs = 0, latencyMs = 10)),
+            markers = listOf(-2_000L),
         )
+
+        assertTrue(history.markerFractions().isEmpty())
+    }
+
+    @Test
+    fun `a marker from early in a short session sits close to the right edge, not spread across the width`() {
+        val history = ProbeHistory(windowMs = 60_000)
+            .recordSuccess(0, latencyMs = 10)
+            .recordMarker(500)
+            .recordSuccess(1_000, latencyMs = 20)
+
+        assertTrue(history.markerFractions().single() > 0.9f)
     }
 
     // --- Guard rails ----------------------------------------------------------------------
