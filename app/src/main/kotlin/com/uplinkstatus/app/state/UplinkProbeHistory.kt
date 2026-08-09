@@ -1,11 +1,27 @@
 package com.uplinkstatus.app.state
 
 import android.os.SystemClock
+import android.util.Log
 import com.uplinkstatus.core.history.ProbeHistory
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.update
+
+// TEMPORARY diagnostic instrumentation for the "graph clears on reconnect" investigation --
+// not meant to ship. See debug/probe-history-clear-diagnostics. `adb logcat -s
+// UplinkProbeHistory` while reproducing:
+//   - "singleton created" should appear exactly once per app launch. A second occurrence
+//     during a single test session proves the process (and this object) restarted, which is
+//     the only way this class's data can vanish other than an explicit reset() call.
+//   - "reset() called" would prove the button (or something calling the same function) fired
+//     -- reset() itself is neutered below (state.update removed) so even if this does fire,
+//     it cannot actually be the cause of a clear seen alongside this log line.
+//   - "SHRANK" on a record*() call means the legitimate windowMs-based pruning dropped
+//     samples on that call -- logs the before/after counts and the gap in timestamps so a
+//     real prune-to-near-empty (e.g. a genuine outage longer than the window) is
+//     distinguishable from anything else.
+private const val DIAG_TAG = "UplinkProbeHistory"
 
 /**
  * The rolling record of what the app's **real** probes actually did, published so the settings
@@ -44,6 +60,11 @@ import kotlinx.coroutines.flow.update
 object UplinkProbeHistory {
     private val state = MutableStateFlow(ProbeHistory())
 
+    init {
+        // See this file's top-of-file diagnostic note.
+        Log.w(DIAG_TAG, "singleton created (identity=${System.identityHashCode(this)})")
+    }
+
     val history: StateFlow<ProbeHistory> = state.asStateFlow()
 
     /** A real probe answered in [latencyMs]. */
@@ -51,12 +72,12 @@ object UplinkProbeHistory {
         // update(), not a plain `value =` read-modify-write: samples arrive on the probe
         // worker thread while the settings screen can call reset()/setWindowMs() from the main
         // thread, and a lost update there would silently drop a real measurement.
-        state.update { it.recordSuccess(timestampMs, latencyMs) }
+        diagUpdate("recordSuccess") { it.recordSuccess(timestampMs, latencyMs) }
     }
 
     /** A real probe attempt failed. */
     fun recordFailure(timestampMs: Long = nowMs()) {
-        state.update { it.recordFailure(timestampMs) }
+        diagUpdate("recordFailure") { it.recordFailure(timestampMs) }
     }
 
     /** The master toggle flipped (off, or back on) — recorded so the history graphs can draw a
@@ -65,19 +86,24 @@ object UplinkProbeHistory {
      * [com.uplinkstatus.app.service.UplinkStatusService], the one place that already observes
      * the persisted master-toggle preference changing. */
     fun recordMasterToggleTransition(timestampMs: Long = nowMs()) {
-        state.update { it.recordMarker(timestampMs) }
+        diagUpdate("recordMasterToggleTransition") { it.recordMarker(timestampMs) }
     }
 
     /** Applies the user's history-window preference, pruning anything it has already outlived
      * so a shortened window takes effect immediately rather than at the next probe. */
     fun setWindowMs(windowMs: Long) {
-        state.update { if (it.windowMs == windowMs) it else it.withWindowMs(windowMs) }
+        diagUpdate("setWindowMs($windowMs)") { if (it.windowMs == windowMs) it else it.withWindowMs(windowMs) }
     }
 
     /** The user's explicit "reset history" action: drops every accumulated sample at once,
-     * keeping the configured window, without needing the service restarted. */
+     * keeping the configured window, without needing the service restarted.
+     *
+     * TEMPORARILY NEUTERED for the diagnostic build (see top-of-file note): logs loudly instead
+     * of actually calling `state.update`, so if a clear is observed alongside this build, it is
+     * conclusively *not* this function that did it. Restore the `state.update { it.cleared() }`
+     * body before merging. */
     fun reset() {
-        state.update { it.cleared() }
+        Log.e(DIAG_TAG, "reset() called -- NEUTERED for diagnostics, state NOT actually cleared")
     }
 
     /** Process-wide singleton; tests must reset it between runs. Production code never calls
@@ -87,4 +113,25 @@ object UplinkProbeHistory {
     }
 
     private fun nowMs(): Long = SystemClock.elapsedRealtime()
+
+    /** Same as a plain `state.update { transform(it) }`, plus diagnostic logging: every call
+     * (so the full sequence of what happened is visible in logcat, not just the anomalies), and
+     * a loud warning specifically when the retained sample count *drops* -- the signature of a
+     * legitimate windowMs-based prune wiping out old data, as opposed to anything else. See
+     * top-of-file note. */
+    private inline fun diagUpdate(label: String, transform: (ProbeHistory) -> ProbeHistory) {
+        state.update { before ->
+            val after = transform(before)
+            if (after.attemptCount < before.attemptCount) {
+                Log.e(
+                    DIAG_TAG,
+                    "SHRANK on $label: attemptCount ${before.attemptCount} -> ${after.attemptCount}, " +
+                        "markers ${before.markers.size} -> ${after.markers.size}, windowMs=${after.windowMs}",
+                )
+            } else {
+                Log.d(DIAG_TAG, "$label: attemptCount=${after.attemptCount} markers=${after.markers.size}")
+            }
+            after
+        }
+    }
 }
