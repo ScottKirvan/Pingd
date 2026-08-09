@@ -55,8 +55,8 @@ class DataStoreUplinkPreferencesRepository(
             networkScope = prefs[NETWORK_SCOPE]?.let { stored ->
                 // A value written by a future app version that this build doesn't know
                 // about falls back to the documented default rather than crashing.
-                runCatching { NetworkScope.valueOf(stored) }.getOrDefault(NetworkScope.WIFI_ONLY)
-            } ?: NetworkScope.WIFI_ONLY,
+                runCatching { NetworkScope.valueOf(stored) }.getOrDefault(NetworkScope.ANY_CONNECTION)
+            } ?: NetworkScope.ANY_CONNECTION,
             ssidWhitelist = prefs[SSID_WHITELIST] ?: emptySet(),
             pingTargetHost = prefs[PING_TARGET_HOST]?.takeIf { it.isNotBlank() }
                 ?: ProbeTarget.DEFAULT_HOST,

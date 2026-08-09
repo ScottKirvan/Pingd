@@ -16,7 +16,7 @@ import com.uplinkstatus.core.tracer.ProbeCycleRunner
 data class UplinkPreferences(
     val masterToggleEnabled: Boolean = true,
     val hideWhenDisabled: Boolean = false,
-    val networkScope: NetworkScope = NetworkScope.WIFI_ONLY,
+    val networkScope: NetworkScope = NetworkScope.ANY_CONNECTION,
     val ssidWhitelist: Set<String> = emptySet(),
     val pingTargetHost: String = ProbeTarget.DEFAULT_HOST,
     /** The pacing wait between every step of the ping/ping/fake cycle -- see
