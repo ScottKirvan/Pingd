@@ -306,6 +306,113 @@ class ProbeHistoryTest {
         assertTrue(points.all { it.y == null })
     }
 
+    // --- Gap shading spans (sparklineGapFractions) ----------------------------------------
+
+    @Test
+    fun `a history with no failures has no gap spans to shade`() {
+        val history = ProbeHistory(windowMs = window)
+            .recordSuccess(0, latencyMs = 10)
+            .recordSuccess(1_000, latencyMs = 20)
+
+        assertTrue(sparklineGapFractions(history.latencySparkline()).isEmpty())
+    }
+
+    @Test
+    fun `a single interior failure shades the span between its two flanking successes`() {
+        val history = ProbeHistory(windowMs = 2_000L)
+            .recordSuccess(0, latencyMs = 10)
+            .recordFailure(1_000)
+            .recordSuccess(2_000, latencyMs = 20)
+
+        val spans = sparklineGapFractions(history.latencySparkline())
+
+        assertEquals(1, spans.size)
+        assertEquals(0f, spans[0].start, 0.001f)
+        assertEquals(1f, spans[0].endInclusive, 0.001f)
+    }
+
+    @Test
+    fun `a run of several consecutive failures shades as one span, not one per failure`() {
+        val history = ProbeHistory(windowMs = 4_000L)
+            .recordSuccess(0, latencyMs = 10)
+            .recordFailure(1_000)
+            .recordFailure(2_000)
+            .recordFailure(3_000)
+            .recordSuccess(4_000, latencyMs = 20)
+
+        val spans = sparklineGapFractions(history.latencySparkline())
+
+        assertEquals(1, spans.size)
+        assertEquals(0f, spans[0].start, 0.001f)
+        assertEquals(1f, spans[0].endInclusive, 0.001f)
+    }
+
+    @Test
+    fun `two separate failure runs shade as two separate spans`() {
+        val history = ProbeHistory(windowMs = 5_000L)
+            .recordSuccess(0, latencyMs = 10)
+            .recordFailure(1_000)
+            .recordSuccess(2_000, latencyMs = 20)
+            .recordFailure(3_000)
+            .recordSuccess(5_000, latencyMs = 30)
+
+        val spans = sparklineGapFractions(history.latencySparkline())
+
+        assertEquals(2, spans.size)
+    }
+
+    @Test
+    fun `a failure run at the very start of the window is not shaded -- indistinguishable from warm-up`() {
+        val history = ProbeHistory(windowMs = window)
+            .recordFailure(0)
+            .recordFailure(500)
+            .recordSuccess(1_000, latencyMs = 10)
+
+        assertTrue(sparklineGapFractions(history.latencySparkline()).isEmpty())
+    }
+
+    @Test
+    fun `a failure run still in progress at the newest point shades through to the right edge`() {
+        val history = ProbeHistory(windowMs = 2_000L)
+            .recordSuccess(0, latencyMs = 10)
+            .recordFailure(1_000)
+            .recordFailure(2_000)
+
+        val spans = sparklineGapFractions(history.latencySparkline())
+
+        assertEquals(1, spans.size)
+        assertEquals(0f, spans[0].start, 0.001f)
+        // The trailing failure is the newest retained point, always the axis's right edge.
+        assertEquals(1f, spans[0].endInclusive, 0.001f)
+    }
+
+    @Test
+    fun `an all-failure history has no gap spans -- no boundary anywhere to shade from`() {
+        var history = ProbeHistory(windowMs = window)
+        repeat(5) { index -> history = history.recordFailure(index * 1_000L) }
+
+        assertTrue(sparklineGapFractions(history.latencySparkline()).isEmpty())
+    }
+
+    @Test
+    fun `an empty points list has no gap spans`() {
+        assertTrue(sparklineGapFractions(emptyList()).isEmpty())
+    }
+
+    @Test
+    fun `gap shading also applies to the bucketed success sparkline, not just the per-sample latency one`() {
+        // A history sparse enough, relative to its window, that some buckets between real
+        // attempts get none at all -- the same "no data" gap the latency line has, just
+        // bucketed instead of per-sample.
+        val history = ProbeHistory(windowMs = 100_000L)
+            .recordSuccess(0, latencyMs = 10)
+            .recordSuccess(100_000, latencyMs = 20)
+
+        val spans = sparklineGapFractions(history.successSparkline(maxBuckets = 10))
+
+        assertTrue(spans.isNotEmpty())
+    }
+
     // --- Success sparkline: bucketing -----------------------------------------------------
 
     @Test
