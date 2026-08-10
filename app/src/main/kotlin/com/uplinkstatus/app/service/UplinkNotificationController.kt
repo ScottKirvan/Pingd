@@ -15,6 +15,8 @@ import com.uplinkstatus.app.R
 import com.uplinkstatus.app.prefs.NetworkScope
 import com.uplinkstatus.app.state.UplinkActivityStatus
 import com.uplinkstatus.app.state.UplinkIconDisplay
+import com.uplinkstatus.app.state.UplinkProbeHistory
+import com.uplinkstatus.core.tracer.AckSource
 import com.uplinkstatus.core.tracer.BarPosition
 import com.uplinkstatus.core.tracer.CycleEvent
 import com.uplinkstatus.core.tracer.CycleListener
@@ -40,8 +42,8 @@ import com.uplinkstatus.core.tracer.FreezeReason
  *
  * This still has to respect "Only call notify() on an ack (tracer advance) or a state
  * transition — not on every internal timer tick": [com.uplinkstatus.core.tracer.ProbeCycleRunner]
- * emits one `Frozen` event per failed probe attempt, including back-to-back immediate
- * retries with no back-off during a sustained outage, so posting on every single one of
+ * emits one `Frozen` event per failed probe attempt, including every retry (paced by a
+ * fixed floor delay, not zero) during a sustained outage, so posting on every single one of
  * those would be exactly the "bare timer tick" spam the spec rules out. [lastNotifiedState]
  * tracks what was last actually posted (connected, or frozen-for-a-given-reason) so a
  * repeat `Frozen` with the *same* [FreezeReason] as what's already showing is suppressed —
@@ -62,6 +64,11 @@ import com.uplinkstatus.core.tracer.FreezeReason
  * connectivity and a mirror of "what icon is showing" are different obligations, and
  * [buildNotification] runs for the starting placeholder too, which has nothing to claim but
  * still has an icon.
+ *
+ * It reports to a third singleton, [UplinkProbeHistory], on a narrower rule again: only real
+ * probe attempts, which means every [CycleEvent.Frozen] and only those [CycleEvent.Advanced]s
+ * whose source is [AckSource.PROBE_SUCCESS]. The automatic ack contributes nothing there even
+ * though it updates both the notification and the status line — see [onEvent].
  *
  * Open (and [onEvent] separately marked `open`) purely so [UplinkStatusServiceTest] can
  * inject a thin recording subclass that observes every [CycleEvent] this class receives
@@ -93,7 +100,7 @@ open class UplinkNotificationController(
     /** Counts every real call through to [notificationManager]`.notify()` (i.e. past the
      * permission check). Production code never reads this; it exists so tests can prove the
      * de-duplication in [onEvent] actually suppresses repeated system calls during a
-     * back-to-back no-back-off retry storm, not just that the visible end state happens to
+     * sustained outage's repeated retries, not just that the visible end state happens to
      * look right. */
     @Volatile
     internal var notifyCallCount: Int = 0
@@ -129,6 +136,15 @@ open class UplinkNotificationController(
     open override fun onEvent(event: CycleEvent) {
         when (event) {
             is CycleEvent.Advanced -> {
+                // A sample for the history graphs, but only for a *real* probe. The automatic
+                // ack is a timer firing between probes, not a network measurement: recording
+                // it would add an attempt that never happened to the success percentage, and
+                // it carries no latency of its own to contribute anyway. Deliberately keyed on
+                // the ack's source rather than on "did a latency come with it" -- those happen
+                // to coincide today, but only one of them is the actual question being asked.
+                if (event.source == AckSource.PROBE_SUCCESS) {
+                    event.latencyMs?.let { UplinkProbeHistory.recordSuccess(it) }
+                }
                 event.latencyMs?.let { lastLatencyMs = it }
                 lastNotifiedState = NotifiedState.Connected
                 // A real ack: the target answered (or the automatic ack that follows one
@@ -140,6 +156,13 @@ open class UplinkNotificationController(
             }
 
             is CycleEvent.Frozen -> {
+                // Recorded *before* the de-duplication below, and outside it, on purpose: that
+                // guard exists to keep the notification from being re-posted with nothing new
+                // to say, which is a statement about the status bar, not about the network.
+                // Every Frozen is one real probe that really failed -- including every retry
+                // of a sustained outage, which are precisely the attempts a success
+                // percentage has to count if it is to mean anything.
+                UplinkProbeHistory.recordFailure()
                 val state = NotifiedState.Frozen(event.reason)
                 if (lastNotifiedState != state) {
                     // Either the first freeze after a successful ack, or the reason itself

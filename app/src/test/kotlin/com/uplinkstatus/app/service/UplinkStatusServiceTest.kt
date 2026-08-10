@@ -7,6 +7,7 @@ import com.uplinkstatus.app.prefs.FakeUplinkPreferencesRepository
 import com.uplinkstatus.app.prefs.NetworkScope
 import com.uplinkstatus.app.state.UplinkActivityStatus
 import com.uplinkstatus.app.state.UplinkIconDisplay
+import com.uplinkstatus.app.state.UplinkProbeHistory
 import com.uplinkstatus.app.state.UplinkRuntimeStatus
 import com.uplinkstatus.core.probe.ProbeResult
 import com.uplinkstatus.core.probe.ProbeTarget
@@ -15,6 +16,7 @@ import com.uplinkstatus.core.tracer.AckSource
 import com.uplinkstatus.core.tracer.BarPosition
 import com.uplinkstatus.core.tracer.CycleEvent
 import com.uplinkstatus.core.tracer.FreezeReason
+import com.uplinkstatus.core.tracer.ProbeCycleRunner
 import com.uplinkstatus.core.visibility.UplinkVisibility
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -88,6 +90,9 @@ class UplinkStatusServiceTest {
         // Same reasoning -- a previous test's last mirrored icon must not leak into this
         // one's assertions on it.
         UplinkIconDisplay.resetForTest()
+        // Same reasoning again -- and this one carries a window as well as samples, so a
+        // previous test's history-window assertion must not be what makes this one's pass.
+        UplinkProbeHistory.resetForTest()
 
         controller = Robolectric.buildService(UplinkStatusService::class.java)
         service = controller.create().get()
@@ -167,7 +172,7 @@ class UplinkStatusServiceTest {
     }
 
     @Test
-    fun `DISABLED stops the cycle and shows the sixth (all-dim) icon, not a running tracer`() {
+    fun `DISABLED stops the visible tracer and shows the sixth (all-dim) icon, not a running tracer`() {
         service.applyVisibility(UplinkVisibility.ENABLED)
         val callsWhileEnabled = fakeProber.callCount
 
@@ -175,9 +180,83 @@ class UplinkStatusServiceTest {
 
         val foregroundNotification = checkNotNull(shadowService().lastForegroundNotification)
         assertEquals(R.drawable.ic_scan_disabled, foregroundNotification.smallIcon.resId)
-        // No further probes after DISABLED stops the cycle -- confirms it's actually
-        // stopped, not just visually paused while still running underneath.
-        assertEquals(callsWhileEnabled, fakeProber.callCount)
+        // Exactly one more probe happened -- the new background history loop's own first
+        // attempt (see the class below) -- not the visible cycle continuing to advance the
+        // bar/notification. The icon stays the fixed dim frame regardless.
+        assertEquals(callsWhileEnabled + 1, fakeProber.callCount)
+        assertEquals(R.drawable.ic_scan_disabled, UplinkIconDisplay.iconRes.value)
+    }
+
+    /**
+     * Regression test for the reported bug: on a real device, going out of network scope (e.g.
+     * airplane mode under a "cellular only" scope) froze the history graphs instead of letting
+     * them keep recording the outage -- exactly the kind of event a connectivity history exists
+     * to show. `DISABLED` now keeps a throttled, independent probe loop running specifically to
+     * feed [UplinkProbeHistory] while the visible tracer is paused.
+     */
+    @Test
+    fun `DISABLED keeps recording real probe attempts into the history graphs`() {
+        service.applyVisibility(UplinkVisibility.ENABLED)
+        val attemptsWhileEnabled = UplinkProbeHistory.history.value.attemptCount
+
+        service.applyVisibility(UplinkVisibility.DISABLED)
+
+        assertEquals(attemptsWhileEnabled + 1, UplinkProbeHistory.history.value.attemptCount)
+
+        fakeScheduler.scheduled.toList().forEach { it() }
+
+        assertEquals(attemptsWhileEnabled + 2, UplinkProbeHistory.history.value.attemptCount)
+    }
+
+    @Test
+    fun `the background history loop paces every attempt at least 250ms apart, regardless of a lower step delay`() = runTest {
+        fakePreferencesRepository.setStepDelayMs(0L)
+        controller.startCommand(0, 1)
+        fakeNetworkScopeStatus.inScope = false // ENABLED -> DISABLED
+
+        fakeScheduler.delays.clear()
+        fakeScheduler.scheduled.toList().forEach { it() }
+
+        assertEquals(listOf(250L), fakeScheduler.delays)
+    }
+
+    @Test
+    fun `the background history loop uses the configured step delay when it is above the floor`() = runTest {
+        fakePreferencesRepository.setStepDelayMs(600L)
+        controller.startCommand(0, 1)
+        fakeNetworkScopeStatus.inScope = false // ENABLED -> DISABLED
+
+        fakeScheduler.delays.clear()
+        fakeScheduler.scheduled.toList().forEach { it() }
+
+        assertEquals(listOf(600L), fakeScheduler.delays)
+    }
+
+    @Test
+    fun `going back to ENABLED stops the background history loop so probing is not doubled up`() {
+        service.applyVisibility(UplinkVisibility.DISABLED)
+        val attemptsWhileDisabled = UplinkProbeHistory.history.value.attemptCount
+
+        service.applyVisibility(UplinkVisibility.ENABLED)
+        val attemptsJustAfterEnabled = UplinkProbeHistory.history.value.attemptCount
+
+        // Firing every callback the background loop might still have pending must not add a
+        // second attempt on top of what the now-live visible cycle already produced.
+        fakeScheduler.scheduled.toList().forEach { it() }
+
+        assertEquals(attemptsJustAfterEnabled + 1, UplinkProbeHistory.history.value.attemptCount)
+        assertTrue(attemptsWhileDisabled < attemptsJustAfterEnabled)
+    }
+
+    @Test
+    fun `HIDDEN stops the background history loop too -- master toggle off means the entire service stops`() {
+        service.applyVisibility(UplinkVisibility.DISABLED)
+        val attemptsWhileDisabled = UplinkProbeHistory.history.value.attemptCount
+
+        service.applyVisibility(UplinkVisibility.HIDDEN)
+        fakeScheduler.scheduled.toList().forEach { it() }
+
+        assertEquals(attemptsWhileDisabled, UplinkProbeHistory.history.value.attemptCount)
     }
 
     @Test
@@ -249,6 +328,70 @@ class UplinkStatusServiceTest {
         assertEquals(137L, service.stepDelayMs)
     }
 
+    /**
+     * Regression test: `applyVisibility(ENABLED)` deliberately no-ops when the cycle is
+     * already running -- re-confirming ENABLED must not reset bar position or session state
+     * over an unrelated preference edit. But that no-op used to mean a *running* cycle never
+     * saw a step-delay change at all: the service's own [UplinkStatusService.stepDelayMs]
+     * field updated, but the already-constructed [com.uplinkstatus.core.tracer.ProbeCycleRunner]
+     * captured the old value at construction and never re-read it. The user-visible symptom
+     * was "changing the pacing slider does nothing" for as long as the tracer kept running.
+     */
+    @Test
+    fun `changing the step delay while already running reaches the live cycle, not just the service field`() = runTest {
+        controller.startCommand(0, 1)
+        assertEquals(1, fakeProber.callCount)
+        // One step (500ms, the default) is already pending at this point, scheduled *before*
+        // the change below -- updating stepDelayMs can't rewrite a callback already handed to
+        // the scheduler. What matters is the *next* one, scheduled once this one fires.
+
+        fakePreferencesRepository.setStepDelayMs(137L)
+        assertEquals(137L, service.stepDelayMs) // the field updates -- this was never the bug
+
+        fakeScheduler.delays.clear()
+        fakeScheduler.scheduled.toList().forEach { it() } // let the already-pending step fire
+
+        // The bug: did the running cycle's *next* scheduled step actually use the new value?
+        assertEquals(listOf(137L), fakeScheduler.delays)
+    }
+
+    /** Same bug, same fix, the other setting it affects: a ping-target-host change made while
+     * the tracer is already running must reach the live cycle's next probe, not only the
+     * service's own field. */
+    @Test
+    fun `changing the ping target host while already running reaches the live cycle, not just the service field`() = runTest {
+        controller.startCommand(0, 1)
+        assertEquals(1, fakeProber.callCount)
+
+        fakePreferencesRepository.setPingTargetHost("custom.example.invalid")
+        fakeScheduler.scheduled.toList().forEach { it() } // let the next step fire
+
+        assertTrue(fakeProber.targetsProbed.any { it.host == "custom.example.invalid" })
+    }
+
+    @Test
+    fun `onStartCommand applies the persisted history window to the sample history`() = runTest {
+        fakePreferencesRepository.setHistoryWindowMs(2 * 60_000L)
+        fakeNetworkScopeStatus.inScope = true
+
+        controller.startCommand(0, 1)
+
+        assertEquals(2 * 60_000L, UplinkProbeHistory.history.value.windowMs)
+    }
+
+    /** The window is a live setting, not a start-up one: the collector that already re-derives
+     * visibility on every preferences emission has to carry this too, or a window narrowed
+     * while the service runs would keep retaining samples under the old one until something
+     * else happened to restart it. */
+    @Test
+    fun `a history window change while the service is running is applied without restarting it`() = runTest {
+        controller.startCommand(0, 1)
+
+        fakePreferencesRepository.setHistoryWindowMs(60_000L)
+
+        assertEquals(60_000L, UplinkProbeHistory.history.value.windowMs)
+    }
+
     @Test
     fun `a preference change while the service is already running is applied without restarting it`() = runTest {
         controller.startCommand(0, 1)
@@ -289,7 +432,10 @@ class UplinkStatusServiceTest {
 
         val foregroundNotification = checkNotNull(shadowService().lastForegroundNotification)
         assertEquals(R.drawable.ic_scan_disabled, foregroundNotification.smallIcon.resId)
-        assertEquals(callsWhileInScope, fakeProber.callCount)
+        // The visible tracer really did stop -- exactly one more probe happened (the
+        // background history loop's own first attempt while DISABLED), not the visible
+        // cycle continuing to advance the icon.
+        assertEquals(callsWhileInScope + 1, fakeProber.callCount)
     }
 
     @Test
@@ -297,13 +443,53 @@ class UplinkStatusServiceTest {
         fakePreferencesRepository.setHideWhenDisabled(false)
         fakeNetworkScopeStatus.inScope = false
         controller.startCommand(0, 1)
-        assertEquals(0, fakeProber.callCount)
+        // The background history loop's own first probe attempt while DISABLED -- not the
+        // visible tracer, which never starts while out of scope.
+        assertEquals(1, fakeProber.callCount)
 
         fakeNetworkScopeStatus.inScope = true
 
-        assertEquals(1, fakeProber.callCount)
+        assertEquals(2, fakeProber.callCount)
         val foregroundNotification = checkNotNull(shadowService().lastForegroundNotification)
         assertEquals(R.drawable.ic_scan_1, foregroundNotification.smallIcon.resId)
+    }
+
+    // --- History graph markers: master-toggle transitions -----------------------------------
+
+    @Test
+    fun `turning the master toggle off records a marker in the history graphs`() = runTest {
+        controller.startCommand(0, 1)
+        assertTrue(UplinkProbeHistory.history.value.markers.isEmpty())
+
+        fakePreferencesRepository.setMasterToggleEnabled(false)
+
+        assertEquals(1, UplinkProbeHistory.history.value.markers.size)
+    }
+
+    @Test
+    fun `a fresh start with the master toggle already on does not itself count as a transition`() = runTest {
+        controller.startCommand(0, 1)
+
+        assertTrue(UplinkProbeHistory.history.value.markers.isEmpty())
+    }
+
+    @Test
+    fun `an unrelated preference change while enabled does not add a spurious marker`() = runTest {
+        controller.startCommand(0, 1)
+
+        fakePreferencesRepository.setStepDelayMs(137L)
+
+        assertTrue(UplinkProbeHistory.history.value.markers.isEmpty())
+    }
+
+    @Test
+    fun `turning the master toggle off does not clear the samples already recorded`() = runTest {
+        controller.startCommand(0, 1)
+        val attemptsBeforeToggleOff = UplinkProbeHistory.history.value.attemptCount
+
+        fakePreferencesRepository.setMasterToggleEnabled(false)
+
+        assertEquals(attemptsBeforeToggleOff, UplinkProbeHistory.history.value.attemptCount)
     }
 
     // --- Issue #22: a fresh start must not spend "nothing reported yet" as a real verdict ---
@@ -528,8 +714,8 @@ class UplinkStatusServiceTest {
         assertEquals(UplinkActivityStatus.Activity.Hidden, UplinkActivityStatus.activity.value)
     }
 
-    // --- Stage 5: DNS-vs-generic-failure and no-back-off, end to end through the real ------
-    // --- running service (not just ProbeCycleRunnerTest's or                             ---
+    // --- Stage 5: DNS-vs-generic-failure and failure-retry pacing, end to end through the --
+    // --- real running service (not just ProbeCycleRunnerTest's or                        ---
     // --- UplinkNotificationControllerTest's standalone unit level) -------------------------
 
     @Test
@@ -544,10 +730,16 @@ class UplinkStatusServiceTest {
         service.prober = fakeProber
 
         service.applyVisibility(UplinkVisibility.ENABLED)
+        // FakeScheduler.scheduled is append-only -- it never removes an already-fired entry,
+        // so firing the *whole* list on each round would re-run every stale callback too.
+        // Firing only the newest one is safe here because ProbeCycleRunner only ever has one
+        // pendingTask outstanding at a time.
+        fakeScheduler.scheduled.last()() // retry floor -> second probe (DNS failure)
+        fakeScheduler.scheduled.last()() // retry floor -> third probe (success)
 
-        // Three probe attempts happened synchronously, back to back, with no wait in
-        // between -- exactly what "immediate retry, no adaptive back-off" requires even
-        // when driven by the real service (not a standalone ProbeCycleRunner in isolation).
+        // Three probe attempts happened, each failure retry paced by the fixed floor delay --
+        // exactly what a real service-driven ProbeCycleRunner does, not just a standalone one
+        // in isolation.
         assertEquals(3, fakeProber.callCount)
         assertEquals(
             listOf(
@@ -577,6 +769,9 @@ class UplinkStatusServiceTest {
         service.prober = fakeProber
 
         service.applyVisibility(UplinkVisibility.ENABLED)
+        // See the previous test's comment: fire only the newest pending callback each round,
+        // since FakeScheduler.scheduled never drops an already-fired entry on its own.
+        repeat(4) { fakeScheduler.scheduled.last()() } // four retry floors
 
         assertEquals(5, fakeProber.callCount)
         // Four Frozen events with the *same* reason, then one Advanced -- but only the
@@ -606,12 +801,15 @@ class UplinkStatusServiceTest {
      * the next is dispatched). Without that, the failure is structurally unreachable — a
      * synchronous `runOnWorker` cannot express two pieces of work contending for one thread.
      *
-     * The prober here models a continuous outage the way production actually behaves: each
-     * probe blocks (as a real TCP connect does) and then fails, so `runProbeAttempts()`
-     * loops straight back around with no gap and never yields the worker thread. If
-     * `stopCycle()` posts `runner.stop()` onto that same queue, it sits behind a loop that
-     * will not return until the network recovers, and the cycle keeps probing and keeps
-     * posting notifications after the service has torn itself down.
+     * The prober here models a single in-flight probe the way production actually behaves:
+     * it blocks (as a real TCP connect does) until the test releases it. That single
+     * blocking call is the one case `ProbeCycleRunner.stop()` still can't handle by simply
+     * cancelling a scheduled task (a failure retry is otherwise paced through the scheduler,
+     * not looped inline -- see `ProbeCycleRunner.FAILURE_RETRY_DELAY_MS`'s doc). If
+     * `stopCycle()` posted `runner.stop()` onto the same single-threaded worker queue instead
+     * of calling it directly, it would sit behind whatever's still running on that queue --
+     * here, the blocked probe -- and the cycle would keep probing and posting notifications
+     * after the service has torn itself down.
      */
     @Test
     fun `HIDDEN during a continuous outage stops the cycle instead of queueing stop behind it`() {
@@ -634,15 +832,17 @@ class UplinkStatusServiceTest {
             assertTrue("the cycle never reached its first probe", probeEntered.await(5, TimeUnit.SECONDS))
 
             // The service leaves ENABLED while the outage is still in progress -- the probe
-            // is in flight and the worker thread is inside the retry loop right now.
+            // is in flight and the worker thread is blocked inside it right now.
             service.applyVisibility(UplinkVisibility.HIDDEN)
             releaseProbe.release() // the in-flight probe returns Failure
 
-            // With the cycle genuinely stopped, the retry loop returns and the worker thread
-            // becomes available again, so this marker task runs. If stop() had been queued
-            // behind the loop instead, the loop would have gone straight into probe #2 (for
-            // which no permit is released, standing in for an outage that simply continues)
-            // and this would time out -- which is precisely the starvation being fixed.
+            // With the cycle genuinely stopped, the blocked call returns and the worker
+            // thread becomes available again, so this marker task runs. If stop() had been
+            // queued behind it instead of called directly, the worker thread would still be
+            // busy (a real retry would have been scheduled and, in a real outage, gone
+            // straight into probe #2 -- for which no permit is released here, standing in
+            // for an outage that simply continues) and this would time out -- which is
+            // precisely the starvation being fixed.
             worker.submit { }.get(5, TimeUnit.SECONDS)
 
             assertEquals(1, probeCount.get())
@@ -654,7 +854,7 @@ class UplinkStatusServiceTest {
     }
 
     @Test
-    fun `a real running cycle schedules no delay at all for failed attempts -- only the post-success automatic ack`() {
+    fun `a real running cycle paces failed attempts with the fixed retry floor, not the configured step delay`() {
         fakeProber = FakeProber(
             ProbeResult.Failure,
             ProbeResult.DnsResolutionFailure,
@@ -664,12 +864,28 @@ class UplinkStatusServiceTest {
         service.prober = fakeProber
 
         service.applyVisibility(UplinkVisibility.ENABLED)
+        assertEquals(1, fakeProber.callCount)
+        assertEquals(listOf(ProbeCycleRunner.FAILURE_RETRY_DELAY_MS), fakeScheduler.delays)
 
+        // FakeScheduler.scheduled is append-only, so fire only the newest pending callback
+        // each round -- see the earlier tests in this class for the same reasoning.
+        repeat(2) { fakeScheduler.scheduled.last()() }
+        assertEquals(3, fakeProber.callCount)
+
+        fakeScheduler.scheduled.last()() // third retry floor -> the eventual success
         assertEquals(4, fakeProber.callCount)
-        // The only thing ever scheduled is the 500ms automatic ack that follows the
-        // eventual success -- nothing was scheduled for any of the three failed attempts,
-        // confirming "no adaptive back-off" holds with a real ProbeCycleRunner instance
-        // owned and started by the real, running UplinkStatusService.
-        assertEquals(1, fakeScheduler.scheduled.size)
+        // All three failed attempts were paced by the fixed retry floor, not the configured
+        // step delay -- only the final entry, after the eventual success, is the step delay,
+        // confirming this holds with a real ProbeCycleRunner instance owned and started by
+        // the real, running UplinkStatusService.
+        assertEquals(
+            listOf(
+                ProbeCycleRunner.FAILURE_RETRY_DELAY_MS,
+                ProbeCycleRunner.FAILURE_RETRY_DELAY_MS,
+                ProbeCycleRunner.FAILURE_RETRY_DELAY_MS,
+                500L,
+            ),
+            fakeScheduler.delays,
+        )
     }
 }

@@ -15,7 +15,10 @@ a separate animation timer.
   cellular only, or whitelist specific SSIDs — see [User
   Preferences](#user-preferences).
 - Discrete icon-frame swaps only — no smooth/animated rendering.
-- No adaptive back-off on ping retry.
+- No *adaptive* back-off on ping retry — retries are floored at a small
+  fixed delay for battery reasons (see [Core
+  Mechanism](#core-mechanism--probe-driven-tracer)), but that floor
+  never grows with a longer outage.
 
 ## Implementation Baseline
 Locked decisions — not open questions:
@@ -136,14 +139,24 @@ vs. the automatic step.
 
 **On probe timeout/failure:** no ack fires. The tracer freezes on its
 current bar — it does not advance and does not show a distinct "lost"
-frame. The loop retries immediately with a new probe (same 1000ms
-timeout, no back-off, and no step delay before the retry — the step
-delay paces *completed* steps, not failure retries) until one succeeds,
-at which point acks resume and the tracer continues from wherever it
-froze. A failure does not consume a slot in the ping/ping/fake
-sequence — the sequence only advances on a real ack, so an outage
-mid-sequence resumes at the same point once connectivity returns,
-rather than restarting the pattern.
+frame. A retry is scheduled after a fixed **250ms floor delay** (same
+1000ms timeout on the retry itself) — not the step delay above, and not
+zero either, despite "no back-off": a failure that takes close to the
+full 1000ms timeout to arrive (an ordinary "target isn't answering"
+outage) barely notices a 250ms floor, but a DNS-resolution failure can
+return in low single-digit milliseconds — exactly the condition seen
+for a moment while reconnecting after a total outage, before the
+resolver is reachable again. Without a floor, a burst of those spins
+the retry loop as fast as the CPU allows for as long as the burst
+lasts, a real, measured on-device battery cost. The floor is fixed, not
+growing with a longer outage — still not "adaptive" back-off, which
+remains out of scope (see [Explicitly Out of
+Scope](#explicitly-out-of-scope-v1)). Retries continue, floored this
+way, until one succeeds, at which point acks resume and the tracer
+continues from wherever it froze. A failure does not consume a slot in
+the ping/ping/fake sequence — the sequence only advances on a real ack,
+so an outage mid-sequence resumes at the same point once connectivity
+returns, rather than restarting the pattern.
 
 ## Bar Position Persistence
 Position persists only for the lifetime of the running process. An app
@@ -267,14 +280,125 @@ latency trend with data that was never actually measured.
   tracer's own freeze-in-place behavior already follows for a single
   failed probe.
 
+Both sparklines' time axis is anchored to the *configured window*, not
+stretched to fill from whatever span of samples happens to be retained
+so far. The newest retained sample always sits at the right edge; a
+handful of recent samples early in a session (or just after a reset, or
+just after a long gap prunes old data) sit clustered near that edge with
+real empty space to their left, and the line only spans the full width
+once the window is genuinely full — the same behavior a strip chart or
+oscilloscope trace has. Scaling to the retained span instead (an earlier
+version of this behavior) stretched however little data existed to fill
+the whole card every time, which looked exactly like the graph had just
+reset even when nothing was actually cleared.
+
 The window length is one setting shared by both graphs (and by the
 success-percentage calculation) — not two independently configurable
-windows for two views into the same underlying sample history. It is
+windows for two views into the same underlying sample history. Settings
+screen: a slider, 1–30 minutes in whole-minute stops, default 7. It is
 also user-resettable: an explicit action clears the accumulated sample
-history immediately, independent of restarting the service. Absent an
-explicit reset, the sample history is session-only, matching bar
-position's own per-process lifetime — a fresh service start begins with
-no samples, not samples carried over from a previous run.
+history immediately, independent of restarting the service. That action
+sits with the graphs rather than with the preferences, and is *not*
+gated on the master toggle the way the preference controls are —
+clearing what is displayed has to work exactly when the user wants a
+clean slate, including while the icon is switched off.
+
+Absent an explicit reset, the sample history is session-only, matching
+bar position's own per-process lifetime — a fresh service start begins
+with no samples, not samples carried over from a previous run. Process
+lifetime, specifically, not cycle lifetime: the history deliberately
+survives the probe cycle stopping and restarting (a network dropping out
+of scope and coming back), since the failures around exactly that
+transition are what a connectivity history is for.
+
+**Each card states a windowed number, and its caption names the span
+that number actually covers.** The ping-success card's number is
+inherently windowed; the latency card's is therefore the window's
+*average* round-trip time rather than the latest single reading, so that
+one caption honestly describes both. (The instantaneous latency already
+has a home — the [status line](#in-app-status-line).) The caption itself
+names the configured window only once the retained samples genuinely
+span it; until then it names the shorter span that really exists, since
+a card reading "last 7 minutes" thirty seconds into a session would be
+describing six and a half minutes of data that does not exist. Before
+the first probe the numbers are blank rather than zero: "nothing
+measured yet" and "every probe failed" are different states and only one
+of them is bad news.
+
+Sample retention is additionally capped in absolute count, not just by
+time — the window is a duration, and free-wheeling pacing (a 0ms step
+delay) produces probes as fast as the network answers, which a
+time-bounded-only buffer would let grow with nothing but wall-clock time
+to stop it. The cap is sized generously rather than tightly to steady-state
+pacing, because a reconnect can still burst faster than ordinary use: a
+failed probe retries after only a fixed 250ms floor (see [Core
+Mechanism](#core-mechanism--probe-driven-tracer) — added after this cap
+was first sized, specifically to reduce this burst's rate and battery
+cost), and a DNS-resolution failure specifically — the exact condition
+seen for a moment while reconnecting after a total outage, before the
+resolver is reachable again — can still return in low single-digit
+milliseconds, faster than the floor itself governs the *steady* case. A
+burst of those right at a reconnect can still produce far more samples
+per second than ordinary pacing; against a cap sized only for steady
+state, that burst alone could evict an entire prior window's worth of
+good data in moments, which reads exactly like the history being
+cleared even though nothing ever reset it (confirmed on-device as the
+cause of an early "the graph resets on reconnect" report, before the
+250ms floor existed). The cap has headroom well beyond what the widest
+window at any pacing reaches in ordinary use, so a burst like that
+doesn't touch older data; when it does still bite (a burst sustained
+far longer than a reconnect blip), the oldest samples go first and the
+caption reports the shorter span actually covered, so the effect is a
+shorter graph
+rather than a mislabeled one.
+
+### Recording continues through `DISABLED`
+The visible tracer pauses while `DISABLED` (network out of scope) — per
+the [state logic](#enabled--disabled--hidden--state-logic) above, there
+is nothing for it to show. The history graphs do **not** pause with it:
+an out-of-scope period (a WiFi-only phone losing WiFi, a cellular-only
+phone losing signal or going into airplane mode) is exactly the kind of
+outage a connectivity history exists to show, so going blind for its
+duration would defeat the graphs' own purpose. A second, independent
+probe loop keeps recording real samples into the same history for as
+long as the master toggle stays on, entirely separate from the visible
+tracer's own ack/bar-position machinery — it drives no icon, posts no
+notification update, and the status line stays on "paused, out of
+scope" throughout.
+
+That loop paces every attempt — success or failure alike — at least
+250ms apart, regardless of the configured step-delay preference (which
+can go as low as 0, "free wheeling," for the visible tracer). Without a
+floor independent of that setting, total connectivity loss (no network
+interface to even attempt a route over, as opposed to an ordinary
+"target isn't answering" outage) fails a connect attempt almost
+instantly, and an unthrottled retry loop against that would spin as fast
+as the CPU allows for as long as the outage lasts — directly working
+against this app's own battery-conscious design. If the step delay is
+configured above 250ms, that larger value is used instead, so the
+history-only loop is never *more* aggressive than the tracer the user
+already configured.
+
+Master toggle **off** is different: it stops the entire service,
+history recording included, exactly as before this section was added —
+there is nothing left running to keep the loop above fed once the whole
+feature is switched off. Only `DISABLED` (out of scope, master toggle
+still on) gets the keep-recording treatment.
+
+### Master-toggle markers
+Turning the master toggle off draws a vertical marker in both graphs at
+the point it happened, distinct from the data itself — a marker is not a
+probe attempt and never affects the success percentage, the latency
+average, or either sparkline's plotted points. This is deliberately
+*not* a gap the way a failed probe is: the whole app was off, so there
+is no honest way to say anything happened at all, and the marker exists
+so that silence reads as "the app was switched off here," not as an
+unexplained flatline indistinguishable from a real outage a moment
+before. Only the *off* transition is marked, not the resumption — the
+graphs already read as continuing to move once real samples start
+arriving again, so a second marker there would add nothing. Markers are
+pruned by the same window as samples, and are cleared by the graphs'
+own reset action right along with them.
 
 ## User Preferences
 - **Enable/disable toggle** — master on/off for the whole feature,
@@ -319,7 +443,7 @@ no samples, not samples carried over from a previous run.
   Mechanism](#core-mechanism--probe-driven-tracer) above.
 - **History window** — how far back the two [history
   graphs](#in-app-history-graphs) look, and the window the ping-success
-  percentage is computed over; default 7 minutes.
+  percentage is computed over; 1–30 minute slider, default 7 minutes.
 
 ## Technical Notes
 - Foreground service (`FOREGROUND_SERVICE` permission). Type:
@@ -334,14 +458,15 @@ no samples, not samples carried over from a previous run.
   justification string in the manifest and in the Play Console
   data-safety form, but it's the correct classification here.
 - `Handler`/`postDelayed` loop on a dedicated background `HandlerThread`
-  — the probe itself is a blocking call, up to 1000ms, retried
-  immediately with no back-off on failure per this doc, and the cycle
-  runner invokes it synchronously from inside the scheduler's own
-  callback; binding that to the main-thread looper would block the UI
-  thread for every probe attempt and risk an ANR during a sustained
-  outage's back-to-back retries. No wake lock — it's acceptable for
-  Doze to throttle timers while the screen is off, since the icon only
-  matters when the user can see it.
+  — the probe itself is a blocking call, up to 1000ms, and a failure's
+  retry is scheduled through the same `Handler` after the 250ms floor
+  delay (see Core Mechanism) rather than looping inline, so the worker
+  thread is never pinned in a tight loop for the duration of an outage;
+  binding any of this to the main-thread looper would still block the
+  UI thread for the duration of a single blocking probe attempt and
+  risk an ANR, hence the dedicated thread. No wake lock — it's
+  acceptable for Doze to throttle timers while the screen is off, since
+  the icon only matters when the user can see it.
 - Notification: `setOngoing(true)`. Channel importance is
   `IMPORTANCE_DEFAULT`, not `IMPORTANCE_LOW` — on-device testing showed
   `IMPORTANCE_LOW` notifications don't get a status-bar tray icon at
@@ -387,8 +512,9 @@ no samples, not samples carried over from a previous run.
   change; a refresh replaces the whole picture rather than patching part
   of it, and a platform that refuses the query leaves what is already
   known untouched.
-- Each probe uses a fixed 1000ms timeout. On failure, retry immediately
-  with the same timeout — no adaptive back-off.
+- Each probe uses a fixed 1000ms timeout. On failure, retry with the
+  same timeout after a fixed 250ms floor delay — not zero, not
+  adaptive/growing (see Core Mechanism for why the floor exists).
 - Only call `notify()` on an ack (tracer advance) or a state transition
   (enabled/disabled/hidden) — not on every internal timer tick.
 

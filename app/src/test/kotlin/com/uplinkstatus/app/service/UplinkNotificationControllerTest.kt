@@ -8,6 +8,7 @@ import com.uplinkstatus.app.R
 import com.uplinkstatus.app.prefs.NetworkScope
 import com.uplinkstatus.app.state.UplinkActivityStatus
 import com.uplinkstatus.app.state.UplinkIconDisplay
+import com.uplinkstatus.app.state.UplinkProbeHistory
 import com.uplinkstatus.core.tracer.AckSource
 import com.uplinkstatus.core.tracer.BarPosition
 import com.uplinkstatus.core.tracer.CycleEvent
@@ -53,6 +54,10 @@ class UplinkNotificationControllerTest {
         // Same reasoning -- a previous test's last mirrored icon must not leak into this
         // one's "nothing reported yet" or "reported null" assertions.
         UplinkIconDisplay.resetForTest()
+        // Same again, and load-bearing for the history assertions below: a leftover sample
+        // from an earlier test would make "the automatic ack recorded nothing" pass or fail
+        // for reasons that have nothing to do with this test's own events.
+        UplinkProbeHistory.resetForTest()
     }
 
     private fun postedNotification(): Notification? =
@@ -149,9 +154,10 @@ class UplinkNotificationControllerTest {
     }
 
     @Test
-    fun `repeated frozen events with the same reason during immediate no-back-off retries post only once`() {
+    fun `repeated frozen events with the same reason during a sustained outage's retries post only once`() {
         // Per spec: "Only call notify() on an ack (tracer advance) or a state transition" --
-        // a sustained outage retries immediately with no back-off, so ProbeCycleRunner emits
+        // a sustained outage keeps retrying (each attempt paced by a small fixed floor delay,
+        // not zero -- see ProbeCycleRunner.FAILURE_RETRY_DELAY_MS), so ProbeCycleRunner emits
         // one Frozen per attempt. Repeats that don't change *why* it's frozen must not each
         // trigger a fresh notify() call -- that would be exactly the "bare timer tick" spam
         // the spec rules out, even though the visible end state (same icon/text) would look
@@ -403,5 +409,138 @@ class UplinkNotificationControllerTest {
         controller.onEvent(CycleEvent.Advanced(BarPosition.BAR_2, AckSource.PROBE_SUCCESS, latencyMs = 11))
 
         assertEquals(R.drawable.ic_scan_2, UplinkIconDisplay.iconRes.value)
+    }
+
+    // --- UplinkProbeHistory records real probe attempts, and only those ----------------------
+
+    /**
+     * The rule the history graphs live or die by, and the easiest one to get subtly wrong: the
+     * automatic ack is a timer firing between probes, not a probe. It updates the notification,
+     * the icon mirror and the status line exactly like a real ack does — three of this class's
+     * four side effects — which is precisely why the fourth one skipping it needs its own test
+     * rather than being assumed from the others.
+     */
+    @Test
+    fun `the automatic ack contributes no sample at all -- it is not a probe attempt`() {
+        controller.onEvent(CycleEvent.Advanced(BarPosition.BAR_2, AckSource.AUTOMATIC, latencyMs = null))
+        controller.onEvent(CycleEvent.Advanced(BarPosition.BAR_3, AckSource.AUTOMATIC, latencyMs = null))
+
+        // Not "0% success" and not "0ms latency" -- no attempt was made, so there is nothing
+        // to average and nothing to count.
+        assertEquals(0, UplinkProbeHistory.history.value.attemptCount)
+        assertNull(UplinkProbeHistory.history.value.successPercent)
+        assertNull(UplinkProbeHistory.history.value.averageLatencyMs)
+    }
+
+    /**
+     * The teeth behind the test above. Today's automatic ack carries no latency, so "record
+     * whatever latency arrived" happens to produce the right answer for the wrong reason --
+     * and the test above would keep passing if the source check were deleted outright.
+     *
+     * The question being asked is "was this a real probe attempt," not "did a number come
+     * with it," and this pins that: an ack that is not a probe contributes nothing even when
+     * a latency is attached to it. [com.uplinkstatus.core.tracer.ProbeCycleRunner] does not
+     * emit this event today; if it ever did (a cached or estimated figure on the automatic
+     * step, say), that figure would still not be a measurement this app made.
+     */
+    @Test
+    fun `an automatic ack is excluded by its source, not merely by having no latency`() {
+        controller.onEvent(CycleEvent.Advanced(BarPosition.BAR_2, AckSource.AUTOMATIC, latencyMs = 99))
+
+        assertEquals(0, UplinkProbeHistory.history.value.attemptCount)
+        assertNull(UplinkProbeHistory.history.value.averageLatencyMs)
+    }
+
+    /** The same rule from the other direction: an automatic ack must not dilute a real result
+     * that is already recorded. A full ping/ping/fake pass is two attempts, not three. */
+    @Test
+    fun `a full ping-ping-fake pass records two samples, not three`() {
+        controller.onEvent(CycleEvent.Advanced(BarPosition.BAR_1, AckSource.PROBE_SUCCESS, latencyMs = 10))
+        controller.onEvent(CycleEvent.Advanced(BarPosition.BAR_2, AckSource.PROBE_SUCCESS, latencyMs = 30))
+        controller.onEvent(CycleEvent.Advanced(BarPosition.BAR_3, AckSource.AUTOMATIC, latencyMs = null))
+
+        val history = UplinkProbeHistory.history.value
+        assertEquals(2, history.attemptCount)
+        assertEquals(100f, history.successPercent!!, 0.001f)
+        // 20ms, the mean of the two real measurements -- a third, latency-less "sample" would
+        // have had to be either dropped from this average (leaving a phantom attempt in the
+        // percentage) or counted as something nobody measured.
+        assertEquals(20L, history.averageLatencyMs)
+    }
+
+    @Test
+    fun `a probe-success ack records its measured latency as a successful sample`() {
+        controller.onEvent(CycleEvent.Advanced(BarPosition.BAR_2, AckSource.PROBE_SUCCESS, latencyMs = 42))
+
+        val history = UplinkProbeHistory.history.value
+        assertEquals(1, history.attemptCount)
+        assertEquals(1, history.successCount)
+        assertEquals(42L, history.latestLatencyMs)
+    }
+
+    @Test
+    fun `a freeze records a failed sample, dropping the success percentage`() {
+        controller.onEvent(CycleEvent.Advanced(BarPosition.BAR_1, AckSource.PROBE_SUCCESS, latencyMs = 10))
+        controller.onEvent(CycleEvent.Frozen(BarPosition.BAR_1, FreezeReason.PROBE_FAILURE))
+
+        val history = UplinkProbeHistory.history.value
+        assertEquals(2, history.attemptCount)
+        assertEquals(50f, history.successPercent!!, 0.001f)
+        // The failure contributes no latency of any kind, so the average is still the one real
+        // measurement rather than being dragged toward zero by a timeout.
+        assertEquals(10L, history.averageLatencyMs)
+    }
+
+    @Test
+    fun `a dns-resolution freeze is a failed probe attempt too`() {
+        controller.onEvent(CycleEvent.Frozen(BarPosition.BAR_1, FreezeReason.DNS_RESOLUTION_FAILURE))
+
+        assertEquals(1, UplinkProbeHistory.history.value.attemptCount)
+        assertEquals(0f, UplinkProbeHistory.history.value.successPercent!!, 0.001f)
+    }
+
+    /**
+     * The de-duplication that keeps repeated freezes from re-posting the notification is a
+     * statement about the status bar, not about the network. Each of those suppressed retries
+     * is still a real probe that really failed — a sustained outage that recorded one sample
+     * total would leave the success percentage reading far better than the connection actually
+     * was, which is the exact opposite of what this graph exists to show.
+     */
+    @Test
+    fun `every immediate-retry failure is recorded, even the ones whose notification is suppressed`() {
+        repeat(5) {
+            controller.onEvent(CycleEvent.Frozen(BarPosition.BAR_3, FreezeReason.PROBE_FAILURE))
+        }
+
+        assertEquals(5, UplinkProbeHistory.history.value.attemptCount)
+        // ...while the notification itself was posted exactly once, per the de-duplication.
+        assertEquals(1, controller.notifyCallCount)
+    }
+
+    @Test
+    fun `samples are recorded even when POST_NOTIFICATIONS has been revoked`() {
+        // Same reasoning as the icon mirror above: what the probes measured is not contingent
+        // on whether Android is currently willing to show a notification about it.
+        shadowOf(RuntimeEnvironment.getApplication()).denyPermissions(Manifest.permission.POST_NOTIFICATIONS)
+
+        controller.onEvent(CycleEvent.Advanced(BarPosition.BAR_2, AckSource.PROBE_SUCCESS, latencyMs = 11))
+        controller.onEvent(CycleEvent.Frozen(BarPosition.BAR_2, FreezeReason.PROBE_FAILURE))
+
+        assertEquals(2, UplinkProbeHistory.history.value.attemptCount)
+    }
+
+    /** Per spec the sample history is process-lifetime, not cycle-lifetime: leaving and
+     * re-entering ENABLED (a network dropping out of scope and coming back) is exactly the
+     * event whose surrounding failures a connectivity history is for, so `resetSession` --
+     * which does clear the remembered latency and the notification de-duplication state --
+     * must not take the samples with it. */
+    @Test
+    fun `resetSession does not discard accumulated samples`() {
+        controller.onEvent(CycleEvent.Advanced(BarPosition.BAR_1, AckSource.PROBE_SUCCESS, latencyMs = 10))
+        controller.onEvent(CycleEvent.Frozen(BarPosition.BAR_1, FreezeReason.PROBE_FAILURE))
+
+        controller.resetSession()
+
+        assertEquals(2, UplinkProbeHistory.history.value.attemptCount)
     }
 }

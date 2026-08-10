@@ -18,10 +18,13 @@ import com.uplinkstatus.app.prefs.uplinkPreferencesDataStore
 import com.uplinkstatus.app.state.ConnectivityNetworkScopeStatus
 import com.uplinkstatus.app.state.NetworkScopeStatus
 import com.uplinkstatus.app.state.UplinkActivityStatus
+import com.uplinkstatus.app.state.UplinkProbeHistory
 import com.uplinkstatus.app.state.UplinkRuntimeStatus
+import com.uplinkstatus.core.probe.ProbeResult
 import com.uplinkstatus.core.probe.ProbeTarget
 import com.uplinkstatus.core.probe.Prober
 import com.uplinkstatus.core.probe.TcpConnectProber
+import com.uplinkstatus.core.tracer.BackgroundHistoryProbeLoop
 import com.uplinkstatus.core.tracer.BarPosition
 import com.uplinkstatus.core.tracer.ProbeCycleRunner
 import com.uplinkstatus.core.tracer.TracerScheduler
@@ -51,7 +54,7 @@ import kotlinx.coroutines.launch
  * The probe cycle runs on a dedicated background [HandlerThread], not the main thread/main
  * looper — see [AndroidTracerScheduler]'s doc for why this deviates from the spec's literal
  * "main looper" wording (the probe is a blocking call, and running it on the main thread
- * risks ANRs, especially during a sustained outage's back-to-back immediate retries).
+ * risks an ANR for the duration of even a single attempt).
  *
  * Stage 3 replaced Stage 2's `VisibilityInputs` stand-in with a coroutine (started once from
  * [onStartCommand]) that `combine`s [preferencesRepository]'s real, persisted
@@ -95,7 +98,23 @@ class UplinkStatusService : Service() {
      * the one [startCycle] actually published, not a stale cached copy. */
     @Volatile
     private var cycleRunner: ProbeCycleRunner? = null
+
+    /** Keeps the history graphs recording through a `DISABLED` period (network out of scope) --
+     * see [BackgroundHistoryProbeLoop]'s own doc for why this is a separate, throttled loop
+     * rather than [cycleRunner] itself. Only ever running while `DISABLED`; [applyVisibility]
+     * stops it the moment either `ENABLED` (the visible tracer takes over) or `HIDDEN` (master
+     * toggle off -- the whole service stops) applies. `@Volatile` for the same reason
+     * [cycleRunner] is. */
+    @Volatile
+    private var backgroundHistoryLoop: BackgroundHistoryProbeLoop? = null
+
     private var observingPreferences = false
+
+    /** The master-toggle value the preferences collector last observed, so it can tell a real
+     * transition apart from any other emission -- `null` means "nothing observed yet," which a
+     * fresh start must not itself be treated as a transition from. Read/written only from that
+     * collector's own coroutine, never concurrently. */
+    private var lastObservedMasterToggleEnabled: Boolean? = null
 
     /** The most recently observed [com.uplinkstatus.app.prefs.UplinkPreferences.networkScope],
      * kept as a field (rather than threading it through [applyVisibility]'s signature) so the
@@ -225,7 +244,44 @@ class UplinkStatusService : Service() {
                 .collect { (preferences, networkInScope) ->
                     probeTarget = ProbeTarget(host = preferences.pingTargetHost)
                     stepDelayMs = preferences.stepDelayMs
+                    // applyVisibility's ENABLED branch deliberately no-ops while a cycle is
+                    // already running -- re-confirming ENABLED must not reset bar position or
+                    // session state over an unrelated preference edit (see its own doc). That
+                    // means a *new* ProbeCycleRunner picking up the two fields just above is
+                    // not enough on its own: an already-running one never gets reconstructed,
+                    // so it would otherwise keep the target/delay it was born with for as long
+                    // as it keeps running. Nudging it live (a no-op if cycleRunner is null --
+                    // nothing to push into yet, and startCycle() below will read the fresh
+                    // fields whenever it does run) is what makes changing either setting take
+                    // effect immediately instead of only at the next unrelated restart.
+                    cycleRunner?.updateTarget(probeTarget)
+                    cycleRunner?.updateStepDelayMs(stepDelayMs)
+                    // Same live-update reasoning, for the DISABLED-only history loop -- a no-op
+                    // while it isn't running (nothing to push into yet; startBackgroundHistoryLoopIfNeeded()
+                    // reads the fresh fields whenever it does start).
+                    backgroundHistoryLoop?.updateTarget(probeTarget)
+                    backgroundHistoryLoop?.updateRetryDelayMs(backgroundHistoryRetryDelayMs())
                     currentNetworkScope = preferences.networkScope
+                    // The history graphs' shared window. Applied here rather than from the
+                    // settings screen so the retention the samples are actually recorded under
+                    // follows the preference wherever it was changed from -- and because this
+                    // is already the one collector that turns persisted preferences into
+                    // running behavior. A window change made while this service is stopped
+                    // (HIDDEN) is picked up on its next start, which the settings screen's own
+                    // ensureServiceRunning() nudge triggers immediately anyway.
+                    UplinkProbeHistory.setWindowMs(preferences.historyWindowMs)
+                    // A vertical marker in the history graphs at the exact point the whole app
+                    // stopped measuring -- see UplinkProbeHistory.recordMasterToggleTransition's
+                    // doc. Only the off transition is marked: the on transition happens in a
+                    // *new* service instance (HIDDEN tears this one down via stopSelf()), which
+                    // starts with no memory of "was previously off" to detect a transition from
+                    // -- and the resumption is already visible in the data itself once real
+                    // samples start flowing again, so there is nothing a second marker would add.
+                    val previousMasterToggleEnabled = lastObservedMasterToggleEnabled
+                    lastObservedMasterToggleEnabled = preferences.masterToggleEnabled
+                    if (previousMasterToggleEnabled == true && !preferences.masterToggleEnabled) {
+                        UplinkProbeHistory.recordMasterToggleTransition()
+                    }
                     // decideOrNull, not decide: networkInScope is nullable ("not reported
                     // yet"), and a null answer means this emission is not grounds for any
                     // user-visible change at all. Skipping it leaves onStartCommand's
@@ -260,6 +316,11 @@ class UplinkStatusService : Service() {
     internal fun applyVisibility(visibility: UplinkVisibility) {
         when (visibility) {
             UplinkVisibility.ENABLED -> {
+                // The history-only loop below is DISABLED-only -- once the visible tracer takes
+                // over, it would just be probing the same target a second time. A no-op if it
+                // was never running (the common case: going straight from HIDDEN/a fresh start
+                // to ENABLED without ever passing through DISABLED).
+                stopBackgroundHistoryLoop()
                 if (cycleRunner?.isRunning != true) {
                     notificationController.resetSession()
                     // "Checking," not "connected." The cycle is about to start; no probe has
@@ -280,6 +341,14 @@ class UplinkStatusService : Service() {
 
             UplinkVisibility.DISABLED -> {
                 stopCycle()
+                // The visible tracer pauses here -- nothing to show while out of scope -- but
+                // per notes/dev/uplink-status-indicator-spec.md's "In-App History Graphs", an
+                // out-of-scope period is exactly the outage a connectivity history exists to
+                // show, so it must not go blind for its duration. A separate, throttled probe
+                // loop keeps recording real samples underneath the dim/paused notification; see
+                // BackgroundHistoryProbeLoop's own doc for why this is a distinct class rather
+                // than just leaving cycleRunner running.
+                startBackgroundHistoryLoopIfNeeded()
                 UplinkActivityStatus.report(UplinkActivityStatus.Activity.Paused(currentNetworkScope))
                 startForeground(
                     UplinkNotificationController.NOTIFICATION_ID,
@@ -296,6 +365,11 @@ class UplinkStatusService : Service() {
                 // preferences+connectivity collector reacts to either changing on its own,
                 // with no restart needed, which is what Stage 4 adds.
                 stopCycle()
+                // Master toggle off means the *entire service* stops, history recording
+                // included -- confirmed explicitly: this is not the same "keep it running
+                // quietly" treatment DISABLED gets above. There is nothing left to keep the
+                // history-only loop fed once this instance tears itself down.
+                stopBackgroundHistoryLoop()
                 stopForeground(STOP_FOREGROUND_REMOVE)
                 notificationController.hide()
                 UplinkActivityStatus.report(UplinkActivityStatus.Activity.Hidden)
@@ -309,10 +383,10 @@ class UplinkStatusService : Service() {
     private fun startCycle() {
         val runner = ProbeCycleRunner(
             prober = prober,
-            target = probeTarget,
+            initialTarget = probeTarget,
             scheduler = schedulerFactory(),
             listener = notificationController,
-            stepDelayMs = stepDelayMs,
+            initialStepDelayMs = stepDelayMs,
         )
         cycleRunner = runner
         runOnWorker(Runnable { runner.start() })
@@ -321,14 +395,14 @@ class UplinkStatusService : Service() {
     /**
      * Stops the cycle **on the calling thread**, deliberately *not* via [runOnWorker].
      *
-     * [ProbeCycleRunner.start] blocks its thread for as long as probes keep failing (that's
-     * what the spec's "retry immediately, no back-off" means with a blocking prober), and
-     * [runOnWorker] posts to a single [HandlerThread] whose [Handler] runs one posted
-     * `Runnable` to completion before dispatching the next. Posting `stop()` there during a
-     * sustained outage would queue it *behind* the very loop it has to interrupt: it could
-     * not run until a probe finally succeeded, so `running` never flipped, the stale cycle
-     * kept probing and kept calling its listener — resurrecting a notification the user had
-     * already turned off — and the worker thread outlived the service that owned it.
+     * A single probe attempt blocks [ProbeCycleRunner]'s thread for up to its own timeout
+     * (a failure retry is otherwise paced through its scheduler, not looped inline — see
+     * `ProbeCycleRunner.FAILURE_RETRY_DELAY_MS`'s doc), and [runOnWorker] posts to a single
+     * [HandlerThread] whose [Handler] runs one posted `Runnable` to completion before
+     * dispatching the next. Posting `stop()` there would queue it *behind* whatever probe
+     * attempt is currently in flight: for up to that attempt's own timeout, `running` would
+     * not have flipped yet, so the stale cycle could still call its listener once more —
+     * resurrecting a notification the user had already turned off, however briefly.
      *
      * [ProbeCycleRunner.stop] is explicitly documented as safe to call from any thread and
      * as never blocking on the thread running the cycle, precisely so this call site can
@@ -339,6 +413,50 @@ class UplinkStatusService : Service() {
         val runner = cycleRunner ?: return
         cycleRunner = null
         runner.stop()
+    }
+
+    /** Starts [backgroundHistoryLoop] if it isn't already running -- a no-op on a repeated
+     * `DISABLED` decision (e.g. an unrelated preference edit while still out of scope), same
+     * shape as [startCycle]'s own `cycleRunner?.isRunning != true` guard in the `ENABLED`
+     * branch. */
+    private fun startBackgroundHistoryLoopIfNeeded() {
+        if (backgroundHistoryLoop?.isRunning == true) return
+        val loop = BackgroundHistoryProbeLoop(
+            prober = prober,
+            initialTarget = probeTarget,
+            scheduler = schedulerFactory(),
+            onResult = ::recordHistorySample,
+            initialRetryDelayMs = backgroundHistoryRetryDelayMs(),
+        )
+        backgroundHistoryLoop = loop
+        runOnWorker(Runnable { loop.start() })
+    }
+
+    /** Stops [backgroundHistoryLoop] on the calling thread, same reasoning as [stopCycle]'s own
+     * doc: it must not be queued behind [runOnWorker], which could be stuck inside a long-running
+     * probe attempt. */
+    private fun stopBackgroundHistoryLoop() {
+        val loop = backgroundHistoryLoop ?: return
+        backgroundHistoryLoop = null
+        loop.stop()
+    }
+
+    /** At least [BackgroundHistoryProbeLoop.MIN_RETRY_DELAY_MS], regardless of the user's own
+     * step-delay preference -- see that constant's doc for why the floor exists independent of
+     * whatever pacing the visible tracer is configured with. */
+    private fun backgroundHistoryRetryDelayMs(): Long =
+        maxOf(BackgroundHistoryProbeLoop.MIN_RETRY_DELAY_MS, stepDelayMs)
+
+    /** [BackgroundHistoryProbeLoop] has no notion of success/failure beyond the raw
+     * [ProbeResult] it was handed -- this is the one place that turns that into what
+     * [UplinkProbeHistory] actually records, mirroring (deliberately not sharing code with)
+     * [UplinkNotificationController.onEvent]'s own narrower rule for the visible cycle's real
+     * probes. */
+    private fun recordHistorySample(result: ProbeResult) {
+        when (result) {
+            is ProbeResult.Success -> UplinkProbeHistory.recordSuccess(result.latencyMs)
+            ProbeResult.Failure, ProbeResult.DnsResolutionFailure -> UplinkProbeHistory.recordFailure()
+        }
     }
 
     companion object {
