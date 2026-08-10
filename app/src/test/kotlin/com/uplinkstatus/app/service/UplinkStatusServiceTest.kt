@@ -730,8 +730,12 @@ class UplinkStatusServiceTest {
         service.prober = fakeProber
 
         service.applyVisibility(UplinkVisibility.ENABLED)
-        fakeScheduler.scheduled.toList().forEach { it() } // retry floor -> second probe (DNS failure)
-        fakeScheduler.scheduled.toList().forEach { it() } // retry floor -> third probe (success)
+        // FakeScheduler.scheduled is append-only -- it never removes an already-fired entry,
+        // so firing the *whole* list on each round would re-run every stale callback too.
+        // Firing only the newest one is safe here because ProbeCycleRunner only ever has one
+        // pendingTask outstanding at a time.
+        fakeScheduler.scheduled.last()() // retry floor -> second probe (DNS failure)
+        fakeScheduler.scheduled.last()() // retry floor -> third probe (success)
 
         // Three probe attempts happened, each failure retry paced by the fixed floor delay --
         // exactly what a real service-driven ProbeCycleRunner does, not just a standalone one
@@ -765,7 +769,9 @@ class UplinkStatusServiceTest {
         service.prober = fakeProber
 
         service.applyVisibility(UplinkVisibility.ENABLED)
-        repeat(4) { fakeScheduler.scheduled.toList().forEach { it() } } // four retry floors
+        // See the previous test's comment: fire only the newest pending callback each round,
+        // since FakeScheduler.scheduled never drops an already-fired entry on its own.
+        repeat(4) { fakeScheduler.scheduled.last()() } // four retry floors
 
         assertEquals(5, fakeProber.callCount)
         // Four Frozen events with the *same* reason, then one Advanced -- but only the
@@ -861,10 +867,12 @@ class UplinkStatusServiceTest {
         assertEquals(1, fakeProber.callCount)
         assertEquals(listOf(ProbeCycleRunner.FAILURE_RETRY_DELAY_MS), fakeScheduler.delays)
 
-        repeat(2) { fakeScheduler.scheduled.toList().forEach { it() } }
+        // FakeScheduler.scheduled is append-only, so fire only the newest pending callback
+        // each round -- see the earlier tests in this class for the same reasoning.
+        repeat(2) { fakeScheduler.scheduled.last()() }
         assertEquals(3, fakeProber.callCount)
 
-        fakeScheduler.scheduled.toList().forEach { it() } // third retry floor -> the eventual success
+        fakeScheduler.scheduled.last()() // third retry floor -> the eventual success
         assertEquals(4, fakeProber.callCount)
         // All three failed attempts were paced by the fixed retry floor, not the configured
         // step delay -- only the final entry, after the eventual success, is the step delay,
