@@ -19,36 +19,41 @@ import com.uplinkstatus.core.probe.Prober
  * makes every freeze land in the same phase of the bounce, so an outage always stops the
  * tracer on the same handful of bars -- see [realProbesSinceFakeAck].
  *
- * On probe timeout/failure: no ack fires, the tracer freezes at its current position, and
- * the loop retries immediately with a new probe (same timeout, no back-off, and no
- * [stepDelayMs] wait before the retry) until one succeeds — at which point acks resume and
- * the tracer continues from wherever it froze. A failure does not consume a slot in the
- * ping/ping/fake sequence: [realProbesSinceFakeAck] only advances on a real ack, so an
- * outage mid-sequence resumes at the same point once connectivity returns.
+ * On probe timeout/failure: no ack fires, the tracer freezes at its current position, and a
+ * retry is scheduled after [FAILURE_RETRY_DELAY_MS] — not zero, despite "no back-off" (see
+ * that constant's doc for why), and not [stepDelayMs] either, regardless of how that's
+ * configured — until one succeeds, at which point acks resume and the tracer continues from
+ * wherever it froze. A failure does not consume a slot in the ping/ping/fake sequence:
+ * [realProbesSinceFakeAck] only advances on a real ack, so an outage mid-sequence resumes at
+ * the same point once connectivity returns.
  *
- * This class owns no real threads and never blocks on wall-clock time itself: the
- * [stepDelayMs] waits are delegated to an injected [TracerScheduler], and probe attempts are
- * delegated to an injected [Prober]. That's what makes the whole cycle - including its timing
- * and sequencing - unit-testable on the plain JVM with fakes that respond instantly, per the
- * brief's requirement not to make tests slow/flaky by sleeping for real intervals.
+ * This class owns no real threads and never blocks on wall-clock time itself: every wait —
+ * [stepDelayMs] between steps, [FAILURE_RETRY_DELAY_MS] between failure retries — is
+ * delegated to an injected [TracerScheduler], and probe attempts are delegated to an
+ * injected [Prober]. That's what makes the whole cycle - including its timing and sequencing
+ * - unit-testable on the plain JVM with fakes that respond instantly, per the brief's
+ * requirement not to make tests slow/flaky by sleeping for real intervals.
  *
- * Failure retries are a plain `while` loop rather than recursive calls, specifically so a
- * sustained outage (many consecutive probe failures) can't grow the call stack — with
- * recursion instead, an outage lasting long enough would eventually overflow the stack in
- * production, since each failed probe would add another frame.
+ * [runProbeAttempts] makes exactly one probe attempt per call, scheduling its own retry
+ * through [scheduler] on failure rather than looping — so a sustained outage (many
+ * consecutive probe failures) never grows the call stack: each retry is a fresh dispatch
+ * from the scheduler, not a nested call frame.
  *
  * ### Threading contract
  *
- * [start] blocks its calling thread for as long as probes keep failing (that's what "retry
- * immediately, no back-off" means when the prober is a blocking call), so it is expected to
- * be driven from a dedicated background thread. [stop] is deliberately the opposite: it is
- * safe to call from *any* thread, at any time, and it never waits on the thread running the
- * cycle. That asymmetry is the whole point — a caller must be able to end the cycle during a
- * sustained outage, when the thread inside [runProbeAttempts] is not going to become
- * available to accept any queued work of its own for as long as the outage lasts. Callers
- * must therefore invoke [stop] *directly*, never by posting it to the same queue/executor
- * that is running [start] (see `UplinkStatusService.stopCycle`'s comment for the concrete
- * Android case this rule came out of).
+ * [start] blocks its calling thread only for a single probe attempt (the call underneath
+ * [Prober.probe]), not for the duration of an outage — a failure hands off to [scheduler]
+ * and returns, freeing that thread until the retry fires. [stop] is safe to call from *any*
+ * thread, at any time, and it never waits on the thread running the cycle: it takes
+ * [lifecycleLock] to clear [running] and cancel [pendingTask] (a scheduled retry or step
+ * alike), which is enough to stop a cycle waiting on its scheduler. The one case that still
+ * needs [stop] to be callable from a *different* thread is a probe attempt that is itself
+ * still in flight (blocking inside [Prober.probe], up to its own timeout) when [stop] is
+ * called — there is no [pendingTask] to cancel for that case, so the in-flight call is left
+ * to return on its own, and [running] is what makes its result get discarded rather than
+ * emitted. Callers must therefore invoke [stop] *directly*, never by posting it to the same
+ * queue/executor that is running [start] (see `UplinkStatusService.stopCycle`'s comment for
+ * the concrete Android case this rule came out of).
  *
  * Once [stop] returns, two things are guaranteed: no further [Prober.probe] call will be
  * made, and no further [CycleListener.onEvent] callback will be delivered — including from
@@ -79,10 +84,11 @@ class ProbeCycleRunner(
     private val tracer: AckTracer = AckTracer(),
     /** The user-configurable pacing wait between every step -- real ack, automatic ack, and
      * before the next probe alike. 0 means back-to-back with no added wait ("free wheeling");
-     * never applied before a failure retry, which stays immediate per spec regardless of this
-     * value. Must be non-negative; a negative delay isn't a real duration and every scheduler
-     * implementation this project uses treats it as an error or as an unintended "immediately"
-     * that would silently defeat the pacing this setting exists to provide. */
+     * never applied before a failure retry, which is paced by [FAILURE_RETRY_DELAY_MS]
+     * instead, regardless of this value. Must be non-negative; a negative delay isn't a real
+     * duration and every scheduler implementation this project uses treats it as an error or
+     * as an unintended "immediately" that would silently defeat the pacing this setting
+     * exists to provide. */
     initialStepDelayMs: Long = DEFAULT_STEP_DELAY_MS,
 ) {
 
@@ -166,8 +172,8 @@ class ProbeCycleRunner(
     val isRunning: Boolean
         get() = running
 
-    /** Starts the cycle. No-op if already running. Blocks the calling thread for as long as
-     * probes keep failing — see the class doc's threading contract. */
+    /** Starts the cycle. No-op if already running. Blocks the calling thread only for the
+     * first probe attempt — see the class doc's threading contract. */
     fun start() {
         synchronized(lifecycleLock) {
             if (running) return
@@ -195,36 +201,39 @@ class ProbeCycleRunner(
     }
 
     /**
-     * Step 1 (and the immediate-retry loop around it): attempt probes back-to-back with
-     * no delay until one succeeds, emitting a [CycleEvent.Frozen] for each failure. Exits
-     * (without looping) as soon as a probe succeeds, handing off to [onProbeSucceeded]
-     * which schedules the rest of the cycle asynchronously — or as soon as [stop] is called
-     * from another thread, which is the only other way out of this loop during an outage
-     * with no gap between retries.
+     * Step 1: a single probe attempt. Re-checks [running] first, since this is also where a
+     * scheduled failure retry re-enters — a [stop] that landed while the retry was pending
+     * must not let it probe at all. On success, hands off to [onProbeSucceeded], which
+     * schedules the rest of the cycle. On failure, hands off to [retryAfterFailure], which
+     * emits a [CycleEvent.Frozen] and schedules *this* method again after
+     * [FAILURE_RETRY_DELAY_MS] — see that constant's doc for why a retry is no longer
+     * immediate.
      *
-     * Every exit from the loop re-checks [running] *after* the blocking probe returns, not
-     * just before it: a [stop] that landed while the probe was in flight must discard that
-     * probe's result entirely rather than emit one last event into a listener whose owner
-     * has already torn down.
+     * [running] is also re-checked *after* the blocking probe returns, inside
+     * [onProbeSucceeded]/[retryAfterFailure]'s own [lifecycleLock]-guarded check: a [stop]
+     * that landed while the probe was in flight must discard that probe's result entirely
+     * rather than emit one last event, or schedule one last retry, into a listener whose
+     * owner has already torn down.
      */
     private fun runProbeAttempts() {
-        while (running) {
-            when (val result = prober.probe(target)) {
-                is ProbeResult.Success -> {
-                    onProbeSucceeded(result)
-                    return
-                }
+        if (!running) return
+        when (val result = prober.probe(target)) {
+            is ProbeResult.Success -> onProbeSucceeded(result)
+            ProbeResult.Failure -> retryAfterFailure(FreezeReason.PROBE_FAILURE)
+            ProbeResult.DnsResolutionFailure -> retryAfterFailure(FreezeReason.DNS_RESOLUTION_FAILURE)
+        }
+    }
 
-                ProbeResult.Failure -> {
-                    if (!emitIfRunning(CycleEvent.Frozen(tracer.position, FreezeReason.PROBE_FAILURE))) return
-                    // No scheduled delay: retry immediately, no back-off, per spec.
-                }
-
-                ProbeResult.DnsResolutionFailure -> {
-                    val event = CycleEvent.Frozen(tracer.position, FreezeReason.DNS_RESOLUTION_FAILURE)
-                    if (!emitIfRunning(event)) return
-                }
-            }
+    /** A probe attempt failed with [reason]: emits a [CycleEvent.Frozen] for it and schedules
+     * a retry ([runProbeAttempts] again) after [FAILURE_RETRY_DELAY_MS], both under
+     * [lifecycleLock] together so a concurrent [stop] can't land between the two — same
+     * reasoning as [onProbeSucceeded]/[onFakeAckDue] scheduling their own next step under the
+     * same lock they emit under. */
+    private fun retryAfterFailure(reason: FreezeReason) {
+        synchronized(lifecycleLock) {
+            if (!running) return
+            listener.onEvent(CycleEvent.Frozen(tracer.position, reason))
+            pendingTask = scheduler.postDelayed(FAILURE_RETRY_DELAY_MS) { runProbeAttempts() }
         }
     }
 
@@ -282,18 +291,6 @@ class ProbeCycleRunner(
         }
     }
 
-    /** Delivers [event] to [listener] unless the cycle has already been stopped, returning
-     * whether it was delivered (i.e. whether the caller should keep going). The check and the
-     * call happen under [lifecycleLock] together, so a [stop] on another thread can't slip
-     * between them. */
-    private fun emitIfRunning(event: CycleEvent): Boolean {
-        synchronized(lifecycleLock) {
-            if (!running) return false
-            listener.onEvent(event)
-            return true
-        }
-    }
-
     companion object {
         /** The number of real probe successes per automatic ack -- see the class doc's
          * "Two real probes per automatic ack, not one, deliberately" paragraph. */
@@ -303,5 +300,31 @@ class ProbeCycleRunner(
          * every step used before this became user-configurable, so a fresh install's behavior
          * doesn't silently change out from under anyone who never touches the new setting. */
         const val DEFAULT_STEP_DELAY_MS: Long = 500L
+
+        /** Floor delay before retrying a failed probe attempt -- not zero, despite the spec's
+         * "no back-off" rule, and not [stepDelayMs] either: a failure retry is paced by this
+         * fixed value regardless of the user's configured step delay, exactly as it was paced
+         * by nothing at all before this constant existed.
+         *
+         * "No back-off" quietly assumed every failure takes close to the full probe timeout
+         * to arrive -- true for an ordinary "target isn't answering" outage, but not for a
+         * DNS-resolution failure specifically, which can return in low single-digit
+         * milliseconds. That's exactly the condition seen for a moment while reconnecting
+         * after a total outage, before the resolver is reachable again: without a floor, a
+         * burst of those spins this loop as fast as the CPU allows for as long as the burst
+         * lasts, a real, measured battery cost on-device (it's also what
+         * `notes/dev/uplink-status-indicator-spec.md`'s "In-App History Graphs" section cites
+         * as the reason the sample-history cap is sized well above steady-state pacing, not
+         * the cause of that burst in the first place).
+         *
+         * Same value and reasoning as [BackgroundHistoryProbeLoop.MIN_RETRY_DELAY_MS], which
+         * solved the identical problem for the *other* probe loop this app runs. Kept as its
+         * own constant here rather than shared, since the two classes are deliberately
+         * independent -- see [BackgroundHistoryProbeLoop]'s class doc.
+         *
+         * Still not "adaptive" back-off: this delay never grows with a sustained outage,
+         * which is what the spec's "Explicitly Out of Scope" → "Adaptive/back-off polling"
+         * line actually rules out. */
+        const val FAILURE_RETRY_DELAY_MS: Long = 250L
     }
 }

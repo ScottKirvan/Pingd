@@ -54,7 +54,7 @@ import kotlinx.coroutines.launch
  * The probe cycle runs on a dedicated background [HandlerThread], not the main thread/main
  * looper — see [AndroidTracerScheduler]'s doc for why this deviates from the spec's literal
  * "main looper" wording (the probe is a blocking call, and running it on the main thread
- * risks ANRs, especially during a sustained outage's back-to-back immediate retries).
+ * risks an ANR for the duration of even a single attempt).
  *
  * Stage 3 replaced Stage 2's `VisibilityInputs` stand-in with a coroutine (started once from
  * [onStartCommand]) that `combine`s [preferencesRepository]'s real, persisted
@@ -395,14 +395,14 @@ class UplinkStatusService : Service() {
     /**
      * Stops the cycle **on the calling thread**, deliberately *not* via [runOnWorker].
      *
-     * [ProbeCycleRunner.start] blocks its thread for as long as probes keep failing (that's
-     * what the spec's "retry immediately, no back-off" means with a blocking prober), and
-     * [runOnWorker] posts to a single [HandlerThread] whose [Handler] runs one posted
-     * `Runnable` to completion before dispatching the next. Posting `stop()` there during a
-     * sustained outage would queue it *behind* the very loop it has to interrupt: it could
-     * not run until a probe finally succeeded, so `running` never flipped, the stale cycle
-     * kept probing and kept calling its listener — resurrecting a notification the user had
-     * already turned off — and the worker thread outlived the service that owned it.
+     * A single probe attempt blocks [ProbeCycleRunner]'s thread for up to its own timeout
+     * (a failure retry is otherwise paced through its scheduler, not looped inline — see
+     * `ProbeCycleRunner.FAILURE_RETRY_DELAY_MS`'s doc), and [runOnWorker] posts to a single
+     * [HandlerThread] whose [Handler] runs one posted `Runnable` to completion before
+     * dispatching the next. Posting `stop()` there would queue it *behind* whatever probe
+     * attempt is currently in flight: for up to that attempt's own timeout, `running` would
+     * not have flipped yet, so the stale cycle could still call its listener once more —
+     * resurrecting a notification the user had already turned off, however briefly.
      *
      * [ProbeCycleRunner.stop] is explicitly documented as safe to call from any thread and
      * as never blocking on the thread running the cycle, precisely so this call site can

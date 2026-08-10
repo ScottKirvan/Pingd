@@ -42,8 +42,8 @@ import com.uplinkstatus.core.tracer.FreezeReason
  *
  * This still has to respect "Only call notify() on an ack (tracer advance) or a state
  * transition — not on every internal timer tick": [com.uplinkstatus.core.tracer.ProbeCycleRunner]
- * emits one `Frozen` event per failed probe attempt, including back-to-back immediate
- * retries with no back-off during a sustained outage, so posting on every single one of
+ * emits one `Frozen` event per failed probe attempt, including every retry (paced by a
+ * fixed floor delay, not zero) during a sustained outage, so posting on every single one of
  * those would be exactly the "bare timer tick" spam the spec rules out. [lastNotifiedState]
  * tracks what was last actually posted (connected, or frozen-for-a-given-reason) so a
  * repeat `Frozen` with the *same* [FreezeReason] as what's already showing is suppressed —
@@ -100,7 +100,7 @@ open class UplinkNotificationController(
     /** Counts every real call through to [notificationManager]`.notify()` (i.e. past the
      * permission check). Production code never reads this; it exists so tests can prove the
      * de-duplication in [onEvent] actually suppresses repeated system calls during a
-     * back-to-back no-back-off retry storm, not just that the visible end state happens to
+     * sustained outage's repeated retries, not just that the visible end state happens to
      * look right. */
     @Volatile
     internal var notifyCallCount: Int = 0
@@ -159,9 +159,9 @@ open class UplinkNotificationController(
                 // Recorded *before* the de-duplication below, and outside it, on purpose: that
                 // guard exists to keep the notification from being re-posted with nothing new
                 // to say, which is a statement about the status bar, not about the network.
-                // Every Frozen is one real probe that really failed -- including the
-                // back-to-back immediate retries of a sustained outage, which are precisely the
-                // attempts a success percentage has to count if it is to mean anything.
+                // Every Frozen is one real probe that really failed -- including every retry
+                // of a sustained outage, which are precisely the attempts a success
+                // percentage has to count if it is to mean anything.
                 UplinkProbeHistory.recordFailure()
                 val state = NotifiedState.Frozen(event.reason)
                 if (lastNotifiedState != state) {

@@ -16,6 +16,7 @@ import com.uplinkstatus.core.tracer.AckSource
 import com.uplinkstatus.core.tracer.BarPosition
 import com.uplinkstatus.core.tracer.CycleEvent
 import com.uplinkstatus.core.tracer.FreezeReason
+import com.uplinkstatus.core.tracer.ProbeCycleRunner
 import com.uplinkstatus.core.visibility.UplinkVisibility
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -713,8 +714,8 @@ class UplinkStatusServiceTest {
         assertEquals(UplinkActivityStatus.Activity.Hidden, UplinkActivityStatus.activity.value)
     }
 
-    // --- Stage 5: DNS-vs-generic-failure and no-back-off, end to end through the real ------
-    // --- running service (not just ProbeCycleRunnerTest's or                             ---
+    // --- Stage 5: DNS-vs-generic-failure and failure-retry pacing, end to end through the --
+    // --- real running service (not just ProbeCycleRunnerTest's or                        ---
     // --- UplinkNotificationControllerTest's standalone unit level) -------------------------
 
     @Test
@@ -729,10 +730,12 @@ class UplinkStatusServiceTest {
         service.prober = fakeProber
 
         service.applyVisibility(UplinkVisibility.ENABLED)
+        fakeScheduler.scheduled.toList().forEach { it() } // retry floor -> second probe (DNS failure)
+        fakeScheduler.scheduled.toList().forEach { it() } // retry floor -> third probe (success)
 
-        // Three probe attempts happened synchronously, back to back, with no wait in
-        // between -- exactly what "immediate retry, no adaptive back-off" requires even
-        // when driven by the real service (not a standalone ProbeCycleRunner in isolation).
+        // Three probe attempts happened, each failure retry paced by the fixed floor delay --
+        // exactly what a real service-driven ProbeCycleRunner does, not just a standalone one
+        // in isolation.
         assertEquals(3, fakeProber.callCount)
         assertEquals(
             listOf(
@@ -762,6 +765,7 @@ class UplinkStatusServiceTest {
         service.prober = fakeProber
 
         service.applyVisibility(UplinkVisibility.ENABLED)
+        repeat(4) { fakeScheduler.scheduled.toList().forEach { it() } } // four retry floors
 
         assertEquals(5, fakeProber.callCount)
         // Four Frozen events with the *same* reason, then one Advanced -- but only the
@@ -791,12 +795,15 @@ class UplinkStatusServiceTest {
      * the next is dispatched). Without that, the failure is structurally unreachable — a
      * synchronous `runOnWorker` cannot express two pieces of work contending for one thread.
      *
-     * The prober here models a continuous outage the way production actually behaves: each
-     * probe blocks (as a real TCP connect does) and then fails, so `runProbeAttempts()`
-     * loops straight back around with no gap and never yields the worker thread. If
-     * `stopCycle()` posts `runner.stop()` onto that same queue, it sits behind a loop that
-     * will not return until the network recovers, and the cycle keeps probing and keeps
-     * posting notifications after the service has torn itself down.
+     * The prober here models a single in-flight probe the way production actually behaves:
+     * it blocks (as a real TCP connect does) until the test releases it. That single
+     * blocking call is the one case `ProbeCycleRunner.stop()` still can't handle by simply
+     * cancelling a scheduled task (a failure retry is otherwise paced through the scheduler,
+     * not looped inline -- see `ProbeCycleRunner.FAILURE_RETRY_DELAY_MS`'s doc). If
+     * `stopCycle()` posted `runner.stop()` onto the same single-threaded worker queue instead
+     * of calling it directly, it would sit behind whatever's still running on that queue --
+     * here, the blocked probe -- and the cycle would keep probing and posting notifications
+     * after the service has torn itself down.
      */
     @Test
     fun `HIDDEN during a continuous outage stops the cycle instead of queueing stop behind it`() {
@@ -819,15 +826,17 @@ class UplinkStatusServiceTest {
             assertTrue("the cycle never reached its first probe", probeEntered.await(5, TimeUnit.SECONDS))
 
             // The service leaves ENABLED while the outage is still in progress -- the probe
-            // is in flight and the worker thread is inside the retry loop right now.
+            // is in flight and the worker thread is blocked inside it right now.
             service.applyVisibility(UplinkVisibility.HIDDEN)
             releaseProbe.release() // the in-flight probe returns Failure
 
-            // With the cycle genuinely stopped, the retry loop returns and the worker thread
-            // becomes available again, so this marker task runs. If stop() had been queued
-            // behind the loop instead, the loop would have gone straight into probe #2 (for
-            // which no permit is released, standing in for an outage that simply continues)
-            // and this would time out -- which is precisely the starvation being fixed.
+            // With the cycle genuinely stopped, the blocked call returns and the worker
+            // thread becomes available again, so this marker task runs. If stop() had been
+            // queued behind it instead of called directly, the worker thread would still be
+            // busy (a real retry would have been scheduled and, in a real outage, gone
+            // straight into probe #2 -- for which no permit is released here, standing in
+            // for an outage that simply continues) and this would time out -- which is
+            // precisely the starvation being fixed.
             worker.submit { }.get(5, TimeUnit.SECONDS)
 
             assertEquals(1, probeCount.get())
@@ -839,7 +848,7 @@ class UplinkStatusServiceTest {
     }
 
     @Test
-    fun `a real running cycle schedules no delay at all for failed attempts -- only the post-success automatic ack`() {
+    fun `a real running cycle paces failed attempts with the fixed retry floor, not the configured step delay`() {
         fakeProber = FakeProber(
             ProbeResult.Failure,
             ProbeResult.DnsResolutionFailure,
@@ -849,12 +858,26 @@ class UplinkStatusServiceTest {
         service.prober = fakeProber
 
         service.applyVisibility(UplinkVisibility.ENABLED)
+        assertEquals(1, fakeProber.callCount)
+        assertEquals(listOf(ProbeCycleRunner.FAILURE_RETRY_DELAY_MS), fakeScheduler.delays)
 
+        repeat(2) { fakeScheduler.scheduled.toList().forEach { it() } }
+        assertEquals(3, fakeProber.callCount)
+
+        fakeScheduler.scheduled.toList().forEach { it() } // third retry floor -> the eventual success
         assertEquals(4, fakeProber.callCount)
-        // The only thing ever scheduled is the 500ms automatic ack that follows the
-        // eventual success -- nothing was scheduled for any of the three failed attempts,
-        // confirming "no adaptive back-off" holds with a real ProbeCycleRunner instance
-        // owned and started by the real, running UplinkStatusService.
-        assertEquals(1, fakeScheduler.scheduled.size)
+        // All three failed attempts were paced by the fixed retry floor, not the configured
+        // step delay -- only the final entry, after the eventual success, is the step delay,
+        // confirming this holds with a real ProbeCycleRunner instance owned and started by
+        // the real, running UplinkStatusService.
+        assertEquals(
+            listOf(
+                ProbeCycleRunner.FAILURE_RETRY_DELAY_MS,
+                ProbeCycleRunner.FAILURE_RETRY_DELAY_MS,
+                ProbeCycleRunner.FAILURE_RETRY_DELAY_MS,
+                500L,
+            ),
+            fakeScheduler.delays,
+        )
     }
 }
