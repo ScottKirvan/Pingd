@@ -271,14 +271,25 @@ latency trend with data that was never actually measured.
 
 - **Ping success (%)** — the percentage of real probe attempts, within
   the window, that succeeded. Every real attempt counts, success or
-  failure — including repeated immediate-retry failures during a
-  sustained outage.
+  failure — including every retry during a sustained outage.
 - **Latency (ms)** — a windowed trend line built from successful
   probes' measured round-trip time. A failed probe is a **gap** in the
   line, not a zero and not a skipped/interpolated point — a gap is the
   honest representation of "no measurement," the same principle the
   tracer's own freeze-in-place behavior already follows for a single
   failed probe.
+
+A gap bounded by real data on at least one side (a mid-outage or
+still-ongoing loss of signal, not the graph simply not having filled up
+yet) is additionally shaded, not just left as a break in the line — a
+break with nothing else marking it reads as a rendering glitch rather
+than a deliberate "nothing was measured here." A gap at the very start
+of the window is deliberately left unshaded: it's indistinguishable
+from the window still filling up (the normal, expected look early in a
+session), and shading it would misrepresent ordinary warm-up as a lost
+signal. This applies to both graphs — the success line's bucketed gaps
+(a time bucket with zero attempts in it) get the same treatment as the
+latency line's per-sample ones.
 
 Both sparklines' time axis is anchored to the *configured window*, not
 stretched to fill from whatever span of samples happens to be retained

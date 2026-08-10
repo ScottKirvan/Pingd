@@ -38,6 +38,41 @@ data class SparklinePoint(
 )
 
 /**
+ * The x-fraction spans (same 0..1 axis as [SparklinePoint.x]) that a sparkline should shade as
+ * "no data here" — every run of consecutive gaps in [points] ([SparklinePoint.y] `null`) that
+ * sits *between* two measured points, plus a trailing run that reaches all the way to the
+ * newest retained point (an outage still in progress as of "now"). A broken line by itself
+ * reads as a rendering glitch rather than a deliberate "nothing was measured here" — this is
+ * what the shaded region behind it is for.
+ *
+ * A run at the very start of [points] is deliberately excluded: that's indistinguishable from
+ * the window simply not having filled up yet (see [ProbeHistory]'s own "the time axis is never
+ * wall-clock now" doc), which already reads correctly as empty space with nothing plotted —
+ * shading it would misrepresent ordinary session warm-up as a lost-signal event. For the same
+ * reason, a history with *no* measured point at all (every retained attempt failed) produces no
+ * spans: there is no boundary anywhere in it to shade from.
+ */
+fun sparklineGapFractions(points: List<SparklinePoint>): List<ClosedFloatingPointRange<Float>> {
+    val spans = mutableListOf<ClosedFloatingPointRange<Float>>()
+    var gapStart: Float? = null
+    var previousValidX: Float? = null
+    points.forEach { point ->
+        if (point.y == null) {
+            if (gapStart == null) gapStart = previousValidX
+        } else {
+            gapStart?.let { spans += it..point.x }
+            gapStart = null
+            previousValidX = point.x
+        }
+    }
+    // A trailing run never reaches the `else` branch above to get its closing point -- close
+    // it against the run's own last point instead, which sits at x = 1f by construction (the
+    // newest retained point is always the right edge of this axis, gap or not).
+    gapStart?.let { start -> spans += start..points.last().x }
+    return spans
+}
+
+/**
  * The rolling sample history behind the settings screen's two graphs (ping success % and
  * latency), as an immutable value.
  *
