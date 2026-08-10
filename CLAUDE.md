@@ -2,6 +2,15 @@
 
 This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
 
+## Keeping this file current
+
+This file is the primary context for any agent working in this repo — keep
+it accurate as the project evolves. As key files, build commands, and
+architectural decisions emerge, record them here so future sessions start
+with full context rather than re-deriving it. Update this file in the same
+commit as the work it documents (design-decision changes belong in
+`notes/dev/uplink-status-indicator-spec.md` instead — see below).
+
 ## Project state
 
 `UplinkStatus` is an Android app (status-bar uplink health indicator)
@@ -76,15 +85,65 @@ npm run docs:preview   # preview the built output
 The `docs.yml` workflow auto-deploys this site to Pages on pushes to
 `main` that touch `docs/**`.
 
+## Working conventions
+
+- One concern per change. If work naturally splits into independent
+  problems, keep them separate rather than bundling unrelated changes into
+  one commit or PR.
+- `feat:` is for genuinely new user-facing capability only; bug fixes and
+  corrections use `fix:`, even when they close a tracked issue.
+- Unit tests are written alongside all new code. Every bug fix needs a
+  red/green regression test (see "Project state" above) — no exceptions.
+- `./gradlew build` (compiles, tests, lints) must pass before committing.
+  Don't assume another project's toolchain applies here — this repo's
+  commands are listed under "Commands" below.
+- Prefer narrow, localized changes. Favor modularity that contains the
+  blast radius of an edit — a fix or feature shouldn't require touching
+  unrelated parts of the codebase. If it does, that's a design signal
+  worth surfacing to the user rather than working around silently.
+- Refactoring is a first-class activity, not something to defer — improve
+  structure as you go rather than accumulating debt for a later pass.
+- In unfamiliar domain territory (Android platform behavior, network
+  APIs), prefer primary sources — official docs, AOSP source, RFCs — over
+  general knowledge, and flag domain uncertainty explicitly rather than
+  proceeding on an assumption. This is why app-behavior changes start with
+  `notes/dev/uplink-status-indicator-spec.md`, not first principles.
+- Default to writing no comments. Add one only when the *why* is
+  non-obvious — a hidden constraint, a subtle invariant, a workaround for
+  a specific bug. If code is hard to understand, fix naming and structure
+  rather than explaining around it with a comment.
+
+## No shortcuts
+
+Nothing is deferred without explicit permission from the user. A known
+issue is still a bug — don't mark it "won't fix", "by design", or "out of
+scope" unilaterally. If a library or package can't meet a stated
+requirement, find an alternative or do the work from first principles
+rather than deferring or watering down the requirement.
+
+## Autonomy
+
+Make implementation decisions independently — don't ask permission for
+technical choices within stated requirements. Escalate only when
+something would change scope, defer a requirement, or contradict what the
+user has described as the goal.
+
 ## Git workflow
 
 - `dev` is the ongoing integration branch — Claude owns it and commits/pushes
   directly to it.
 - `main` is never touched (no commits, no merges) without explicit
   instruction from the user for that specific merge.
-- Claude may launch agents to work on other branches, but always reviews
-  their code, confirms tests pass, and strips any attribution lines from
-  commit messages and PR bodies before anything lands on `dev`.
+- Claude may launch agents to work on other branches for isolated pieces of
+  work. Brief them on *what* to build, not *how* — implementation choices
+  belong to the agent, which serves as an independent second opinion.
+  Sub-agents don't land their own work: after an agent completes, review
+  its diff and tests as a genuine code review (correctness, requirement
+  alignment, test quality), not a rubber stamp. Fix small issues directly;
+  send significant deviations from the stated requirements back to the
+  agent. Only after review passes does the work get merged, with any
+  attribution lines stripped from commit messages and PR bodies, before
+  anything lands on `dev`.
 
 ## Commit / versioning conventions
 
