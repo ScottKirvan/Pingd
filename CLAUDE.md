@@ -90,6 +90,13 @@ decision. Don't repeat that mistake in either direction: don't invent a
 design rationale to excuse an issue, and don't treat an existing
 comment's rationale as authoritative without checking whether it holds.)
 
+## Communication style
+
+Never use the multiple-choice question tool (`AskUserQuestion`) in this
+repo — ask plain natural-language questions in normal text instead.
+Keep explanations concise; don't restate context or reasoning already
+given earlier in the same conversation.
+
 ## Autonomy
 
 Make implementation decisions independently — don't ask permission for
