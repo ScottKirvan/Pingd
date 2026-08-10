@@ -163,6 +163,13 @@ The `docs.yml` workflow auto-deploys this site to Pages on pushes to
   significant deviations from the stated requirements, or complex
   problems, back to the agent rather than patching over them. Agents
   don't create PRs themselves — Claude does, only after review passes.
+- Since `dev` is Claude's to own, Claude also merges an agent's
+  reviewed, CI-green PR into `dev` itself — no need to wait for the
+  user's per-PR go-ahead the way a `dev` → `main` merge does. The user
+  builds/device-tests from `dev`, so a reviewed branch sitting unmerged
+  on its own PR just adds a branch they have to remember to switch to.
+  This is specifically about feature-branch → `dev` merges; the `main`
+  rule above is unchanged.
 
 ### Attribution
 
