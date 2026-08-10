@@ -160,16 +160,21 @@ The `docs.yml` workflow auto-deploys this site to Pages on pushes to
   not a rebase) so `dev` picks up anything that landed only on `main`
   (e.g. a Release Please version/changelog commit) — otherwise the next
   `dev` → `main` PR's diff will incorrectly show reverting that content.
-- Claude may launch agents to work on other branches. Brief them on
-  **what** to build, not **how** — implementation decisions belong to the
-  agent, which is meant to serve as an independent second opinion on the
-  approach, not just typing hands. After an agent completes: review its
-  diff and tests before creating a PR, as a genuine independent code
-  review (correctness, requirement alignment, test quality), not a
-  compliance check. Fix simple issues found in review directly; send
-  significant deviations from the stated requirements, or complex
-  problems, back to the agent rather than patching over them. Agents
-  don't create PRs themselves — Claude does, only after review passes.
+- Prefer delegating implementation-sized work (a fix, a feature, anything
+  more than a trivial edit) to an agent rather than writing it directly.
+  This isn't just about parallelism — Claude doing all the hands-on
+  coding itself spreads its own context thin across unrelated tasks and
+  forfeits the independent-second-opinion value an agent provides. Brief
+  agents on **what** to build, not **how** — implementation decisions
+  belong to the agent, which is meant to serve as an independent second
+  opinion on the approach, not just typing hands. After an agent
+  completes: review its diff and tests before creating a PR, as a
+  genuine independent code review (correctness, requirement alignment,
+  test quality), not a compliance check. Fix simple issues found in
+  review directly; send significant deviations from the stated
+  requirements, or complex problems, back to the agent rather than
+  patching over them. Agents don't create PRs themselves — Claude does,
+  only after review passes.
 - Since `dev` is Claude's to own, Claude also merges an agent's
   reviewed, CI-green PR into `dev` itself — no need to wait for the
   user's per-PR go-ahead the way a `dev` → `main` merge does. The user
