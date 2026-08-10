@@ -244,16 +244,15 @@ data class ProbeHistory(
      *
      * Bucketed rather than one point per sample because a per-sample success line can only
      * ever be 0 or 1 — a square wave that says nothing about the *rate*, which is the whole
-     * point of this graph. The resolution grows with the data instead of being fixed:
-     * [maxBuckets] is an upper bound, and the actual count is whatever keeps at least
-     * [MIN_SAMPLES_PER_BUCKET] attempts behind each plotted point, so an early session shows a
-     * few honest points instead of a long dotted line of one-sample buckets.
+     * point of this graph. The resolution grows with real elapsed time instead of being fixed
+     * or tied to how many attempts have arrived — see [bucketCount]'s own doc for why that
+     * distinction matters.
      */
     fun successSparkline(maxBuckets: Int = DEFAULT_MAX_BUCKETS): List<SparklinePoint> {
         require(maxBuckets > 0) { "maxBuckets must be positive, was $maxBuckets" }
         if (samples.isEmpty()) return emptyList()
 
-        val buckets = (samples.size / MIN_SAMPLES_PER_BUCKET).coerceIn(1, maxBuckets)
+        val buckets = bucketCount(maxBuckets)
         val attempts = IntArray(buckets)
         val successes = IntArray(buckets)
         val newest = samples.last().timestampMs
@@ -273,6 +272,27 @@ data class ProbeHistory(
             val y = if (attempts[index] == 0) null else successes[index].toFloat() / attempts[index]
             SparklinePoint(x = x, y = y)
         }
+    }
+
+    /**
+     * How many time buckets [successSparkline] divides the window into: grows with how much of
+     * the window real elapsed time has actually covered ([spanMs] relative to [windowMs]), not
+     * with how many attempts have been recorded.
+     *
+     * The earlier version of this scaled with `samples.size` instead — tying it to attempt
+     * *count* rather than *elapsed time* meant the bucket count (and therefore every bucket's
+     * boundaries) changed on essentially every single recorded sample, since retained count
+     * fluctuates with pacing and failure-retry bursts even when almost no real time has passed.
+     * A bucket already drawn on screen would silently get recomputed from a different slice of
+     * samples a moment later — visible on-device as the newest end of the line "bouncing" and
+     * already-plotted dips readjusting with each new sample. Elapsed time only moves forward
+     * (and, once the window is genuinely full, stops changing this at all — see [spanMs]), so
+     * boundaries here are stable between any two samples taken close together, exactly the cases
+     * that used to reshuffle.
+     */
+    private fun bucketCount(maxBuckets: Int): Int {
+        val coveredFraction = (spanMs.toFloat() / windowMs).coerceIn(0f, 1f)
+        return (coveredFraction * maxBuckets).toInt().coerceIn(1, maxBuckets)
     }
 
     private fun appended(sample: ProbeSample): ProbeHistory {
@@ -344,9 +364,6 @@ data class ProbeHistory(
         /** Upper bound on [successSparkline]'s bucket count — enough resolution for a card-sized
          * sparkline without plotting points finer than the eye can separate. */
         const val DEFAULT_MAX_BUCKETS: Int = 48
-
-        /** Minimum attempts behind each plotted success-rate point (see [successSparkline]). */
-        const val MIN_SAMPLES_PER_BUCKET: Int = 4
 
         /** Where a latency point sits when there is no range to scale it against. */
         const val FLAT_LINE_Y: Float = 0.5f
