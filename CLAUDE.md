@@ -2,6 +2,13 @@
 
 This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
 
+## Keeping this file current
+
+This file is the primary context for any agent working in this repo — keep
+it accurate as the project evolves. Update it in the same commit as the
+work it documents (design-decision changes belong in
+`notes/dev/uplink-status-indicator-spec.md` instead — see below).
+
 ## Project state
 
 `UplinkStatus` is an Android app (status-bar uplink health indicator)
@@ -55,6 +62,11 @@ until both halves are shown.
 - Branch names must describe the work (`fix/network-scope-multi-network`,
   `feat/scanner-preview`) — no random characters, UUIDs, or generated
   suffixes for uniqueness; if a name is taken, pick a more specific one.
+  If a branch name is pre-assigned by tooling (a hosted agent session, a
+  CI runner) rather than chosen by you, verify it against this convention
+  before the first push — a random-suffixed name like
+  `claude/project-onboarding-setup-qs2zwk` isn't exempt just because you
+  didn't pick it. Rename locally (`git branch -m <name>`) first.
 - One concern per branch and PR. If work naturally splits into independent
   problems, split the branches too rather than bundling unrelated changes.
 - `feat:` is for genuinely new user-facing capabilities only. Bug fixes
@@ -99,7 +111,12 @@ Escalate only when something would change scope, defer a requirement,
 or contradict what the user has described as the goal. This is about
 routine implementation judgment calls, not a license to skip the
 destructive-action confirmations or multiple-choice-question restrictions
-described elsewhere in this session's standing instructions.
+described elsewhere in this session's standing instructions — including
+Claude Code's own `AskUserQuestion` tool specifically: never use it here,
+including for the escalation cases above. Ask in plain text instead.
+Some interfaces render binned/multiple-choice questions poorly, and
+forcing a real question into fixed options loses nuance an open question
+would surface.
 
 ## Commands
 
