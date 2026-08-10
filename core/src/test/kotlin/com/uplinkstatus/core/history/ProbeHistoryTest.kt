@@ -315,7 +315,7 @@ class ProbeHistoryTest {
             history = if (ok) history.recordSuccess(at, latencyMs = 10) else history.recordFailure(at)
         }
 
-        val points = history.successSparkline()
+        val points = history.successSparkline(maxBuckets = 2)
 
         assertEquals(2, points.size)
         assertEquals(0.75f, points[0].y!!, 0.001f)
@@ -329,21 +329,62 @@ class ProbeHistoryTest {
 
         // All-success buckets sit at the top of the scale, and would still sit at the top if
         // the rate were, say, uniformly 50% -- an autoscaled percentage graph would be
-        // unreadable, since "always 50%" and "always 100%" would look identical.
-        assertTrue(history.successSparkline().all { it.y == 1f })
+        // unreadable, since "always 50%" and "always 100%" would look identical. maxBuckets is
+        // capped at 2 so every bucket actually has attempts behind it -- at the default
+        // resolution the window is small enough that most of 48 buckets would be empty gaps,
+        // which is a different (already covered) rule, not what this test is about.
+        assertTrue(history.successSparkline(maxBuckets = 2).all { it.y == 1f })
     }
 
     @Test
-    fun `resolution grows with the data instead of dotting out one sample per bucket`() {
+    fun `resolution grows with elapsed time instead of dotting out one sample per bucket`() {
         var history = ProbeHistory(windowMs = window)
         repeat(3) { index -> history = history.recordSuccess(index * 1_000L, latencyMs = 10) }
-        // Fewer attempts than one bucket's worth: a single honest point, not three.
+        // Barely any of the window has elapsed yet: a single honest point, not three.
         assertEquals(1, history.successSparkline().size)
 
-        repeat(200) { index -> history = history.recordSuccess(10_000L + index * 100L, latencyMs = 10) }
+        // Advance to the window's own span -- fully covered now, so resolution is maxed out.
+        history = history.recordSuccess(window, latencyMs = 10)
         val points = history.successSparkline(maxBuckets = 10)
-        // Plenty of samples now, but never more buckets than asked for.
         assertEquals(10, points.size)
+    }
+
+    /**
+     * Regression test for the on-device report that the ping-success graph stayed a single dot
+     * for several seconds, then had its left edge "bounce" and already-plotted dips readjust
+     * with every new sample. Root cause: bucket count used to be `samples.size / 4`, so a burst
+     * of attempts arriving without much real time passing (pacing changes, retry bursts, or
+     * simply more probes landing) changed the bucket count -- and therefore every bucket's
+     * boundaries -- on almost every recorded sample. Bucket count must depend only on how much
+     * of the window elapsed time has actually covered, so two histories covering the same span
+     * produce the same resolution regardless of how many attempts happened to land in it.
+     */
+    @Test
+    fun `bucket count depends on elapsed time, not on how many attempts arrived in it`() {
+        val sparse = ProbeHistory(windowMs = 60_000)
+            .recordSuccess(0, latencyMs = 10)
+            .recordSuccess(29_850, latencyMs = 10)
+
+        var burst = ProbeHistory(windowMs = 60_000)
+        // The same ~30-second span as `sparse`, but a burst of 200 attempts packed into it --
+        // exactly the shape of a rapid failure-retry burst landing mid-window.
+        repeat(200) { index -> burst = burst.recordSuccess(index * 150L, latencyMs = 10) }
+
+        assertEquals(sparse.successSparkline().size, burst.successSparkline().size)
+    }
+
+    @Test
+    fun `an additional attempt within an already-covered span does not change the bucket count`() {
+        var history = ProbeHistory(windowMs = 60_000)
+        repeat(30) { index -> history = history.recordSuccess(index * 1_000L, latencyMs = 10) }
+        val before = history.successSparkline(maxBuckets = 10).size
+
+        // A burst of extra attempts landing inside the same already-covered span, not extending
+        // it -- must not reshuffle the resolution that was already settled on.
+        repeat(500) { index -> history = history.recordSuccess(29_000L + index, latencyMs = 10) }
+        val after = history.successSparkline(maxBuckets = 10).size
+
+        assertEquals(before, after)
     }
 
     @Test
@@ -358,7 +399,10 @@ class ProbeHistoryTest {
 
         val points = history.successSparkline(maxBuckets = 8)
 
-        assertEquals(2, points.size)
+        // The window is exactly fully covered (span == windowMs), so resolution is maxed out
+        // at all 8 requested buckets -- the two four-sample clusters land in the first and last
+        // of them, with every bucket in between left empty.
+        assertEquals(8, points.size)
         assertEquals(1f, points.first().y!!, 0.001f)
         assertEquals(0f, points.last().y!!, 0.001f)
 
@@ -401,17 +445,33 @@ class ProbeHistoryTest {
     }
 
     @Test
-    fun `a short session's success buckets leave everything earlier than the real data as gaps`() {
+    fun `a short session collapses to one honest point instead of fabricating empty buckets`() {
         var history = ProbeHistory(windowMs = 60_000)
         repeat(8) { index -> history = history.recordSuccess(index * 100L, latencyMs = 10) }
 
         val points = history.successSparkline(maxBuckets = 6)
 
-        // 700ms of real data inside a 60-second window: bucketed toward the right/newest edge,
-        // with every earlier bucket left as a gap rather than the data being spread out to
-        // cover buckets that represent time nothing has actually reached yet.
-        assertTrue(points.dropLast(1).all { it.y == null })
-        assertNotNull(points.last().y)
+        // 700ms of real data inside a 60-second window: barely any of the window has actually
+        // elapsed, so resolution stays at a single honest point rather than being split into
+        // six buckets where five would just be gaps for time that hasn't happened yet.
+        assertEquals(1, points.size)
+        assertNotNull(points.single().y)
+    }
+
+    @Test
+    fun `a real gap after an early sample still shows as an empty bucket once enough time has passed`() {
+        // Unlike the short-session case above, there is a genuine elapsed gap here: one sample
+        // right at session start, then nothing until a cluster arrives much later, still within
+        // the window. Enough real time has passed for multiple buckets, and the empty stretch
+        // between the two is a real absence of measurement, not fabricated resolution.
+        var history = ProbeHistory(windowMs = 60_000).recordSuccess(0, latencyMs = 10)
+        repeat(8) { index -> history = history.recordSuccess(40_000L + index * 100L, latencyMs = 10) }
+
+        val points = history.successSparkline(maxBuckets = 6)
+
+        assertTrue(points.size > 1)
+        assertTrue(points.any { it.y == null })
+        assertTrue(points.filter { it.y != null }.all { it.y == 1f })
     }
 
     // --- Markers: master-toggle transitions -----------------------------------------------
