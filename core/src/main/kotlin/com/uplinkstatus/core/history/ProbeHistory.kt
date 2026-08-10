@@ -135,8 +135,8 @@ data class ProbeHistory(
     }
 
     /** Records a real probe attempt that failed. Called for *every* failed attempt, including
-     * the back-to-back immediate retries of a sustained outage — they are exactly the attempts
-     * the success percentage exists to reflect. */
+     * every retry of a sustained outage — they are exactly the attempts the success percentage
+     * exists to reflect. */
     fun recordFailure(timestampMs: Long): ProbeHistory = appended(ProbeSample(timestampMs, latencyMs = null))
 
     /** Records a master-toggle transition (the whole app switched off, or back on) — see
@@ -333,15 +333,18 @@ data class ProbeHistory(
          * Hard cap on retained samples, independent of [windowMs].
          *
          * Sized for the *fastest realistic production rate*, not the default steady-state one.
-         * A successful probe is naturally paced by the step-delay setting, but a **failed**
-         * probe retries immediately with no back-off at all, per spec -- and a DNS-resolution
-         * failure specifically (the exact condition a device sees for a moment while
-         * reconnecting after a total outage, before its resolver is reachable again) can return
-         * in low single-digit milliseconds, nowhere near the full connect timeout a generic
-         * failure waits out. A burst of those during precisely that reconnect window can produce
-         * thousands of samples in a couple of real seconds -- confirmed on-device: `attemptCount`
-         * was observed pinned at the *previous* cap (4096) after well under ten minutes of mixed
-         * normal use and reconnect testing, far faster than steady-state pacing alone explains.
+         * A successful probe is naturally paced by the step-delay setting, and a **failed**
+         * probe is now floored at a small fixed retry delay too (250ms, added after this cap
+         * was first sized -- see `ProbeCycleRunner.FAILURE_RETRY_DELAY_MS`'s doc, specifically
+         * to reduce this same burst's rate and battery cost) -- but a DNS-resolution failure
+         * specifically (the exact condition a device sees for a moment while reconnecting
+         * after a total outage, before its resolver is reachable again) can still return in
+         * low single-digit milliseconds, faster than the floor governs the *steady* case. A
+         * burst of those during precisely that reconnect window can still produce far more
+         * samples per second than ordinary pacing -- confirmed on-device, before the floor
+         * existed: `attemptCount` was observed pinned at the *previous* cap (4096) after well
+         * under ten minutes of mixed normal use and reconnect testing, far faster than
+         * steady-state pacing alone explains.
          * Against a cap sized only for steady state, a burst like that doesn't just shorten the
          * graph (the honest, intended behavior when the cap bites during ordinary free-wheeling
          * use) -- it can evict an entire window's worth of prior good data in a couple of

@@ -165,7 +165,9 @@ class ProbeCycleRunnerTest {
         val listener = RecordingCycleListener()
 
         runner(prober, scheduler, listener).start() // real probe 1 (success)
-        scheduler.fireNext() // real probe 2: two failures, then a success, all in this one step
+        scheduler.fireNext() // step delay -> real probe 2, attempt 1: failure
+        scheduler.fireNext() // retry delay -> real probe 2, attempt 2: failure
+        scheduler.fireNext() // retry delay -> real probe 2, attempt 3: success
         scheduler.fireNext() // step delay after that success -> should be the automatic ack
 
         assertEquals(
@@ -217,17 +219,26 @@ class ProbeCycleRunnerTest {
     }
 
     @Test
-    fun `a failure retry is never paced by the step delay, even with a large configured delay`() {
+    fun `a failure retry is paced by the fixed retry floor, never by the configured step delay`() {
         val prober = FakeProber(ProbeResult.Failure, ProbeResult.Failure, ProbeResult.Success(1))
         val scheduler = FakeTracerScheduler()
         val listener = RecordingCycleListener()
 
         runner(prober, scheduler, listener, stepDelayMs = 1000L).start()
+        scheduler.fireNext() // first failure's retry delay elapses -> second attempt
+        scheduler.fireNext() // second failure's retry delay elapses -> third attempt (success)
 
         assertEquals(3, prober.callCount)
-        // The only scheduled delay is the one after the eventual success -- nothing was
-        // scheduled for either failed attempt, regardless of how large stepDelayMs is.
-        assertEquals(listOf(1000L), scheduler.history)
+        // Both retries used the fixed floor, not the configured 1000ms step delay -- only the
+        // final entry, after the eventual success, is the step delay.
+        assertEquals(
+            listOf(
+                ProbeCycleRunner.FAILURE_RETRY_DELAY_MS,
+                ProbeCycleRunner.FAILURE_RETRY_DELAY_MS,
+                1000L,
+            ),
+            scheduler.history,
+        )
     }
 
     // --- Live-updatable target and pacing (a cycle already running, not a fresh one) ------
@@ -285,15 +296,14 @@ class ProbeCycleRunnerTest {
 
     @Test
     fun `probe failure fires no ack and freezes the tracer at its current position`() {
-        // Bounded (fails twice, then succeeds) so start() can't spin forever — the
-        // runner retries immediately with no back-off, so an all-failing fake would
-        // never return control to the test.
         val prober = FakeProber(ProbeResult.Failure, ProbeResult.Failure, ProbeResult.Success(5))
         val scheduler = FakeTracerScheduler()
         val listener = RecordingCycleListener()
         val tracer = AckTracer(BarPosition.BAR_3)
 
-        runner(prober, scheduler, listener, tracer).start()
+        runner(prober, scheduler, listener, tracer).start() // attempt 1: failure
+        scheduler.fireNext() // retry delay -> attempt 2: failure
+        scheduler.fireNext() // retry delay -> attempt 3: success
 
         val frozenEvents = listener.events.filterIsInstance<CycleEvent.Frozen>()
         assertEquals(2, frozenEvents.size)
@@ -308,7 +318,9 @@ class ProbeCycleRunnerTest {
         val listener = RecordingCycleListener()
         val tracer = AckTracer(BarPosition.BAR_3)
 
-        runner(prober, scheduler, listener, tracer).start()
+        runner(prober, scheduler, listener, tracer).start() // attempt 1: failure
+        scheduler.fireNext() // retry delay -> attempt 2: failure
+        scheduler.fireNext() // retry delay -> attempt 3: success
 
         val advanced = listener.events.filterIsInstance<CycleEvent.Advanced>()
         assertEquals(1, advanced.size)
@@ -326,7 +338,9 @@ class ProbeCycleRunnerTest {
         val scheduler = FakeTracerScheduler()
         val listener = RecordingCycleListener()
 
-        runner(prober, scheduler, listener).start()
+        runner(prober, scheduler, listener).start() // attempt 1: dns failure
+        scheduler.fireNext() // retry delay -> attempt 2: generic failure
+        scheduler.fireNext() // retry delay -> attempt 3: success
 
         val frozenEvents = listener.events.filterIsInstance<CycleEvent.Frozen>()
         assertEquals(2, frozenEvents.size)
@@ -334,10 +348,14 @@ class ProbeCycleRunnerTest {
         assertEquals(FreezeReason.PROBE_FAILURE, frozenEvents[1].reason)
     }
 
-    // --- Immediate no-back-off retry -------------------------------------------------
+    // --- Failure-retry pacing (the reconnect-burst battery fix) -----------------------
 
     @Test
-    fun `failed probes are retried immediately with no scheduled delay between attempts`() {
+    fun `failed probes are paced by the fixed retry floor, not retried back-to-back`() {
+        // Regression test for the reconnect-burst battery drain: a run of near-instant
+        // failures (e.g. DNS resolution failing for a moment while reconnecting) must not
+        // spin the retry loop as fast as the CPU allows -- each retry has to wait on a
+        // scheduled delay, not happen inline in the same call.
         val prober = FakeProber(
             ProbeResult.Failure,
             ProbeResult.Failure,
@@ -348,15 +366,30 @@ class ProbeCycleRunnerTest {
         val listener = RecordingCycleListener()
 
         runner(prober, scheduler, listener).start()
+        // Only the first attempt has happened -- the next one is waiting on a scheduled
+        // retry, not looping inline the way it used to.
+        assertEquals(1, prober.callCount)
+        assertEquals(listOf(ProbeCycleRunner.FAILURE_RETRY_DELAY_MS), scheduler.history)
 
+        scheduler.fireNext()
+        scheduler.fireNext()
+        assertEquals(3, prober.callCount)
+
+        scheduler.fireNext() // third retry delay elapses -> the eventual success
         assertEquals(4, prober.callCount)
-        // The only scheduled delay is the 500ms automatic-ack after the eventual success —
-        // nothing was scheduled for any of the three failed attempts.
-        assertEquals(listOf(500L), scheduler.history)
+        assertEquals(
+            listOf(
+                ProbeCycleRunner.FAILURE_RETRY_DELAY_MS,
+                ProbeCycleRunner.FAILURE_RETRY_DELAY_MS,
+                ProbeCycleRunner.FAILURE_RETRY_DELAY_MS,
+                500L,
+            ),
+            scheduler.history,
+        )
     }
 
     @Test
-    fun `dns failures also retry immediately with no back-off`() {
+    fun `dns failures are paced by the fixed retry floor too, not just generic failures`() {
         val prober = FakeProber(
             ProbeResult.DnsResolutionFailure,
             ProbeResult.DnsResolutionFailure,
@@ -366,9 +399,14 @@ class ProbeCycleRunnerTest {
         val listener = RecordingCycleListener()
 
         runner(prober, scheduler, listener).start()
+        scheduler.fireNext()
+        scheduler.fireNext()
 
         assertEquals(3, prober.callCount)
-        assertEquals(listOf(500L), scheduler.history)
+        assertEquals(
+            listOf(ProbeCycleRunner.FAILURE_RETRY_DELAY_MS, ProbeCycleRunner.FAILURE_RETRY_DELAY_MS, 500L),
+            scheduler.history,
+        )
     }
 
     // --- stop() / lifecycle -----------------------------------------------------------
@@ -390,13 +428,14 @@ class ProbeCycleRunnerTest {
     }
 
     @Test
-    fun `stop from another thread ends an all-failing retry loop without emitting anything further`() {
-        // Regression test for the outage-starves-stop() defect: with a prober that never
-        // succeeds, runProbeAttempts() retries back to back with no gap (per spec), so the
-        // thread running start() is unavailable to run any work handed to it -- stop() has to
-        // work from a *different* thread, mid-probe, or the cycle can never be ended for as
-        // long as the outage lasts. This models exactly that: the probe blocks until the test
-        // releases it, and stop() is called from the test thread while it's blocked.
+    fun `stop from another thread discards the result of a probe still in flight`() {
+        // Regression test for the outage-starves-stop() defect: a probe attempt that is
+        // itself still blocking inside Prober.probe (up to its own timeout) has no
+        // pendingTask for stop() to cancel -- per the class doc's threading contract, that's
+        // the one case stop() still has to work from a *different* thread, mid-probe, rather
+        // than relying on cancelling a scheduled retry. This models exactly that: the probe
+        // blocks until the test releases it, and stop() is called from the test thread while
+        // it's blocked.
         val probeEntered = CountDownLatch(1)
         val releaseProbe = CountDownLatch(1)
         val probeCount = AtomicInteger()

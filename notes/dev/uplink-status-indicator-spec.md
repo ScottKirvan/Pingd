@@ -15,7 +15,10 @@ a separate animation timer.
   cellular only, or whitelist specific SSIDs — see [User
   Preferences](#user-preferences).
 - Discrete icon-frame swaps only — no smooth/animated rendering.
-- No adaptive back-off on ping retry.
+- No *adaptive* back-off on ping retry — retries are floored at a small
+  fixed delay for battery reasons (see [Core
+  Mechanism](#core-mechanism--probe-driven-tracer)), but that floor
+  never grows with a longer outage.
 
 ## Implementation Baseline
 Locked decisions — not open questions:
@@ -136,14 +139,24 @@ vs. the automatic step.
 
 **On probe timeout/failure:** no ack fires. The tracer freezes on its
 current bar — it does not advance and does not show a distinct "lost"
-frame. The loop retries immediately with a new probe (same 1000ms
-timeout, no back-off, and no step delay before the retry — the step
-delay paces *completed* steps, not failure retries) until one succeeds,
-at which point acks resume and the tracer continues from wherever it
-froze. A failure does not consume a slot in the ping/ping/fake
-sequence — the sequence only advances on a real ack, so an outage
-mid-sequence resumes at the same point once connectivity returns,
-rather than restarting the pattern.
+frame. A retry is scheduled after a fixed **250ms floor delay** (same
+1000ms timeout on the retry itself) — not the step delay above, and not
+zero either, despite "no back-off": a failure that takes close to the
+full 1000ms timeout to arrive (an ordinary "target isn't answering"
+outage) barely notices a 250ms floor, but a DNS-resolution failure can
+return in low single-digit milliseconds — exactly the condition seen
+for a moment while reconnecting after a total outage, before the
+resolver is reachable again. Without a floor, a burst of those spins
+the retry loop as fast as the CPU allows for as long as the burst
+lasts, a real, measured on-device battery cost. The floor is fixed, not
+growing with a longer outage — still not "adaptive" back-off, which
+remains out of scope (see [Explicitly Out of
+Scope](#explicitly-out-of-scope-v1)). Retries continue, floored this
+way, until one succeeds, at which point acks resume and the tracer
+continues from wherever it froze. A failure does not consume a slot in
+the ping/ping/fake sequence — the sequence only advances on a real ack,
+so an outage mid-sequence resumes at the same point once connectivity
+returns, rather than restarting the pattern.
 
 ## Bar Position Persistence
 Position persists only for the lifetime of the running process. An app
@@ -316,22 +329,27 @@ Sample retention is additionally capped in absolute count, not just by
 time — the window is a duration, and free-wheeling pacing (a 0ms step
 delay) produces probes as fast as the network answers, which a
 time-bounded-only buffer would let grow with nothing but wall-clock time
-to stop it. The cap is sized for the fastest *realistic* production
-rate, not steady-state pacing: a failed probe retries immediately with
-no back-off at all, and a DNS-resolution failure specifically — the
-exact condition seen for a moment while reconnecting after a total
-outage, before the resolver is reachable again — can return in low
-single-digit milliseconds. A burst of those right at a reconnect can
-produce thousands of samples in a couple of real seconds; against a cap
-sized only for steady state, that burst alone could evict an entire
-prior window's worth of good data in moments, which reads exactly like
-the history being cleared even though nothing ever reset it (confirmed
-on-device as the cause of an early "the graph resets on reconnect"
-report). The cap has headroom well beyond what the widest window at any
-pacing reaches in ordinary use, so a burst like that doesn't touch older
-data; when it does still bite (a burst sustained far longer than a
-reconnect blip), the oldest samples go first and the caption reports
-the shorter span actually covered, so the effect is a shorter graph
+to stop it. The cap is sized generously rather than tightly to steady-state
+pacing, because a reconnect can still burst faster than ordinary use: a
+failed probe retries after only a fixed 250ms floor (see [Core
+Mechanism](#core-mechanism--probe-driven-tracer) — added after this cap
+was first sized, specifically to reduce this burst's rate and battery
+cost), and a DNS-resolution failure specifically — the exact condition
+seen for a moment while reconnecting after a total outage, before the
+resolver is reachable again — can still return in low single-digit
+milliseconds, faster than the floor itself governs the *steady* case. A
+burst of those right at a reconnect can still produce far more samples
+per second than ordinary pacing; against a cap sized only for steady
+state, that burst alone could evict an entire prior window's worth of
+good data in moments, which reads exactly like the history being
+cleared even though nothing ever reset it (confirmed on-device as the
+cause of an early "the graph resets on reconnect" report, before the
+250ms floor existed). The cap has headroom well beyond what the widest
+window at any pacing reaches in ordinary use, so a burst like that
+doesn't touch older data; when it does still bite (a burst sustained
+far longer than a reconnect blip), the oldest samples go first and the
+caption reports the shorter span actually covered, so the effect is a
+shorter graph
 rather than a mislabeled one.
 
 ### Recording continues through `DISABLED`
@@ -440,14 +458,15 @@ own reset action right along with them.
   justification string in the manifest and in the Play Console
   data-safety form, but it's the correct classification here.
 - `Handler`/`postDelayed` loop on a dedicated background `HandlerThread`
-  — the probe itself is a blocking call, up to 1000ms, retried
-  immediately with no back-off on failure per this doc, and the cycle
-  runner invokes it synchronously from inside the scheduler's own
-  callback; binding that to the main-thread looper would block the UI
-  thread for every probe attempt and risk an ANR during a sustained
-  outage's back-to-back retries. No wake lock — it's acceptable for
-  Doze to throttle timers while the screen is off, since the icon only
-  matters when the user can see it.
+  — the probe itself is a blocking call, up to 1000ms, and a failure's
+  retry is scheduled through the same `Handler` after the 250ms floor
+  delay (see Core Mechanism) rather than looping inline, so the worker
+  thread is never pinned in a tight loop for the duration of an outage;
+  binding any of this to the main-thread looper would still block the
+  UI thread for the duration of a single blocking probe attempt and
+  risk an ANR, hence the dedicated thread. No wake lock — it's
+  acceptable for Doze to throttle timers while the screen is off, since
+  the icon only matters when the user can see it.
 - Notification: `setOngoing(true)`. Channel importance is
   `IMPORTANCE_DEFAULT`, not `IMPORTANCE_LOW` — on-device testing showed
   `IMPORTANCE_LOW` notifications don't get a status-bar tray icon at
@@ -493,8 +512,9 @@ own reset action right along with them.
   change; a refresh replaces the whole picture rather than patching part
   of it, and a platform that refuses the query leaves what is already
   known untouched.
-- Each probe uses a fixed 1000ms timeout. On failure, retry immediately
-  with the same timeout — no adaptive back-off.
+- Each probe uses a fixed 1000ms timeout. On failure, retry with the
+  same timeout after a fixed 250ms floor delay — not zero, not
+  adaptive/growing (see Core Mechanism for why the floor exists).
 - Only call `notify()` on an ack (tracer advance) or a state transition
   (enabled/disabled/hidden) — not on every internal timer tick.
 

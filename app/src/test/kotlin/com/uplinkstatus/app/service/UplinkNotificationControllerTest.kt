@@ -154,9 +154,10 @@ class UplinkNotificationControllerTest {
     }
 
     @Test
-    fun `repeated frozen events with the same reason during immediate no-back-off retries post only once`() {
+    fun `repeated frozen events with the same reason during a sustained outage's retries post only once`() {
         // Per spec: "Only call notify() on an ack (tracer advance) or a state transition" --
-        // a sustained outage retries immediately with no back-off, so ProbeCycleRunner emits
+        // a sustained outage keeps retrying (each attempt paced by a small fixed floor delay,
+        // not zero -- see ProbeCycleRunner.FAILURE_RETRY_DELAY_MS), so ProbeCycleRunner emits
         // one Frozen per attempt. Repeats that don't change *why* it's frozen must not each
         // trigger a fresh notify() call -- that would be exactly the "bare timer tick" spam
         // the spec rules out, even though the visible end state (same icon/text) would look

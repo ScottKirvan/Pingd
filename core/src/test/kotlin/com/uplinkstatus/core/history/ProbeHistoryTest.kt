@@ -44,8 +44,9 @@ class ProbeHistoryTest {
 
     @Test
     fun `a sustained outage's repeated failures each count, driving the percentage down`() {
-        // ProbeCycleRunner retries immediately with no back-off, emitting one Frozen per
-        // attempt -- every one of those is a real probe that really failed.
+        // ProbeCycleRunner keeps retrying (each attempt paced by a small fixed floor delay,
+        // not zero), emitting one Frozen per attempt -- every one of those is a real probe
+        // that really failed.
         var history = ProbeHistory(windowMs = window).recordSuccess(0, latencyMs = 20)
         repeat(9) { attempt -> history = history.recordFailure(1_000L + attempt) }
 
@@ -177,14 +178,16 @@ class ProbeHistoryTest {
 
     /**
      * Regression test for the on-device "the graph resets itself right when reconnecting"
-     * report. A failed probe retries immediately with no back-off at all, per spec, and a
+     * report (predating `ProbeCycleRunner.FAILURE_RETRY_DELAY_MS`'s 250ms retry floor, which
+     * a failed probe is now paced by instead of retrying with no delay at all). A
      * DNS-resolution failure specifically -- the exact condition seen for a moment while
-     * reconnecting after a total outage, before the resolver is reachable again -- can return
-     * in low single-digit milliseconds. A burst of those can rack up thousands of samples in a
-     * couple of real seconds; against a cap sized only for steady-state pacing, that burst
-     * alone could evict an entire prior window's worth of good data, which reads exactly like
-     * the history being cleared even though nothing ever called [ProbeHistory.cleared].
-     * [MAX_SAMPLES] must have enough headroom that a burst like this doesn't touch older data.
+     * reconnecting after a total outage, before the resolver is reachable again -- can still
+     * return in low single-digit milliseconds, faster than the floor governs the steady case.
+     * A burst of those can still rack up far more samples per second than ordinary pacing;
+     * against a cap sized only for steady-state pacing, that burst alone could evict an entire
+     * prior window's worth of good data, which reads exactly like the history being cleared
+     * even though nothing ever called [ProbeHistory.cleared]. [MAX_SAMPLES] must have enough
+     * headroom that a burst like this doesn't touch older data.
      */
     @Test
     fun `a rapid failure burst right after reconnecting does not evict prior good data`() {

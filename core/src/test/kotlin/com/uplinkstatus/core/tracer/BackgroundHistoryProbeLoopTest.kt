@@ -46,8 +46,9 @@ class BackgroundHistoryProbeLoopTest {
 
         loop(prober, scheduler, retryDelayMs = 300L).start()
 
-        // Unlike ProbeCycleRunner, a failure schedules the next attempt too -- there is no
-        // "retry immediately, no back-off" branch in this class at all.
+        // Unlike ProbeCycleRunner (which paces a success by the user's step-delay preference
+        // but a failure by its own separate fixed floor), this class paces every attempt --
+        // success or failure alike -- by the same single retryDelayMs.
         assertEquals(listOf(300L), scheduler.history)
         assertEquals(1, prober.callCount)
 
