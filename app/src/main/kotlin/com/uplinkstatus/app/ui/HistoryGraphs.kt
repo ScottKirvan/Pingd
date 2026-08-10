@@ -17,6 +17,7 @@ import androidx.compose.runtime.getValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.Path
 import androidx.compose.ui.graphics.StrokeCap
@@ -27,6 +28,7 @@ import androidx.compose.ui.unit.dp
 import com.uplinkstatus.app.state.UplinkProbeHistory
 import com.uplinkstatus.core.history.ProbeHistory
 import com.uplinkstatus.core.history.SparklinePoint
+import com.uplinkstatus.core.history.sparklineGapFractions
 import kotlin.math.roundToInt
 
 const val TAG_HISTORY_GRAPHS = "settings_history_graphs"
@@ -44,6 +46,11 @@ private const val NO_VALUE = "—"
 private val SPARKLINE_HEIGHT = 48.dp
 private val SPARKLINE_STROKE = 2.dp
 private val MARKER_STROKE = 1.dp
+
+/** Opacity of the shaded "no data here" region drawn behind a sparkline gap -- subtle enough
+ * not to compete with the data line itself, visible enough to read as deliberate shading
+ * rather than a rendering artifact. */
+private const val GAP_SHADE_ALPHA = 0.15f
 
 /**
  * The settings screen's two live history graphs — ping success percentage and latency trend —
@@ -85,6 +92,7 @@ fun HistoryGraphs(modifier: Modifier = Modifier) {
             points = history.successSparkline(),
             markers = markers,
             lineColor = MaterialTheme.colorScheme.primary,
+            gapColor = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = GAP_SHADE_ALPHA),
             cardTag = TAG_PING_SUCCESS_CARD,
             valueTag = TAG_PING_SUCCESS_VALUE,
         )
@@ -95,6 +103,7 @@ fun HistoryGraphs(modifier: Modifier = Modifier) {
             points = history.latencySparkline(),
             markers = markers,
             lineColor = MaterialTheme.colorScheme.tertiary,
+            gapColor = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = GAP_SHADE_ALPHA),
             cardTag = TAG_LATENCY_CARD,
             valueTag = TAG_LATENCY_VALUE,
         )
@@ -124,6 +133,7 @@ private fun HistoryGraphCard(
     points: List<SparklinePoint>,
     markers: List<Float>,
     lineColor: Color,
+    gapColor: Color,
     cardTag: String,
     valueTag: String,
 ) {
@@ -156,6 +166,7 @@ private fun HistoryGraphCard(
                 markers = markers,
                 color = lineColor,
                 markerColor = MaterialTheme.colorScheme.outline,
+                gapColor = gapColor,
                 // Fills whatever width the text column (above) didn't claim -- the only
                 // weighted child in this Row, so it gets 100% of the remainder rather than
                 // splitting it.
@@ -180,6 +191,12 @@ private fun HistoryGraphCard(
  * weren't measuring here" mark, never a gap in [points] itself, since a marker is not a probe
  * attempt and must not be mistaken for one.
  *
+ * Every gap also gets a [gapColor]-shaded rectangle behind the break, from
+ * [sparklineGapFractions] — a plain break in the line, with nothing else marking it, reads as a
+ * rendering glitch rather than "nothing was measured here"; the shading is what makes the
+ * absence read as deliberate. Drawn before the markers and the line itself so both stay visible
+ * on top of it.
+ *
  * Purely arithmetic: every value arrives already reduced to the unit square by [ProbeHistory],
  * so there is no scaling or aggregation decision left here to disagree with the numbers above
  * it.
@@ -190,6 +207,7 @@ private fun Sparkline(
     markers: List<Float>,
     color: Color,
     markerColor: Color,
+    gapColor: Color,
     modifier: Modifier = Modifier,
 ) {
     Canvas(modifier = modifier) {
@@ -200,7 +218,17 @@ private fun Sparkline(
         val inset = stroke / 2f
         val usableHeight = (size.height - stroke).coerceAtLeast(0f)
 
-        // Drawn first, so the data line above stays the visually dominant element.
+        // Drawn first (bottom-most), so a "no data here" region reads as background rather
+        // than as something drawn over the data.
+        sparklineGapFractions(points).forEach { gap ->
+            drawRect(
+                color = gapColor,
+                topLeft = Offset(gap.start * size.width, 0f),
+                size = Size(width = (gap.endInclusive - gap.start) * size.width, height = size.height),
+            )
+        }
+
+        // Drawn next, so the data line above stays the visually dominant element.
         markers.forEach { fraction ->
             val x = fraction * size.width
             drawLine(
