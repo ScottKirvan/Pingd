@@ -292,13 +292,13 @@ signal. This applies to both graphs — the success line's bucketed gaps
 latency line's per-sample ones.
 
 Both sparklines' time axis is anchored to the *configured window*, not
-stretched to fill from whatever span of samples happens to be retained
+stretched to fill from whatever span of samples happens to be displayed
 so far. The newest retained sample always sits at the right edge; a
 handful of recent samples early in a session (or just after a reset, or
-just after a long gap prunes old data) sit clustered near that edge with
+just after narrowing the window) sit clustered near that edge with
 real empty space to their left, and the line only spans the full width
 once the window is genuinely full — the same behavior a strip chart or
-oscilloscope trace has. Scaling to the retained span instead (an earlier
+oscilloscope trace has. Scaling to the displayed span instead (an earlier
 version of this behavior) stretched however little data existed to fill
 the whole card every time, which looked exactly like the graph had just
 reset even when nothing was actually cleared.
@@ -306,13 +306,34 @@ reset even when nothing was actually cleared.
 The window length is one setting shared by both graphs (and by the
 success-percentage calculation) — not two independently configurable
 windows for two views into the same underlying sample history. Settings
-screen: a slider, 1–30 minutes in whole-minute stops, default 7. It is
-also user-resettable: an explicit action clears the accumulated sample
-history immediately, independent of restarting the service. That action
-sits with the graphs rather than with the preferences, and is *not*
-gated on the master toggle the way the preference controls are —
-clearing what is displayed has to work exactly when the user wants a
-clean slate, including while the icon is switched off.
+screen: a slider, 1–30 minutes in whole-minute stops, default 7.
+
+**Retention is decoupled from the window: narrowing/widening the slider
+is non-destructive.** The window is a *display* filter only — the slice
+of retained samples, within the window's span of the newest one, that
+the two cards and both sparklines currently show — not a retention
+cutoff. Narrowing the slider to zoom in on recent data does not discard
+anything; widening it back afterward reveals the same older samples
+again, live, exactly as if they had never left. What actually bounds
+how much is retained is the absolute sample cap described below, plus
+the user's own explicit reset — a window-slider edit on its own is
+deliberately not something that throws data away. (A previous version
+of this behavior pruned to the window immediately on every recorded
+sample and on every window change, which made narrowing then widening
+the slider look like data loss, since it genuinely was — see issue #39,
+the fix this section now documents. A *future*, still separate change —
+issue #41 — is expected to make a network-scope preference change clear
+the whole history the way the manual reset button does today; that is
+not implemented yet, and a window-slider edit is explicitly not that
+trigger.)
+
+The history is also user-resettable independent of the window: an
+explicit action clears the accumulated sample history immediately,
+independent of restarting the service. That action sits with the graphs
+rather than with the preferences, and is *not* gated on the master
+toggle the way the preference controls are — clearing what is displayed
+has to work exactly when the user wants a clean slate, including while
+the icon is switched off.
 
 Absent an explicit reset, the sample history is session-only, matching
 bar position's own per-process lifetime — a fresh service start begins
@@ -336,13 +357,14 @@ the first probe the numbers are blank rather than zero: "nothing
 measured yet" and "every probe failed" are different states and only one
 of them is bad news.
 
-Sample retention is additionally capped in absolute count, not just by
-time — the window is a duration, and free-wheeling pacing (a 0ms step
-delay) produces probes as fast as the network answers, which a
-time-bounded-only buffer would let grow with nothing but wall-clock time
-to stop it. The cap is sized generously rather than tightly to steady-state
-pacing, because a reconnect can still burst faster than ordinary use: a
-failed probe retries after only a fixed 250ms floor (see [Core
+Sample retention is capped in absolute count — this is the *only* thing
+that bounds it, now that the window is a display filter rather than a
+retention cutoff (see above). Free-wheeling pacing (a 0ms step delay)
+produces probes as fast as the network answers, which an uncapped
+buffer would let grow without anything to stop it. The cap is sized
+generously rather than tightly to steady-state pacing, because a
+reconnect can still burst faster than ordinary use: a failed probe
+retries after only a fixed 250ms floor (see [Core
 Mechanism](#core-mechanism--probe-driven-tracer) — added after this cap
 was first sized, specifically to reduce this burst's rate and battery
 cost), and a DNS-resolution failure specifically — the exact condition

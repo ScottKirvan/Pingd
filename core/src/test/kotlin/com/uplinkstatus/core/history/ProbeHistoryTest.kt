@@ -95,17 +95,19 @@ class ProbeHistoryTest {
         assertEquals(22L, history.latestLatencyMs)
     }
 
-    // --- Windowing / pruning ------------------------------------------------------------
+    // --- Windowing / display filtering (issue #39: retention is decoupled from the window) ---
 
     @Test
-    fun `samples older than the window are dropped as newer ones arrive`() {
+    fun `samples older than the window stay in storage -- only the displayed count narrows`() {
         val history = ProbeHistory(windowMs = 10_000)
             .recordSuccess(0, latencyMs = 100)
             .recordSuccess(5_000, latencyMs = 50)
             .recordSuccess(12_000, latencyMs = 20)
 
         // t=0 is 12s behind the newest sample, past the 10s window; t=5000 is 7s behind, inside.
-        assertEquals(listOf(5_000L, 12_000L), history.samples.map { it.timestampMs })
+        // Both are still retained in storage -- the window only narrows what is *displayed*.
+        assertEquals(listOf(0L, 5_000L, 12_000L), history.samples.map { it.timestampMs })
+        assertEquals(2, history.attemptCount)
     }
 
     @Test
@@ -122,7 +124,7 @@ class ProbeHistoryTest {
     }
 
     @Test
-    fun `pruning drops failures too -- the percentage is over the window, not all time`() {
+    fun `old failures are excluded from the displayed percentage, but not discarded from storage`() {
         val history = ProbeHistory(windowMs = 10_000)
             .recordFailure(0)
             .recordFailure(1_000)
@@ -130,10 +132,11 @@ class ProbeHistoryTest {
 
         assertEquals(1, history.attemptCount)
         assertEquals(100f, history.successPercent!!, 0.001f)
+        assertEquals(3, history.samples.size)
     }
 
     @Test
-    fun `shortening the window prunes immediately, not at the next probe`() {
+    fun `shortening the window changes what is displayed immediately, not at the next probe`() {
         val history = ProbeHistory(windowMs = 60_000)
             .recordSuccess(0, latencyMs = 10)
             .recordSuccess(30_000, latencyMs = 20)
@@ -141,22 +144,42 @@ class ProbeHistoryTest {
 
         val narrowed = history.withWindowMs(25_000)
 
-        assertEquals(listOf(30_000L, 50_000L), narrowed.samples.map { it.timestampMs })
+        // Displayed immediately reflects the narrower window...
+        assertEquals(2, narrowed.attemptCount)
+        assertEquals(25L, narrowed.averageLatencyMs) // (20 + 30) / 2, excludes the t=0 sample.
         assertEquals(25_000L, narrowed.windowMs)
+        // ...but storage is untouched -- narrowing does not discard anything (issue #39).
+        assertEquals(listOf(0L, 30_000L, 50_000L), narrowed.samples.map { it.timestampMs })
     }
 
+    /**
+     * Regression test for issue #39: "narrowing the history window slider permanently discards
+     * data that widening it back can't recover." Narrowing to zoom in on recent data must not
+     * throw away what a subsequent widening should be able to show again.
+     */
     @Test
-    fun `widening the window keeps what is left but cannot resurrect pruned samples`() {
-        val history = ProbeHistory(windowMs = 10_000)
+    fun `narrowing then widening the window redisplays samples that were only hidden, not lost`() {
+        val history = ProbeHistory(windowMs = 60_000)
             .recordSuccess(0, latencyMs = 10)
             .recordSuccess(30_000, latencyMs = 20)
 
-        val widened = history.withWindowMs(60_000)
+        val narrowed = history.withWindowMs(10_000)
 
-        // The t=0 sample was already gone when it fell out of the 10s window -- widening
-        // afterward changes retention going forward, it does not un-drop history.
-        assertEquals(listOf(30_000L), widened.samples.map { it.timestampMs })
-        assertEquals(60_000L, widened.windowMs)
+        // Narrowed to 10s: the t=0 sample is 30s behind the newest, outside the window, so it
+        // drops out of what's *displayed*...
+        assertEquals(1, narrowed.attemptCount)
+        assertEquals(20L, narrowed.averageLatencyMs)
+        // ...but it must still be *retained* underneath -- this is the crux of the bug.
+        assertEquals(2, narrowed.samples.size)
+
+        val widened = narrowed.withWindowMs(60_000)
+
+        // Widening back reveals the older sample again: it was hidden, never actually thrown
+        // away. Before the fix, this would still show only 1 attempt / 20L average, because
+        // withWindowMs had already pruned the t=0 sample out of storage when narrowing.
+        assertEquals(2, widened.attemptCount)
+        assertEquals(15L, widened.averageLatencyMs)
+        assertEquals(listOf(0L, 30_000L), widened.samples.map { it.timestampMs })
     }
 
     @Test
@@ -599,16 +622,17 @@ class ProbeHistoryTest {
     }
 
     @Test
-    fun `markers are pruned by the same window as samples`() {
+    fun `markers stay in storage past the window -- only the displayed fractions exclude them`() {
         val history = ProbeHistory(windowMs = 10_000)
             .recordMarker(0)
             .recordSuccess(20_000, latencyMs = 10)
 
-        assertTrue(history.markers.isEmpty())
+        assertEquals(listOf(0L), history.markers)
+        assertTrue(history.markerFractions().isEmpty())
     }
 
     @Test
-    fun `narrowing the window prunes markers immediately too`() {
+    fun `narrowing the window excludes a marker from the displayed fractions, not from storage`() {
         val history = ProbeHistory(windowMs = 60_000)
             .recordSuccess(0, latencyMs = 10)
             .recordMarker(1_000)
@@ -616,7 +640,8 @@ class ProbeHistoryTest {
 
         val narrowed = history.withWindowMs(10_000)
 
-        assertTrue(narrowed.markers.isEmpty())
+        assertEquals(listOf(1_000L), narrowed.markers)
+        assertTrue(narrowed.markerFractions().isEmpty())
     }
 
     @Test
@@ -653,11 +678,11 @@ class ProbeHistoryTest {
     }
 
     @Test
-    fun `a marker positioned outside the window is defensively excluded from the fractions`() {
-        // In normal use, pruning already keeps every retained marker inside the window by the
-        // time this is called, so this constructs the state directly (bypassing recordMarker)
-        // to exercise the guard on its own -- the only realistic way it would otherwise trigger
-        // is a caller violating the "records arrive in order" contract.
+    fun `a marker positioned outside the window is excluded from the fractions`() {
+        // Since markers are no longer pruned by the window in storage (see the "narrowing"
+        // tests above), this is now the primary mechanism keeping an out-of-window marker off
+        // the axis, not just a defensive guard for an unreachable case. Constructed directly
+        // here (bypassing recordMarker) purely for a simple, explicit setup.
         val history = ProbeHistory(
             windowMs = 1_000,
             samples = listOf(ProbeSample(timestampMs = 0, latencyMs = 10)),
