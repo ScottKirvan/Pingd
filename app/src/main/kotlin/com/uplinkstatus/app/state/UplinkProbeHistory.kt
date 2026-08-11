@@ -68,8 +68,10 @@ object UplinkProbeHistory {
         state.update { it.recordMarker(timestampMs) }
     }
 
-    /** Applies the user's history-window preference, pruning anything it has already outlived
-     * so a shortened window takes effect immediately rather than at the next probe. */
+    /** Applies the user's history-window preference. This only changes what's *displayed* --
+     * per [ProbeHistory]'s own doc, retention is decoupled from the window, so narrowing it
+     * does not discard anything and widening it back afterward shows the same older samples
+     * again rather than having lost them. */
     fun setWindowMs(windowMs: Long) {
         state.update { if (it.windowMs == windowMs) it else it.withWindowMs(windowMs) }
     }

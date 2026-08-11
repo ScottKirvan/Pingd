@@ -82,27 +82,40 @@ fun sparklineGapFractions(points: List<SparklinePoint>): List<ClosedFloatingPoin
  * "mutation" here returns a new instance instead, which makes that publication safe without a
  * lock and makes every rule below testable as plain function output.
  *
+ * ### Retention is decoupled from the display window
+ * [windowMs] is *not* a retention cutoff -- it never decides what gets thrown away. Storage is
+ * bounded only by [MAX_SAMPLES] (see its own doc comment for why that cap has headroom for the
+ * full 30-minute window at worst-case pacing). [windowMs] is purely a *display* filter, applied
+ * at read time by every computed property and sparkline below: the slice of retained [samples]
+ * within [windowMs] of the newest one. Narrowing the window therefore only changes what's
+ * currently *shown* -- the rest stays retained underneath, so widening it back afterward
+ * reveals the same older data again rather than having genuinely lost it (see [withWindowMs]).
+ * The whole history is still discarded wholesale by an explicit action -- today only the user's
+ * manual reset ([cleared]) and the [MAX_SAMPLES] cap itself -- but a window-slider edit alone
+ * is deliberately not one of those actions any more.
+ *
  * ### The time axis is never wall-clock "now"
- * [windowMs] is a *maximum* retention span: recording a sample drops anything older than
- * [windowMs] before it. The percentage and the average are computed over whatever is actually
- * retained, whose span is at most [windowMs] and, early in a session, much less. Both
- * sparklines' `x` axis is different on purpose: it's scaled to the full configured [windowMs],
- * anchored to the newest retained sample, not stretched to fill from whatever is currently
- * retained -- see [windowFraction]'s own doc for why that distinction matters.
+ * The percentage and the average are computed over whatever the display filter above selects,
+ * whose span is at most [windowMs] and, early in a session, much less. Both sparklines' `x`
+ * axis is different on purpose: it's scaled to the full configured [windowMs], anchored to the
+ * newest retained sample, not stretched to fill from whatever is currently displayed -- see
+ * [windowFraction]'s own doc for why that distinction matters.
  *
  * This class therefore never reads a clock. That's what keeps it a pure, deterministic
  * function of the samples it was given, but it also has a real consequence worth stating: if
- * nothing records a sample for a while, nothing prunes, and the history stays as it was at the
- * last attempt rather than draining to empty. That is deliberate — it's the same freeze-in-place
- * honesty the tracer itself uses for a failed probe, it keeps the graphs readable across a
- * transition instead of blanking them, and the caller labels what is shown with the span it
- * actually covers rather than claiming the full window. The first sample after the gap prunes
- * everything the window has outlived, so it is self-correcting. In practice this only happens
- * while the whole app is switched off (the master toggle) — `UplinkStatusService` keeps a
- * throttled probe running even while the visible tracer is paused for being out of network
- * scope, specifically so an out-of-scope period doesn't go blind here — and [recordMarker] gives
- * the genuinely-off case its own visible marker rather than leaving it indistinguishable from an
- * ordinary gap in the data.
+ * nothing records a sample for a while, the display filter's anchor (the newest retained
+ * sample) doesn't move either, so the history stays as it was at the last attempt rather than
+ * draining to empty. That is deliberate — it's the same freeze-in-place honesty the tracer
+ * itself uses for a failed probe, it keeps the graphs readable across a transition instead of
+ * blanking them, and the caller labels what is shown with the span it actually covers rather
+ * than claiming the full window. Being computed at read time rather than pruned on write, this
+ * is self-correcting the moment a new sample arrives, with no special-casing needed for "the
+ * first sample after a gap." In practice extended gaps only happen while the whole app is
+ * switched off (the master toggle) — `UplinkStatusService` keeps a throttled probe running even
+ * while the visible tracer is paused for being out of network scope, specifically so an
+ * out-of-scope period doesn't go blind here — and [recordMarker] gives the genuinely-off case
+ * its own visible marker rather than leaving it indistinguishable from an ordinary gap in the
+ * data.
  *
  * ### Session lifetime
  * There is no save/restore path here, by design and for the same reason
@@ -117,10 +130,12 @@ data class ProbeHistory(
      * happened while retained -- see [recordMarker]. These are not probe attempts and never
      * affect [successPercent]/[averageLatencyMs]/either sparkline's data; they exist purely so
      * the UI can draw a vertical break where one happened, distinguishing "the app was off, we
-     * simply don't know" from a real measured outage. Pruned by the same [windowMs] as
-     * [samples], and dropped by [cleared] right along with them -- the user's explicit reset
-     * means a clean slate, and a stale marker from before it would misdescribe what's on screen
-     * afterward just as much as a stale sample would. */
+     * simply don't know" from a real measured outage. Not pruned by [windowMs] -- like
+     * [samples], retention is decoupled from the display window (see the class doc); a marker
+     * outside the currently configured window is simply filtered out of [markerFractions] at
+     * read time instead. Dropped by [cleared] right along with the samples -- the user's
+     * explicit reset means a clean slate, and a stale marker from before it would misdescribe
+     * what's on screen afterward just as much as a stale sample would. */
     val markers: List<Long> = emptyList(),
 ) {
 
@@ -128,42 +143,67 @@ data class ProbeHistory(
         require(windowMs > 0) { "windowMs must be positive, was $windowMs" }
     }
 
-    /** Every real probe attempt retained, successes and failures alike. */
-    val attemptCount: Int get() = samples.size
+    /**
+     * The slice of [samples] currently *displayed*: everything within [windowMs] of the newest
+     * retained sample. This is the read-time display filter the class doc describes -- every
+     * computed property and sparkline below reads this instead of [samples] directly, so
+     * narrowing/widening [windowMs] only ever changes what this slice selects, never what
+     * [samples] itself holds. Mirrors the edge-inclusive cutoff the old write-time pruning used
+     * (a sample exactly [windowMs] old is kept, one millisecond older is not), just computed
+     * fresh each read instead of baked into storage.
+     */
+    private val windowedSamples: List<ProbeSample>
+        get() {
+            if (samples.isEmpty()) return samples
+            val cutoff = samples.last().timestampMs - windowMs
+            val firstShown = samples.indexOfFirst { it.timestampMs >= cutoff }
+            return if (firstShown <= 0) samples else samples.subList(firstShown, samples.size)
+        }
 
-    val successCount: Int get() = samples.count { it.succeeded }
+    /** Real probe attempts within the currently displayed window, successes and failures alike. */
+    val attemptCount: Int get() = windowedSamples.size
+
+    val successCount: Int get() = windowedSamples.count { it.succeeded }
 
     /**
-     * Percentage (0..100) of retained real probe attempts that succeeded, or `null` when
+     * Percentage (0..100) of displayed real probe attempts that succeeded, or `null` when
      * nothing has been measured yet — `null`, not `0`, because "no probes yet" and "every
      * probe failed" are completely different states and only one of them is bad news.
      */
     val successPercent: Float?
-        get() = if (samples.isEmpty()) null else successCount * 100f / samples.size
+        get() {
+            val windowed = windowedSamples
+            return if (windowed.isEmpty()) null else windowed.count { it.succeeded } * 100f / windowed.size
+        }
 
     /**
-     * Mean round-trip time of the retained *successful* probes, rounded to whole milliseconds,
+     * Mean round-trip time of the displayed *successful* probes, rounded to whole milliseconds,
      * or `null` if none succeeded. Failed attempts are excluded rather than counted as zero —
      * a timeout is an absence of a measurement, not a fast one.
      */
     val averageLatencyMs: Long?
         get() {
-            val latencies = samples.mapNotNull { it.latencyMs }
+            val latencies = windowedSamples.mapNotNull { it.latencyMs }
             if (latencies.isEmpty()) return null
             return (latencies.sum().toDouble() / latencies.size).roundToLong()
         }
 
-    /** The most recent successful probe's latency, or `null` if none succeeded. */
-    val latestLatencyMs: Long? get() = samples.lastOrNull { it.succeeded }?.latencyMs
+    /** The most recent successful probe's latency within the displayed window, or `null` if
+     * none succeeded. */
+    val latestLatencyMs: Long? get() = windowedSamples.lastOrNull { it.succeeded }?.latencyMs
 
-    /** How much time the retained samples actually cover: at most [windowMs], `0` while there
+    /** How much time the displayed samples actually cover: at most [windowMs], `0` while there
      * are fewer than two of them (a single sample spans no time at all). */
     val spanMs: Long
-        get() = if (samples.size < 2) 0L else samples.last().timestampMs - samples.first().timestampMs
+        get() {
+            val windowed = windowedSamples
+            return if (windowed.size < 2) 0L else windowed.last().timestampMs - windowed.first().timestampMs
+        }
 
-    /** Records a real probe that answered in [latencyMs], pruning anything the window has
-     * outlived. [timestampMs] is expected to be no earlier than the newest existing sample —
-     * the cycle feeds these in the order they happen. */
+    /** Records a real probe that answered in [latencyMs]. [timestampMs] is expected to be no
+     * earlier than the newest existing sample — the cycle feeds these in the order they happen.
+     * Storage is capped at [MAX_SAMPLES] (oldest evicted first); [windowMs] plays no part in
+     * what gets kept, only in what [windowedSamples] later shows. */
     fun recordSuccess(timestampMs: Long, latencyMs: Long): ProbeHistory {
         require(latencyMs >= 0) { "latencyMs must be non-negative, was $latencyMs" }
         return appended(ProbeSample(timestampMs, latencyMs))
@@ -177,27 +217,13 @@ data class ProbeHistory(
     /** Records a master-toggle transition (the whole app switched off, or back on) — see
      * [markers]. [timestampMs] is expected to be no earlier than the newest existing sample or
      * marker, same ordering contract as [recordSuccess]/[recordFailure]. */
-    fun recordMarker(timestampMs: Long): ProbeHistory {
-        val newest = maxOf(timestampMs, samples.lastOrNull()?.timestampMs ?: timestampMs, markers.lastOrNull() ?: timestampMs)
-        val cutoff = newest - windowMs
-        return copy(
-            samples = prunedSamples(samples, cutoff),
-            markers = prunedMarkers(markers + timestampMs, cutoff),
-        )
-    }
+    fun recordMarker(timestampMs: Long): ProbeHistory = copy(markers = markers + timestampMs)
 
-    /** Same samples and markers under a new retention window, immediately pruned to it — so
-     * shortening the window takes effect at once rather than at the next probe. */
-    fun withWindowMs(windowMs: Long): ProbeHistory {
-        val newest = maxOf(samples.lastOrNull()?.timestampMs ?: Long.MIN_VALUE, markers.lastOrNull() ?: Long.MIN_VALUE)
-        if (newest == Long.MIN_VALUE) return copy(windowMs = windowMs)
-        val cutoff = newest - windowMs
-        return ProbeHistory(
-            windowMs = windowMs,
-            samples = prunedSamples(samples, cutoff),
-            markers = prunedMarkers(markers, cutoff),
-        )
-    }
+    /** Same samples and markers under a new display window — a cheap metadata update, since
+     * [windowMs] no longer governs what's retained (see the class doc). Narrowing changes only
+     * what [windowedSamples] currently selects to show; nothing stored is discarded, so widening
+     * back afterward reveals the same older data again rather than it having been thrown away. */
+    fun withWindowMs(windowMs: Long): ProbeHistory = copy(windowMs = windowMs)
 
     /** Drops every sample and marker, keeping the window — the user's explicit "reset history"
      * action. */
@@ -209,9 +235,9 @@ data class ProbeHistory(
      * to the right edge regardless of how much of the window actually has data in it yet.
      *
      * This is the whole reason the axis is scaled by [windowMs] and not by [spanMs]: scaling to
-     * the retained span would stretch however little data exists so far to fill the entire
+     * the displayed span would stretch however little data exists so far to fill the entire
      * width, which reads as the graph having just reset every time it's sparse (right after a
-     * reset, early in a session, or just after a gap prunes old data) even though nothing was
+     * reset, early in a session, or just after narrowing the window) even though nothing was
      * actually cleared. Scaling to the window instead means a handful of recent samples sit
      * clustered near the right edge with real empty space to their left, and the graph fills in
      * and starts scrolling only once the window is genuinely full — the same behavior a strip
@@ -222,13 +248,14 @@ data class ProbeHistory(
         1f - (newest - timestampMs).toFloat() / windowMs
 
     /**
-     * Where each retained [markers] timestamp falls on the same window-anchored axis
-     * [latencySparkline] and [successSparkline] plot against (see [windowFraction]), so the UI
-     * can draw a vertical break at exactly the right point with no scaling decision of its own
-     * left to make.
+     * Where each [markers] timestamp falls on the same window-anchored axis [latencySparkline]
+     * and [successSparkline] plot against (see [windowFraction]), so the UI can draw a vertical
+     * break at exactly the right point with no scaling decision of its own left to make.
      *
-     * A marker outside the window relative to the newest retained sample (effectively
-     * unreachable in practice, since both are pruned by the same window) contributes nothing:
+     * [markers] is not pruned by [windowMs] any more than [samples] is (see the class doc), so
+     * this filter is the thing that actually keeps an out-of-window marker off the axis now,
+     * rather than a defensive check on data that was already pruned before it got here: a
+     * marker outside the window relative to the newest retained sample contributes nothing —
      * there is no meaningful position for it on an axis that doesn't reach that far.
      */
     fun markerFractions(): List<Float> {
@@ -240,23 +267,25 @@ data class ProbeHistory(
     }
 
     /**
-     * The latency trend, one point per retained sample: [SparklinePoint.y] is the sample's
-     * latency scaled against the retained min/max, and `null` for a failed probe. [SparklinePoint.x]
-     * is [windowFraction] — see its doc for why the axis is anchored to the configured window
-     * rather than stretched to fill from whatever span is currently retained.
+     * The latency trend, one point per *displayed* sample (see [windowedSamples]):
+     * [SparklinePoint.y] is the sample's latency scaled against the displayed min/max, and
+     * `null` for a failed probe. [SparklinePoint.x] is [windowFraction] — see its doc for why
+     * the axis is anchored to the configured window rather than stretched to fill from whatever
+     * span is currently displayed.
      *
      * One point per *sample*, never aggregated, precisely so a failure stays a visible gap
-     * exactly where it happened. When every retained latency is identical (or only one
+     * exactly where it happened. When every displayed latency is identical (or only one
      * succeeded) there is no range to scale against, so those points sit on the middle line
      * rather than being pinned to an arbitrary edge.
      */
     fun latencySparkline(): List<SparklinePoint> {
-        if (samples.isEmpty()) return emptyList()
-        val latencies = samples.mapNotNull { it.latencyMs }
+        val windowed = windowedSamples
+        if (windowed.isEmpty()) return emptyList()
+        val latencies = windowed.mapNotNull { it.latencyMs }
         val min = latencies.minOrNull()
         val max = latencies.maxOrNull()
-        val newest = samples.last().timestampMs
-        return samples.map { sample ->
+        val newest = windowed.last().timestampMs
+        return windowed.map { sample ->
             val x = windowFraction(sample.timestampMs, newest)
             val y = sample.latencyMs?.let { latency ->
                 if (min == null || max == null || max == min) {
@@ -285,14 +314,15 @@ data class ProbeHistory(
      */
     fun successSparkline(maxBuckets: Int = DEFAULT_MAX_BUCKETS): List<SparklinePoint> {
         require(maxBuckets > 0) { "maxBuckets must be positive, was $maxBuckets" }
-        if (samples.isEmpty()) return emptyList()
+        val windowed = windowedSamples
+        if (windowed.isEmpty()) return emptyList()
 
         val buckets = bucketCount(maxBuckets)
         val attempts = IntArray(buckets)
         val successes = IntArray(buckets)
-        val newest = samples.last().timestampMs
+        val newest = windowed.last().timestampMs
 
-        samples.forEach { sample ->
+        windowed.forEach { sample ->
             // coerceIn also covers buckets == 1: every fraction lands in the only bucket,
             // index 0. windowFraction never divides by zero (windowMs is always positive),
             // unlike the old span-based version this replaced.
@@ -330,34 +360,15 @@ data class ProbeHistory(
         return (coveredFraction * maxBuckets).toInt().coerceIn(1, maxBuckets)
     }
 
-    private fun appended(sample: ProbeSample): ProbeHistory {
-        val cutoff = sample.timestampMs - windowMs
-        return copy(
-            samples = prunedSamples(samples + sample, cutoff),
-            markers = prunedMarkers(markers, cutoff),
-        )
-    }
+    private fun appended(sample: ProbeSample): ProbeHistory = copy(samples = cappedSamples(samples + sample))
 
     companion object {
-        /** Drops everything older than [cutoff], then anything still over [MAX_SAMPLES]. Relies
-         * on [all] being in timestamp order, which is how the cycle produces them. */
-        private fun prunedSamples(all: List<ProbeSample>, cutoff: Long): List<ProbeSample> {
-            if (all.isEmpty()) return all
-            var firstKept = all.indexOfFirst { it.timestampMs >= cutoff }
-            if (firstKept < 0) firstKept = all.size
-            val overflow = (all.size - firstKept) - MAX_SAMPLES
-            if (overflow > 0) firstKept += overflow
-            return if (firstKept == 0) all else all.subList(firstKept, all.size).toList()
-        }
-
-        /** Same rule as [prunedSamples], minus the [MAX_SAMPLES] cap -- markers are rare,
-         * user-driven events (a master-toggle flip), not one-per-probe, so there's nothing here
-         * that could grow unbounded the way free-wheeling pacing can for samples. */
-        private fun prunedMarkers(all: List<Long>, cutoff: Long): List<Long> {
-            if (all.isEmpty()) return all
-            var firstKept = all.indexOfFirst { it >= cutoff }
-            if (firstKept < 0) firstKept = all.size
-            return if (firstKept == 0) all else all.subList(firstKept, all.size).toList()
+        /** Drops the oldest samples once [all] exceeds [MAX_SAMPLES] -- the only thing that
+         * bounds storage now that retention no longer follows [windowMs] (see the class doc).
+         * Relies on [all] being in timestamp order, which is how the cycle produces them. */
+        private fun cappedSamples(all: List<ProbeSample>): List<ProbeSample> {
+            val overflow = all.size - MAX_SAMPLES
+            return if (overflow > 0) all.subList(overflow, all.size).toList() else all
         }
 
         /** Default retention window, per spec (and matching the Starlink status display this
@@ -365,7 +376,8 @@ data class ProbeHistory(
         const val DEFAULT_WINDOW_MS: Long = 7 * 60 * 1000L
 
         /**
-         * Hard cap on retained samples, independent of [windowMs].
+         * Hard cap on retained samples -- the sole bound on storage, now that [windowMs] is a
+         * display-only filter and no longer prunes anything (see the class doc).
          *
          * Sized for the *fastest realistic production rate*, not the default steady-state one.
          * A successful probe is naturally paced by the step-delay setting, and a **failed**

@@ -69,7 +69,7 @@ class UplinkProbeHistoryTest {
     }
 
     @Test
-    fun `setWindowMs prunes what the narrower window has already outlived`() {
+    fun `setWindowMs changes what is displayed immediately, without discarding older samples`() {
         UplinkProbeHistory.recordSuccess(latencyMs = 10, timestampMs = 0)
         UplinkProbeHistory.recordSuccess(latencyMs = 10, timestampMs = 120_000)
         assertEquals(2, UplinkProbeHistory.history.value.attemptCount)
@@ -78,6 +78,13 @@ class UplinkProbeHistoryTest {
 
         assertEquals(1, UplinkProbeHistory.history.value.attemptCount)
         assertEquals(60_000L, UplinkProbeHistory.history.value.windowMs)
+        // The narrower window changed what's displayed, not what's retained (issue #39).
+        assertEquals(2, UplinkProbeHistory.history.value.samples.size)
+
+        UplinkProbeHistory.setWindowMs(150_000)
+
+        // Widening back reveals the older sample again -- it was never actually discarded.
+        assertEquals(2, UplinkProbeHistory.history.value.attemptCount)
     }
 
     @Test
