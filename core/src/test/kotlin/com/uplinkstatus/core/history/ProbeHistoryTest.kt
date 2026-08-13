@@ -273,8 +273,46 @@ class ProbeHistoryTest {
         assertNull(points[1].y)
         assertNotNull(points[2].y)
         // ...and it is genuinely absent rather than plotted at the bottom of the scale.
-        assertEquals(0f, points[0].y!!, 0.001f)
-        assertEquals(1f, points[2].y!!, 0.001f)
+        // Fast plots high, slow plots low: the 10ms sample (fastest) sits at the top of the
+        // scale, the 20ms sample (slowest) at the bottom -- "up" means "better."
+        assertEquals(1f, points[0].y!!, 0.001f)
+        assertEquals(0f, points[2].y!!, 0.001f)
+    }
+
+    /**
+     * Regression test: the latency sparkline's y-axis previously plotted the *slowest* retained
+     * latency at the top and the *fastest* at the bottom -- backwards from "fast on top, slow on
+     * bottom," and the opposite of "up means better." Before the fix, this test's final two
+     * assertions failed (the 10ms/fastest sample sat at `y = 0`, the 100ms/slowest sample sat at
+     * `y = 1`).
+     */
+    @Test
+    fun `the fastest latency plots at the top of the scale, the slowest at the bottom`() {
+        val history = ProbeHistory(windowMs = window)
+            .recordSuccess(0, latencyMs = 10) // fastest
+            .recordSuccess(1_000, latencyMs = 55) // middle
+            .recordSuccess(2_000, latencyMs = 100) // slowest
+
+        val points = history.latencySparkline()
+
+        assertEquals(1f, points[0].y!!, 0.001f) // fastest -> top
+        assertEquals(0.5f, points[1].y!!, 0.001f) // exactly midway -> middle
+        assertEquals(0f, points[2].y!!, 0.001f) // slowest -> bottom
+    }
+
+    @Test
+    fun `each latency point carries its own raw ms value alongside the scaled y position`() {
+        val history = ProbeHistory(windowMs = window)
+            .recordSuccess(0, latencyMs = 10)
+            .recordFailure(1_000)
+            .recordSuccess(2_000, latencyMs = 20)
+
+        val points = history.latencySparkline()
+
+        assertEquals(10L, points[0].latencyMs)
+        // A gap carries no raw value either -- there is nothing measured to report.
+        assertNull(points[1].latencyMs)
+        assertEquals(20L, points[2].latencyMs)
     }
 
     @Test
@@ -700,6 +738,42 @@ class ProbeHistoryTest {
             .recordSuccess(1_000, latencyMs = 20)
 
         assertTrue(history.markerFractions().single() > 0.9f)
+    }
+
+    // --- Absolute latency color scale (latencyColorFraction) ------------------------------
+
+    @Test
+    fun `at or below the green anchor is fully green`() {
+        assertEquals(0f, latencyColorFraction(0), 0.001f)
+        assertEquals(0f, latencyColorFraction(30), 0.001f)
+        assertEquals(0f, latencyColorFraction(50), 0.001f)
+    }
+
+    @Test
+    fun `at the yellow anchor is exactly halfway`() {
+        assertEquals(0.5f, latencyColorFraction(200), 0.001f)
+    }
+
+    @Test
+    fun `at or above the red anchor is fully red`() {
+        assertEquals(1f, latencyColorFraction(400), 0.001f)
+        assertEquals(1f, latencyColorFraction(1_000), 0.001f)
+        assertEquals(1f, latencyColorFraction(50_000), 0.001f)
+    }
+
+    @Test
+    fun `interpolates linearly between the green and yellow anchors`() {
+        // Halfway between 50 and 200 (125ms) is halfway between 0 and 0.5.
+        assertEquals(0.25f, latencyColorFraction(125), 0.001f)
+    }
+
+    @Test
+    fun `interpolates linearly between the yellow and red anchors`() {
+        // Halfway between 200 and 400 (300ms) is halfway between 0.5 and 1.
+        assertEquals(0.75f, latencyColorFraction(300), 0.001f)
+        // Three-quarters of the way from 200 to 400 (350ms) is three-quarters of the way
+        // from 0.5 to 1.
+        assertEquals(0.875f, latencyColorFraction(350), 0.001f)
     }
 
     // --- Guard rails ----------------------------------------------------------------------
