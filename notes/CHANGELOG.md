@@ -49,6 +49,8 @@
 * settings-preference changes to a running probe cycle were dropped ([0f042fd](https://github.com/ScottKirvan/UplinkStatus/commit/0f042fd8fd05bb70d5f3b64331f618a1a265fa4a))
 * use fixed colors for the ping-success gradient sweep ([f871cc4](https://github.com/ScottKirvan/UplinkStatus/commit/f871cc4457e8fe34c02622a4dd09915c9859ed78))
 
+Includes PRs: [#33](https://github.com/ScottKirvan/UplinkStatus/pull/33), [#34](https://github.com/ScottKirvan/UplinkStatus/pull/34), [#35](https://github.com/ScottKirvan/UplinkStatus/pull/35), [#36](https://github.com/ScottKirvan/UplinkStatus/pull/36), [#47](https://github.com/ScottKirvan/UplinkStatus/pull/47), [#48](https://github.com/ScottKirvan/UplinkStatus/pull/48), [#49](https://github.com/ScottKirvan/UplinkStatus/pull/49), [#50](https://github.com/ScottKirvan/UplinkStatus/pull/50), [#51](https://github.com/ScottKirvan/UplinkStatus/pull/51), [#52](https://github.com/ScottKirvan/UplinkStatus/pull/52)
+
 ## 0.0.0 (2026-08-05)
 
 
