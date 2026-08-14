@@ -18,16 +18,20 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.geometry.Size
+import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.Path
 import androidx.compose.ui.graphics.StrokeCap
 import androidx.compose.ui.graphics.StrokeJoin
+import androidx.compose.ui.graphics.drawscope.DrawScope
 import androidx.compose.ui.graphics.drawscope.Stroke
+import androidx.compose.ui.graphics.lerp
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.unit.dp
 import com.uplinkstatus.app.state.UplinkProbeHistory
 import com.uplinkstatus.core.history.ProbeHistory
 import com.uplinkstatus.core.history.SparklinePoint
+import com.uplinkstatus.core.history.latencyColorFraction
 import com.uplinkstatus.core.history.sparklineGapFractions
 import kotlin.math.roundToInt
 
@@ -53,6 +57,64 @@ private val MARKER_STROKE = 1.dp
 private const val GAP_SHADE_ALPHA = 0.15f
 
 /**
+ * Endpoints of the latency sparkline's absolute green→yellow→red color scale (see
+ * [latencyColorFraction] for the pure threshold math these are laid over). Standard Material
+ * green/amber/red 500 -- this app's `MaterialTheme.colorScheme` is Material-You dynamic color
+ * derived from the user's wallpaper and has no green/amber slot of its own to borrow, and mixing
+ * one dynamic endpoint (e.g. [MaterialTheme.colorScheme.error] for "red") with two fixed ones
+ * would read as more inconsistent than three fixed anchors that are internally consistent with
+ * each other -- legibility as "good/warning/bad" matters more here than theme-matching, since
+ * this is a status color, not a decorative one.
+ */
+private val LATENCY_COLOR_FAST = Color(0xFF4CAF50)
+private val LATENCY_COLOR_MID = Color(0xFFFFC107)
+private val LATENCY_COLOR_SLOW = Color(0xFFF44336)
+
+/**
+ * Stops for the ping-success sparkline's left-to-right gradient sweep -- see
+ * [SparklineColoring.Sweep]'s doc for the sweep itself. Originally drawn from this app's
+ * `MaterialTheme.colorScheme.primary`/`secondary`/`tertiary`, on the reasoning that a fixed
+ * palette would read as "borrowed from another app." On-device, that backfired: Material-You
+ * dynamic color derives all three from the same wallpaper, and on the actual test device they
+ * land close enough in hue that the "sweep" rendered as a single flat, barely-tinted line --
+ * confirmed visually, not assumed. A visible multi-hue sweep is the entire point of this
+ * treatment (see the reference image this was built from), so legibility of *that* now takes
+ * priority over theme-matching, the same tradeoff already made for the latency scale above.
+ */
+private val PING_SUCCESS_SWEEP_START = Color(0xFF3B82F6) // blue
+private val PING_SUCCESS_SWEEP_MID = Color(0xFF8B5CF6) // violet
+private val PING_SUCCESS_SWEEP_END = Color(0xFFEC4899) // pink
+
+/** Turns a raw latency into a point on the [LATENCY_COLOR_FAST]→[LATENCY_COLOR_MID]→
+ * [LATENCY_COLOR_SLOW] scale, via [latencyColorFraction]'s pure threshold math -- the only place
+ * an actual `Color` gets involved, since [latencyColorFraction] itself has no notion of one. */
+private fun latencyColor(latencyMs: Long): Color {
+    val fraction = latencyColorFraction(latencyMs)
+    return if (fraction <= 0.5f) {
+        lerp(LATENCY_COLOR_FAST, LATENCY_COLOR_MID, fraction / 0.5f)
+    } else {
+        lerp(LATENCY_COLOR_MID, LATENCY_COLOR_SLOW, (fraction - 0.5f) / 0.5f)
+    }
+}
+
+/**
+ * How [Sparkline] colors its line -- the two graphs use genuinely different strategies, not
+ * variations on one:
+ * - [Sweep] (ping success): one continuous left-to-right gradient spanning the **whole canvas
+ *   width**, independent of data value and of how many disjoint [segments][sparklineGapFractions]
+ *   the line breaks into -- purely positional/decorative, so a segment in the middle of the
+ *   timeline shows the middle portion of the overall sweep rather than resetting to its own
+ *   local start-to-end gradient.
+ * - [ByValue] (latency): each point gets its own color from [colorFor], independent of position
+ *   -- see [latencyColor]. Drawn as a sequence of small two-color-gradient line pieces, one per
+ *   pair of consecutive points, rather than one path with one color.
+ */
+private sealed interface SparklineColoring {
+    data class Sweep(val colors: List<Color>) : SparklineColoring
+    data class ByValue(val colorFor: (SparklinePoint) -> Color) : SparklineColoring
+}
+
+/**
  * The settings screen's two live history graphs — ping success percentage and latency trend —
  * over the shared, user-configurable window, read straight from [UplinkProbeHistory].
  *
@@ -62,10 +124,15 @@ private const val GAP_SHADE_ALPHA = 0.15f
  * filter it back out.
  *
  * Structurally modeled on Starlink's own status display (title, big number, caption, trailing
- * sparkline, in a card) but drawn entirely from this app's `MaterialTheme.colorScheme`, so it
- * reads as part of this settings screen rather than as a transplant from another app. The
- * sparklines are plain `Canvas` drawing — a charting library would be a dependency and a
- * theme of its own for two polylines.
+ * sparkline, in a card). Both lines' colors are fixed rather than theme-derived, and deliberately
+ * so: the ping-success line's left-to-right gradient sweep (see [PING_SUCCESS_SWEEP_START] and
+ * [SparklineColoring.Sweep] at its call site below) needs a visible multi-hue transition to mean
+ * anything at all, which this app's Material-You dynamic `colorScheme` doesn't reliably provide
+ * (see that constant's own doc for what went wrong on-device when it tried); the latency line's
+ * green/yellow/red is a status color communicating a measurement, not a decorative one, so
+ * legibility as "good/warning/bad" takes priority over theme-matching there too (see
+ * [latencyColor]'s doc). The sparklines are plain `Canvas` drawing — a charting library would be
+ * a dependency and a theme of its own for two polylines.
  *
  * The cards are always present, including before any probe has run, rather than appearing only
  * once there is data: this is a fixed part of the screen the user is meant to be able to find,
@@ -91,7 +158,16 @@ fun HistoryGraphs(modifier: Modifier = Modifier) {
             caption = caption,
             points = history.successSparkline(),
             markers = markers,
-            lineColor = MaterialTheme.colorScheme.primary,
+            // A left-to-right gradient sweep across the whole graph width, purely positional --
+            // not a data encoding. Fixed stops, not this app's theme -- see
+            // PING_SUCCESS_SWEEP_START's doc for why the theme-derived version didn't work.
+            coloring = SparklineColoring.Sweep(
+                colors = listOf(
+                    PING_SUCCESS_SWEEP_START,
+                    PING_SUCCESS_SWEEP_MID,
+                    PING_SUCCESS_SWEEP_END,
+                ),
+            ),
             gapColor = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = GAP_SHADE_ALPHA),
             cardTag = TAG_PING_SUCCESS_CARD,
             valueTag = TAG_PING_SUCCESS_VALUE,
@@ -102,7 +178,15 @@ fun HistoryGraphs(modifier: Modifier = Modifier) {
             caption = caption,
             points = history.latencySparkline(),
             markers = markers,
-            lineColor = MaterialTheme.colorScheme.tertiary,
+            // Colored by each point's own *absolute* latency (green fast, red slow) -- a
+            // different scale than the line's y-position, which stays session-relative. See
+            // SparklinePoint.latencyMs and latencyColorFraction's docs.
+            coloring = SparklineColoring.ByValue { point ->
+                // latencyMs is null only when y is null (a gap), which never reaches this
+                // lambda -- segments are built from non-null points only. The fallback exists
+                // purely so this stays total.
+                point.latencyMs?.let(::latencyColor) ?: LATENCY_COLOR_MID
+            },
             gapColor = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = GAP_SHADE_ALPHA),
             cardTag = TAG_LATENCY_CARD,
             valueTag = TAG_LATENCY_VALUE,
@@ -132,7 +216,7 @@ private fun HistoryGraphCard(
     caption: String,
     points: List<SparklinePoint>,
     markers: List<Float>,
-    lineColor: Color,
+    coloring: SparklineColoring,
     gapColor: Color,
     cardTag: String,
     valueTag: String,
@@ -164,7 +248,7 @@ private fun HistoryGraphCard(
             Sparkline(
                 points = points,
                 markers = markers,
-                color = lineColor,
+                coloring = coloring,
                 markerColor = MaterialTheme.colorScheme.outline,
                 gapColor = gapColor,
                 // Fills whatever width the text column (above) didn't claim -- the only
@@ -175,6 +259,11 @@ private fun HistoryGraphCard(
         }
     }
 }
+
+/** A plotted [SparklinePoint], carrying both its pixel [offset] and the source point it came
+ * from -- [SparklineColoring.ByValue] needs the latter (for [SparklinePoint.latencyMs]) even
+ * though [SparklineColoring.Sweep] never looks at it. */
+private data class PlottedPoint(val offset: Offset, val source: SparklinePoint)
 
 /**
  * Draws [points] as a polyline, **breaking the line at every gap** ([SparklinePoint.y] of
@@ -197,15 +286,24 @@ private fun HistoryGraphCard(
  * absence read as deliberate. Drawn before the markers and the line itself so both stay visible
  * on top of it.
  *
- * Purely arithmetic: every value arrives already reduced to the unit square by [ProbeHistory],
- * so there is no scaling or aggregation decision left here to disagree with the numbers above
- * it.
+ * [coloring] picks how the line gets colored -- see [SparklineColoring]'s own doc for the two
+ * genuinely different strategies. [SparklineColoring.Sweep]'s gradient brush is built once, from
+ * `x = 0` to `x = size.width`, and reused across every disjoint segment's `drawPath`/`drawCircle`
+ * call -- anchoring it to the *whole canvas* rather than letting each call default to its own
+ * local bounds, which is what would otherwise happen: `Brush.horizontalGradient` only spans the
+ * exact start/end it is given, and a segment sitting in the middle of the timeline would
+ * otherwise reset to its own local start-to-end sweep instead of showing the middle portion of
+ * the overall one.
+ *
+ * Purely arithmetic aside from the coloring itself: every position value arrives already reduced
+ * to the unit square by [ProbeHistory], so there is no scaling or aggregation decision left here
+ * to disagree with the numbers above it.
  */
 @Composable
 private fun Sparkline(
     points: List<SparklinePoint>,
     markers: List<Float>,
-    color: Color,
+    coloring: SparklineColoring,
     markerColor: Color,
     gapColor: Color,
     modifier: Modifier = Modifier,
@@ -239,8 +337,8 @@ private fun Sparkline(
             )
         }
 
-        var current = mutableListOf<Offset>()
-        val segments = mutableListOf<List<Offset>>()
+        var current = mutableListOf<PlottedPoint>()
+        val segments = mutableListOf<List<PlottedPoint>>()
         points.forEach { point ->
             val y = point.y
             if (y == null) {
@@ -249,28 +347,77 @@ private fun Sparkline(
                     current = mutableListOf()
                 }
             } else {
-                current += Offset(
-                    x = point.x * size.width,
-                    y = inset + (1f - y) * usableHeight,
+                current += PlottedPoint(
+                    offset = Offset(x = point.x * size.width, y = inset + (1f - y) * usableHeight),
+                    source = point,
                 )
             }
         }
         if (current.isNotEmpty()) segments += current
 
+        // Anchored to the whole canvas width, once, outside the per-segment loop below -- see
+        // this function's own doc for why that (and not each drawPath call's own local bounds)
+        // is what keeps the sweep consistent across a line broken into several segments.
+        val sweepBrush = (coloring as? SparklineColoring.Sweep)?.let {
+            Brush.horizontalGradient(colors = it.colors, startX = 0f, endX = size.width)
+        }
+
         segments.forEach { segment ->
-            if (segment.size == 1) {
-                drawCircle(color = color, radius = stroke, center = segment.first())
-            } else {
-                val path = Path().apply {
-                    moveTo(segment.first().x, segment.first().y)
-                    segment.drop(1).forEach { lineTo(it.x, it.y) }
-                }
-                drawPath(
-                    path = path,
-                    color = color,
-                    style = Stroke(width = stroke, cap = StrokeCap.Round, join = StrokeJoin.Round),
-                )
+            when (coloring) {
+                is SparklineColoring.Sweep -> drawSweepSegment(segment, sweepBrush!!, stroke)
+                is SparklineColoring.ByValue -> drawByValueSegment(segment, coloring.colorFor, stroke)
             }
+        }
+    }
+}
+
+/** [SparklineColoring.Sweep]: one path (or dot), one shared [brush] -- the whole segment moves
+ * together through whichever slice of the canvas-wide gradient it sits over. */
+private fun DrawScope.drawSweepSegment(
+    segment: List<PlottedPoint>,
+    brush: Brush,
+    stroke: Float,
+) {
+    if (segment.size == 1) {
+        drawCircle(brush = brush, radius = stroke, center = segment.first().offset)
+    } else {
+        val path = Path().apply {
+            moveTo(segment.first().offset.x, segment.first().offset.y)
+            segment.drop(1).forEach { lineTo(it.offset.x, it.offset.y) }
+        }
+        drawPath(
+            path = path,
+            brush = brush,
+            style = Stroke(width = stroke, cap = StrokeCap.Round, join = StrokeJoin.Round),
+        )
+    }
+}
+
+/** [SparklineColoring.ByValue]: every point can be a different color, so a single uniform-color
+ * `Path` won't do -- instead, each piece between two consecutive points is its own small line
+ * with a two-color gradient from that piece's start point's color to its end point's color,
+ * which is what makes a run of points read as a smooth green→yellow→red transition rather than a
+ * sequence of flat-colored segments. */
+private fun DrawScope.drawByValueSegment(
+    segment: List<PlottedPoint>,
+    colorFor: (SparklinePoint) -> Color,
+    stroke: Float,
+) {
+    if (segment.size == 1) {
+        drawCircle(color = colorFor(segment.first().source), radius = stroke, center = segment.first().offset)
+    } else {
+        segment.zipWithNext().forEach { (start, end) ->
+            drawLine(
+                brush = Brush.linearGradient(
+                    colors = listOf(colorFor(start.source), colorFor(end.source)),
+                    start = start.offset,
+                    end = end.offset,
+                ),
+                start = start.offset,
+                end = end.offset,
+                strokeWidth = stroke,
+                cap = StrokeCap.Round,
+            )
         }
     }
 }

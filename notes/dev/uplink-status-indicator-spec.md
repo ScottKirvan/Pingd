@@ -277,7 +277,17 @@ latency trend with data that was never actually measured.
   line, not a zero and not a skipped/interpolated point — a gap is the
   honest representation of "no measurement," the same principle the
   tracer's own freeze-in-place behavior already follows for a single
-  failed probe.
+  failed probe. Vertical position is scaled to whatever latencies
+  actually occurred this session (min/max of the displayed samples,
+  not any absolute notion of "fast") with **fast plotting near the top
+  and slow near the bottom** — "up" reads as "better," which is both
+  the more intuitive direction and the one actually implemented; a
+  session where every reading is 40-60ms still fills the chart's
+  height to show the *shape* of that variation, even though every one
+  of those readings is fast in absolute terms. When every displayed
+  latency is identical (or only one succeeded) there is no range to
+  scale against, so those points sit on the middle line instead of
+  being pinned to an arbitrary edge.
 
 A gap bounded by real data on at least one side (a mid-outage or
 still-ongoing loss of signal, not the graph simply not having filled up
@@ -302,6 +312,49 @@ oscilloscope trace has. Scaling to the displayed span instead (an earlier
 version of this behavior) stretched however little data existed to fill
 the whole card every time, which looked exactly like the graph had just
 reset even when nothing was actually cleared.
+
+### Line color
+The two graphs color their lines by two genuinely different rules, not
+variations on one:
+
+- **Ping success** is drawn with a continuous left-to-right color
+  gradient sweeping the *whole graph width* — three stops across this
+  app's own `MaterialTheme.colorScheme.primary` →
+  `colorScheme.secondary` → `colorScheme.tertiary`, in that order. This
+  is purely positional/decorative, not a data encoding: the color at a
+  given x-position never depends on the success rate plotted there,
+  only on where it sits on the axis. The gradient is anchored to the
+  full canvas width, not to whichever disjoint segment (see the gap
+  handling above) happens to be drawn — a segment sitting in the middle
+  of the timeline shows the middle portion of the overall sweep rather
+  than resetting to its own local start-to-end gradient, which is what
+  a gradient brush would do by default if built per-segment instead of
+  once against the whole canvas.
+- **Latency** is colored green→yellow→red by each point's own
+  **absolute** latency in milliseconds — green at or below 50ms, yellow
+  at 200ms, red at or above 400ms, linearly interpolated between
+  adjacent anchors and clamped beyond them. This is deliberately a
+  *different scale* than the line's vertical position (which stays
+  session-relative, per the fast-top/slow-bottom description above): a
+  session where every reading is 40-60ms plots across the full height
+  of the chart (relative scaling) while every one of those points still
+  reads solidly green (absolute scaling) — position and color are two
+  independent readings of the same data, not one shared scale. Because
+  color varies point-to-point independent of position, the line is
+  drawn as a sequence of small two-color-gradient pieces (one per pair
+  of consecutive points, from that pair's start color to its end color)
+  rather than as one path in one flat color.
+
+The green/yellow/red anchor colors are a fixed, deliberate choice
+(Material green/amber/red 500) rather than drawn from
+`MaterialTheme.colorScheme`: this app's Material-You dynamic color
+scheme has no green/amber slot to borrow from, and pairing one dynamic
+endpoint (e.g. the scheme's `error` color for "red") with two fixed
+ones would read as *more* inconsistent than three fixed anchors that
+are at least internally consistent with each other. Legibility as
+"good/warning/bad" takes priority over strict theme-matching here,
+since this is a status color communicating a measurement, not a
+decorative choice the way the ping-success sweep is.
 
 The window length is one setting shared by both graphs (and by the
 success-percentage calculation) — not two independently configurable
