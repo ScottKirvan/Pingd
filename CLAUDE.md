@@ -152,14 +152,25 @@ The `docs.yml` workflow auto-deploys this site to Pages on pushes to
 
 ## Git workflow
 
-- `dev` is the ongoing integration branch — Claude owns it and commits/pushes
-  directly to it.
+There is no `dev` branch. It was tried as an ongoing integration branch
+and reversed by explicit direction — it added a layer of indirection
+(dev→main promotion PRs, back-propagation merges) without a real payoff.
+Every piece of work now goes straight through a feature branch and a PR
+against `main`.
+
 - `main` is never touched (no commits, no merges) without explicit
-  instruction from the user for that specific merge. When a `dev` → `main`
-  PR merges, back-propagate `main` into `dev` afterward (a plain merge,
-  not a rebase) so `dev` picks up anything that landed only on `main`
-  (e.g. a Release Please version/changelog commit) — otherwise the next
-  `dev` → `main` PR's diff will incorrectly show reverting that content.
+  instruction from the user for that specific merge. With `dev` gone,
+  this now applies to *every* merge — there's no more self-merge
+  exception for an intermediate integration branch.
+- For each new piece of work (a fix, a feature — the same granularity as
+  "delegate this to an agent" below), branch off `main`, do the work,
+  and open a real GitHub PR against `main`. Don't open a *second* PR for
+  follow-up commits on the same branch/effort — push them to the
+  existing branch and update that PR's body to describe the accumulated
+  change.
+- Merging that PR into `main` still requires the user's explicit
+  go-ahead for that specific merge, per the `main` rule above — there is
+  no tier of PR that Claude merges unilaterally anymore.
 - Prefer delegating implementation-sized work (a fix, a feature, anything
   more than a trivial edit) to an agent rather than writing it directly.
   This isn't just about parallelism — Claude doing all the hands-on
@@ -173,30 +184,14 @@ The `docs.yml` workflow auto-deploys this site to Pages on pushes to
   quality), not a compliance check. Fix simple issues found in review
   directly; send significant deviations from the stated requirements,
   or complex problems, back to the agent rather than patching over them.
-- Open a real GitHub PR against `dev` for each new piece of work (a fix,
-  a feature — the same granularity as "delegate this to an agent" above),
-  even though Claude ends up being both the reviewer and the one who
-  merges it. This was tried the other way (skip the PR, merge the
-  branch straight into `dev`) and reversed by explicit direction — the
-  PR object itself is the point: a running diff and a body the user can
-  read for what changed and what to test, not a gate that needs someone
-  else's approval. Don't open a *second* PR for follow-up commits on
-  the same branch/effort — push them to the existing branch and update
-  that PR's body to describe the accumulated change, the way PR #35
-  (history graphs) and PR #47 (a `dev` → `main` promotion) both
-  naturally grew over many follow-up commits. Once it's ready, merge it
-  into `dev` directly (a real merge, not a rebase, not a squash — keep
-  the individual commits) — still no need to wait for the user's
-  per-PR go-ahead to do that, unlike a `dev` → `main` merge, which does
-  need the user's explicit go-ahead per the `main` rule above.
 - `.github/workflows/android-ci.yml`'s `pull_request` trigger covers
-  every branch a PR is open against, so opening the PR (rather than
-  pushing straight to `dev`) is also what gets `:app` a real CI signal
-  *before* it lands — the environment this file's own instructions run
-  in often has no Android SDK to check that locally. Still fix forward,
-  same "drive to green" discipline, if CI on `dev` itself ever goes red
-  after a merge (e.g. a merge-order interaction the PR's own CI run
-  against `dev`'s tip at push time couldn't have caught).
+  every branch a PR is open against, so opening the PR is also what gets
+  `:app` a real CI signal *before* it lands — the environment this
+  file's own instructions run in often has no Android SDK to check that
+  locally. Still fix forward, same "drive to green" discipline, if CI on
+  a branch goes red after a push (rebase onto `main`'s current tip if
+  the failure turns out to be a merge-order interaction the PR's own CI
+  run couldn't have caught).
 
 ### Attribution
 
