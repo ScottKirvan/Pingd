@@ -301,6 +301,26 @@ signal. This applies to both graphs — the success line's bucketed gaps
 (a time bucket with zero attempts in it) get the same treatment as the
 latency line's per-sample ones.
 
+The success line's bucket *count* grows with how much of the configured
+window real elapsed time has covered, up to a fixed ceiling (48 buckets)
+— but is additionally capped so it never asks for more buckets than
+there are real samples currently in view to fill them. Without that
+second cap, once the window reads as fully covered, bucket count pins
+at the ceiling regardless of how many real samples actually exist,
+giving every bucket a fixed time-width (window ÷ 48). Narrowing the
+window and/or raising the ping-pacing step delay can then push the real
+per-probe interval *past* that fixed width, so individual buckets
+legitimately land empty by pigeonhole — on a connection with no real
+interruption at all — and because bucket boundaries are recomputed
+fresh on every new sample, *which* buckets come up empty shifts from
+one sample to the next, reading on-device as a shaded "no data" gap
+that changes size and flickers. Capping bucket count by real sample
+density fixes that without weakening genuine gap detection: a real
+outage still has far fewer samples than the window's elapsed time would
+otherwise resolve to buckets, so it still renders as shaded empty
+buckets — this cap only removes resolution the data can't actually
+back up.
+
 Both sparklines' time axis is anchored to the *configured window*, not
 stretched to fill from whatever span of samples happens to be displayed
 so far. The newest retained sample always sits at the right edge; a

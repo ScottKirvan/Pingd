@@ -361,16 +361,16 @@ data class ProbeHistory(
      *
      * Bucketed rather than one point per sample because a per-sample success line can only
      * ever be 0 or 1 — a square wave that says nothing about the *rate*, which is the whole
-     * point of this graph. The resolution grows with real elapsed time instead of being fixed
-     * or tied to how many attempts have arrived — see [bucketCount]'s own doc for why that
-     * distinction matters.
+     * point of this graph. The resolution grows with real elapsed time, capped so it never
+     * asks for more buckets than there are real samples to fill them — see [bucketCount]'s own
+     * doc for why both halves of that matter.
      */
     fun successSparkline(maxBuckets: Int = DEFAULT_MAX_BUCKETS): List<SparklinePoint> {
         require(maxBuckets > 0) { "maxBuckets must be positive, was $maxBuckets" }
         val windowed = windowedSamples
         if (windowed.isEmpty()) return emptyList()
 
-        val buckets = bucketCount(maxBuckets)
+        val buckets = bucketCount(maxBuckets, windowed.size)
         val attempts = IntArray(buckets)
         val successes = IntArray(buckets)
         val newest = windowed.last().timestampMs
@@ -394,23 +394,44 @@ data class ProbeHistory(
 
     /**
      * How many time buckets [successSparkline] divides the window into: grows with how much of
-     * the window real elapsed time has actually covered ([spanMs] relative to [windowMs]), not
-     * with how many attempts have been recorded.
+     * the window real elapsed time has actually covered ([spanMs] relative to [windowMs]), same
+     * as before, but now additionally capped at [sampleCount] — the number of real, currently
+     * displayed samples ([windowedSamples]'s size) — so resolution can never ask for more
+     * buckets than there is real data to fill them.
      *
-     * The earlier version of this scaled with `samples.size` instead — tying it to attempt
-     * *count* rather than *elapsed time* meant the bucket count (and therefore every bucket's
-     * boundaries) changed on essentially every single recorded sample, since retained count
-     * fluctuates with pacing and failure-retry bursts even when almost no real time has passed.
-     * A bucket already drawn on screen would silently get recomputed from a different slice of
-     * samples a moment later — visible on-device as the newest end of the line "bouncing" and
-     * already-plotted dips readjusting with each new sample. Elapsed time only moves forward
-     * (and, once the window is genuinely full, stops changing this at all — see [spanMs]), so
-     * boundaries here are stable between any two samples taken close together, exactly the cases
-     * that used to reshuffle.
+     * That cap is the fix for a real on-device bug: without it, once the window is fully
+     * covered, bucket count pins at [maxBuckets] regardless of how many real samples actually
+     * exist, giving a *fixed* per-bucket time-width ([windowMs]`/`[maxBuckets]). If the user
+     * narrows the window and/or raises the ping-pacing step delay, the real per-probe interval
+     * can end up *larger* than that fixed width — at which point individual buckets legitimately
+     * contain zero real attempts by pigeonhole, on a connection with no real interruption at
+     * all. Worse, because boundaries are recomputed fresh on every new sample, *which* buckets
+     * come up empty shifts from one sample to the next, which is what read on-device as a
+     * shaded "no data" gap that changes size and flickers on a steady connection. Bounding
+     * bucket count by [sampleCount] keeps a bucket's real time-width at least as coarse as
+     * `windowMs / sampleCount` — never finer than the actual sample density supports — so
+     * emptiness in a bucket reflects data that is genuinely missing, not resolution that has
+     * simply outrun the sampling rate. A *real* gap (far fewer real samples than the window's
+     * elapsed time would otherwise resolve, i.e. a genuine outage) still has plenty of headroom
+     * below this cap to render as empty buckets, same as before — this only removes resolution
+     * that the data can't actually back up.
+     *
+     * The earlier version of this scaled with `samples.size` alone (no elapsed-time term at
+     * all) — tying bucket count *only* to attempt count meant it changed on essentially every
+     * single recorded sample, since retained count fluctuates with pacing and failure-retry
+     * bursts even when almost no real time has passed. A bucket already drawn on screen would
+     * silently get recomputed from a different slice of samples a moment later — visible
+     * on-device as the newest end of the line "bouncing" and already-plotted dips readjusting
+     * with each new sample. Using [sampleCount] purely as an upper *cap* on the elapsed-time-
+     * derived value, rather than as the primary driver, avoids reintroducing that: the cap can
+     * only ever pull the result *down* from the elapsed-time value, never push it up, so a burst
+     * of retries within a brief real time span (elapsed-time term still low) cannot inflate
+     * bucket count the way the old `samples.size`-driven version could.
      */
-    private fun bucketCount(maxBuckets: Int): Int {
+    private fun bucketCount(maxBuckets: Int, sampleCount: Int): Int {
         val coveredFraction = (spanMs.toFloat() / windowMs).coerceIn(0f, 1f)
-        return (coveredFraction * maxBuckets).toInt().coerceIn(1, maxBuckets)
+        val elapsedTimeBuckets = (coveredFraction * maxBuckets).toInt()
+        return minOf(elapsedTimeBuckets, sampleCount).coerceIn(1, maxBuckets)
     }
 
     private fun appended(sample: ProbeSample): ProbeHistory = copy(samples = cappedSamples(samples + sample))

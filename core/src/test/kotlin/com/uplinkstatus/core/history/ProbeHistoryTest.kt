@@ -462,12 +462,13 @@ class ProbeHistoryTest {
 
     @Test
     fun `gap shading also applies to the bucketed success sparkline, not just the per-sample latency one`() {
-        // A history sparse enough, relative to its window, that some buckets between real
-        // attempts get none at all -- the same "no data" gap the latency line has, just
-        // bucketed instead of per-sample.
-        val history = ProbeHistory(windowMs = 100_000L)
-            .recordSuccess(0, latencyMs = 10)
-            .recordSuccess(100_000, latencyMs = 20)
+        // Real attempts clustered at both ends of the window with a genuine silent stretch in
+        // between -- enough real samples flanking it that the empty middle buckets reflect an
+        // actual absence of attempts, not the bucket resolution simply outrunning a sparse
+        // sample count (see bucketCount's own doc for why that distinction now matters).
+        var history = ProbeHistory(windowMs = 100_000L)
+        repeat(5) { index -> history = history.recordSuccess(index * 1_000L, latencyMs = 10) }
+        repeat(5) { index -> history = history.recordSuccess(95_000L + index * 1_000L, latencyMs = 20) }
 
         val spans = sparklineGapFractions(history.successSparkline(maxBuckets = 10))
 
@@ -515,7 +516,12 @@ class ProbeHistoryTest {
         assertEquals(1, history.successSparkline().size)
 
         // Advance to the window's own span -- fully covered now, so resolution is maxed out.
-        history = history.recordSuccess(window, latencyMs = 10)
+        // Enough further samples spread across the rest of the window that resolution isn't
+        // *also* limited by the sample-density cap (covered separately below) -- this test is
+        // specifically about the elapsed-time half of bucketCount.
+        listOf(10_000L, 20_000L, 30_000L, 40_000L, 50_000L, 55_000L, 58_000L, window).forEach { at ->
+            history = history.recordSuccess(at, latencyMs = 10)
+        }
         val points = history.successSparkline(maxBuckets = 10)
         assertEquals(10, points.size)
     }
@@ -526,22 +532,28 @@ class ProbeHistoryTest {
      * with every new sample. Root cause: bucket count used to be `samples.size / 4`, so a burst
      * of attempts arriving without much real time passing (pacing changes, retry bursts, or
      * simply more probes landing) changed the bucket count -- and therefore every bucket's
-     * boundaries -- on almost every recorded sample. Bucket count must depend only on how much
-     * of the window elapsed time has actually covered, so two histories covering the same span
-     * produce the same resolution regardless of how many attempts happened to land in it.
+     * boundaries -- on almost every recorded sample.
+     *
+     * [bucketCount] now also caps resolution by real sample count (see its own doc, and the
+     * dedicated `steady evenly-spaced real samples...` regression test below for *that* fix) --
+     * so bucket count is no longer a pure function of elapsed time alone. What must still hold,
+     * and what this test now checks, is the specific thing that used to bounce: once real sample
+     * density already *exceeds* what elapsed time alone would resolve to, an additional burst of
+     * attempts landing in that same span must not push the resolution any higher still.
      */
     @Test
-    fun `bucket count depends on elapsed time, not on how many attempts arrived in it`() {
-        val sparse = ProbeHistory(windowMs = 60_000)
-            .recordSuccess(0, latencyMs = 10)
-            .recordSuccess(29_850, latencyMs = 10)
+    fun `a burst of attempts beyond what real density already supports does not raise the bucket count further`() {
+        var steady = ProbeHistory(windowMs = 60_000)
+        // ~1s pacing -- already enough samples that the elapsed-time term, not sample density,
+        // is what determines resolution.
+        repeat(30) { index -> steady = steady.recordSuccess(index * 1_000L, latencyMs = 10) }
 
         var burst = ProbeHistory(windowMs = 60_000)
-        // The same ~30-second span as `sparse`, but a burst of 200 attempts packed into it --
+        // The same ~29-second span as `steady`, but a burst of 200 attempts packed into it --
         // exactly the shape of a rapid failure-retry burst landing mid-window.
-        repeat(200) { index -> burst = burst.recordSuccess(index * 150L, latencyMs = 10) }
+        repeat(200) { index -> burst = burst.recordSuccess(index * 145L, latencyMs = 10) }
 
-        assertEquals(sparse.successSparkline().size, burst.successSparkline().size)
+        assertEquals(steady.successSparkline().size, burst.successSparkline().size)
     }
 
     @Test
@@ -583,6 +595,43 @@ class ProbeHistoryTest {
         repeat(20) { index -> sparse = sparse.recordFailure(60_000L + index * 100L) }
         val sparsePoints = sparse.successSparkline(maxBuckets = 10)
         assertTrue(sparsePoints.any { it.y == null })
+    }
+
+    /**
+     * Regression test for the on-device "the ping-success graph shows a shaded 'no data' gap
+     * that changes size and flickers on a perfectly steady connection" report. Root cause:
+     * [ProbeHistory.successSparkline]'s bucket count used to depend only on how much of the
+     * *window* elapsed time had covered, with no relationship to how many real samples actually
+     * exist to fill that many buckets. Once the window is fully covered, bucket count pinned at
+     * `maxBuckets`, giving a fixed per-bucket time-width -- and if the user narrows the window
+     * and/or raises the ping-pacing step delay, the real per-probe interval can end up *larger*
+     * than that fixed bucket width. Individual buckets then legitimately contain zero real
+     * attempts by pigeonhole, not because of an outage but purely because display resolution has
+     * outrun the actual sampling rate -- and because bucket boundaries are recomputed fresh on
+     * every new sample, which specific buckets come up empty shifts from one sample to the next,
+     * which is the flicker.
+     *
+     * This constructs exactly that shape: a 60-second window with real, perfectly steady 2000ms
+     * probes spanning the *entire* window (31 evenly-spaced samples, 0..60000ms) -- a real
+     * interval well larger than `60000 / 48 = 1250ms`, the fixed per-bucket width the old,
+     * uncapped 48-bucket resolution would have used once the window reads as fully covered. On a
+     * genuinely uninterrupted connection like this, no interior bucket may read as empty.
+     */
+    @Test
+    fun `steady evenly-spaced real samples across the full window never produce a spurious empty bucket`() {
+        var history = ProbeHistory(windowMs = 60_000)
+        // 31 samples, exactly 2000ms apart, 0..60000ms -- spans the configured window exactly,
+        // at a real interval far coarser than 60000/48 = 1250ms (the old fixed-resolution
+        // bucket width once the window reads as fully covered).
+        (0..30).forEach { index -> history = history.recordSuccess(index * 2_000L, latencyMs = 10) }
+
+        val points = history.successSparkline() // default maxBuckets (48)
+
+        assertTrue(
+            "expected no interior gap on a steady, uninterrupted connection, but got: " +
+                points.map { it.y },
+            points.none { it.y == null },
+        )
     }
 
     @Test
