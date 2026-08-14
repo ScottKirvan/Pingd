@@ -70,6 +70,21 @@ private val LATENCY_COLOR_FAST = Color(0xFF4CAF50)
 private val LATENCY_COLOR_MID = Color(0xFFFFC107)
 private val LATENCY_COLOR_SLOW = Color(0xFFF44336)
 
+/**
+ * Stops for the ping-success sparkline's left-to-right gradient sweep -- see
+ * [SparklineColoring.Sweep]'s doc for the sweep itself. Originally drawn from this app's
+ * `MaterialTheme.colorScheme.primary`/`secondary`/`tertiary`, on the reasoning that a fixed
+ * palette would read as "borrowed from another app." On-device, that backfired: Material-You
+ * dynamic color derives all three from the same wallpaper, and on the actual test device they
+ * land close enough in hue that the "sweep" rendered as a single flat, barely-tinted line --
+ * confirmed visually, not assumed. A visible multi-hue sweep is the entire point of this
+ * treatment (see the reference image this was built from), so legibility of *that* now takes
+ * priority over theme-matching, the same tradeoff already made for the latency scale above.
+ */
+private val PING_SUCCESS_SWEEP_START = Color(0xFF3B82F6) // blue
+private val PING_SUCCESS_SWEEP_MID = Color(0xFF8B5CF6) // violet
+private val PING_SUCCESS_SWEEP_END = Color(0xFFEC4899) // pink
+
 /** Turns a raw latency into a point on the [LATENCY_COLOR_FAST]→[LATENCY_COLOR_MID]→
  * [LATENCY_COLOR_SLOW] scale, via [latencyColorFraction]'s pure threshold math -- the only place
  * an actual `Color` gets involved, since [latencyColorFraction] itself has no notion of one. */
@@ -109,14 +124,15 @@ private sealed interface SparklineColoring {
  * filter it back out.
  *
  * Structurally modeled on Starlink's own status display (title, big number, caption, trailing
- * sparkline, in a card) but drawn from this app's own palette rather than as a transplant from
- * another app, so it reads as part of this settings screen: the ping-success line's left-to-right
- * gradient sweep is built from this app's own `MaterialTheme.colorScheme` (see [SparklineColoring
- * .Sweep] at its call site below), and even the latency line's green/yellow/red -- a status color,
- * not a decorative one, so legibility as "good/warning/bad" takes priority over strict theme
- * matching -- is a deliberate choice among this app's available colors, not a copy of anyone
- * else's exact hues (see [latencyColor]'s doc). The sparklines are plain `Canvas` drawing — a
- * charting library would be a dependency and a theme of its own for two polylines.
+ * sparkline, in a card). Both lines' colors are fixed rather than theme-derived, and deliberately
+ * so: the ping-success line's left-to-right gradient sweep (see [PING_SUCCESS_SWEEP_START] and
+ * [SparklineColoring.Sweep] at its call site below) needs a visible multi-hue transition to mean
+ * anything at all, which this app's Material-You dynamic `colorScheme` doesn't reliably provide
+ * (see that constant's own doc for what went wrong on-device when it tried); the latency line's
+ * green/yellow/red is a status color communicating a measurement, not a decorative one, so
+ * legibility as "good/warning/bad" takes priority over theme-matching there too (see
+ * [latencyColor]'s doc). The sparklines are plain `Canvas` drawing — a charting library would be
+ * a dependency and a theme of its own for two polylines.
  *
  * The cards are always present, including before any probe has run, rather than appearing only
  * once there is data: this is a fixed part of the screen the user is meant to be able to find,
@@ -143,14 +159,13 @@ fun HistoryGraphs(modifier: Modifier = Modifier) {
             points = history.successSparkline(),
             markers = markers,
             // A left-to-right gradient sweep across the whole graph width, purely positional --
-            // not a data encoding. Three stops from this app's own theme (rather than the
-            // fixed blue→purple→magenta of the app this was modeled on) so it reads as part of
-            // this settings screen, per this file's own design principle above.
+            // not a data encoding. Fixed stops, not this app's theme -- see
+            // PING_SUCCESS_SWEEP_START's doc for why the theme-derived version didn't work.
             coloring = SparklineColoring.Sweep(
                 colors = listOf(
-                    MaterialTheme.colorScheme.primary,
-                    MaterialTheme.colorScheme.secondary,
-                    MaterialTheme.colorScheme.tertiary,
+                    PING_SUCCESS_SWEEP_START,
+                    PING_SUCCESS_SWEEP_MID,
+                    PING_SUCCESS_SWEEP_END,
                 ),
             ),
             gapColor = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = GAP_SHADE_ALPHA),
