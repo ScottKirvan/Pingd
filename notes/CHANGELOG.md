@@ -1,5 +1,54 @@
 # Changelog
 
+## [0.1.0](https://github.com/ScottKirvan/UplinkStatus/compare/v0.0.0...v0.1.0) (2026-08-14)
+
+
+### Features
+
+* **app:** live scanner preview on the settings screen ([ddb3577](https://github.com/ScottKirvan/UplinkStatus/commit/ddb35775b48970d56d53b03fdf58e1578ef98120))
+* **app:** live scanner preview on the settings screen ([83ff963](https://github.com/ScottKirvan/UplinkStatus/commit/83ff963f85e0a3f58a124a838be28062bb2f363b))
+* color the history graphs and fix the latency axis direction ([e5bc54a](https://github.com/ScottKirvan/UplinkStatus/commit/e5bc54a6d98e66da4713c710040e207d3e021c0e))
+* color the history graphs and fix the latency axis direction ([fe3f859](https://github.com/ScottKirvan/UplinkStatus/commit/fe3f859a1a8a2bb703732c5f407cfb54ab9d4bd9))
+* default network scope to any connection, not WiFi only ([3554db5](https://github.com/ScottKirvan/UplinkStatus/commit/3554db5634ecb84f4aa30e50bab5ad067d2a8fa0))
+* default network scope to any connection, not WiFi only ([a2ab89a](https://github.com/ScottKirvan/UplinkStatus/commit/a2ab89a26639985783e5ae0f971f184ad60b85a1))
+* in-app ping-success and latency history graphs ([b7d6eae](https://github.com/ScottKirvan/UplinkStatus/commit/b7d6eae65ba568416ecd6f37657d6eeac475a45b))
+* in-app ping-success and latency history graphs ([cae991e](https://github.com/ScottKirvan/UplinkStatus/commit/cae991e6fd77ae8595e6ce24f1ce1c221ba13586))
+* in-app ping-success/latency history graphs, plus a failure-retry pacing fix for the reconnect battery drain ([acf395f](https://github.com/ScottKirvan/UplinkStatus/commit/acf395ff5861d33578fd218b166989fe33b7601c))
+* keep recording history through DISABLED, mark master-toggle gaps ([3dc1d02](https://github.com/ScottKirvan/UplinkStatus/commit/3dc1d02e1f4d33d7c2a8b3c07813740dbd0b73e0))
+* keep recording history through DISABLED, mark master-toggle gaps ([bd3cc4f](https://github.com/ScottKirvan/UplinkStatus/commit/bd3cc4f151388dabe643700782976be6593e645e))
+* move pacing/window sliders under the graphs, show app version ([323b4c4](https://github.com/ScottKirvan/UplinkStatus/commit/323b4c43bd3f8ff5122855f0d0628ffc4312bdb6))
+* move pacing/window sliders under the graphs, show app version ([2c9244b](https://github.com/ScottKirvan/UplinkStatus/commit/2c9244bab95683d69b751b556dd0cacea2e98c09))
+* ping,ping,fake tracer cycle with a configurable step delay ([ebcb177](https://github.com/ScottKirvan/UplinkStatus/commit/ebcb1779e03cba081faf83d8763d5b2f9f52a1ad))
+* ping,ping,fake tracer cycle with a configurable step delay ([a58b281](https://github.com/ScottKirvan/UplinkStatus/commit/a58b281fb6890e42418f3d8a1c05cd622d1f6578))
+* shade sparkline gaps so they read as no-data, not a rendering bug ([689ddc6](https://github.com/ScottKirvan/UplinkStatus/commit/689ddc6188fc729ff1d6029fcf0619daadf332a4))
+* shade sparkline gaps so they read as no-data, not a rendering bug ([f268b4a](https://github.com/ScottKirvan/UplinkStatus/commit/f268b4a49928574d8fc1cf81564369d1358668f7))
+* shade sparkline gaps so they read as no-data, not a rendering bug ([15a1a99](https://github.com/ScottKirvan/UplinkStatus/commit/15a1a9950bfb03f84596200577a24f2d223a9b57))
+
+
+### Bug Fixes
+
+* anchor sparkline axis to the configured window, not the retained span ([635ab37](https://github.com/ScottKirvan/UplinkStatus/commit/635ab376704ba61c42b85284e9cd589097a952b7))
+* anchor sparkline axis to the configured window, not the retained span ([a556613](https://github.com/ScottKirvan/UplinkStatus/commit/a556613463a850f7f4276c2c5d08e2515c8283ee))
+* base success-sparkline resolution on elapsed time, not attempt count ([7085881](https://github.com/ScottKirvan/UplinkStatus/commit/70858811409f509fe0e94caf9780176dcab29330))
+* base success-sparkline resolution on elapsed time, not attempt count ([50bca36](https://github.com/ScottKirvan/UplinkStatus/commit/50bca36051d53bd377062a761804c74feed049da))
+* cap success sparkline bucket count by real sample density ([ccef0dc](https://github.com/ScottKirvan/UplinkStatus/commit/ccef0dc1663d56c268638fa3292b707d6806b5c8))
+* decouple history-window retention from the display window ([dbc73a1](https://github.com/ScottKirvan/UplinkStatus/commit/dbc73a1071442bed861f734a73f2078cafc9e05d))
+* decouple history-window retention from the display window ([4a07500](https://github.com/ScottKirvan/UplinkStatus/commit/4a075009e7963d1a432450c88927ef0e4badaf65))
+* decouple history-window retention from the display window (issue [#39](https://github.com/ScottKirvan/UplinkStatus/issues/39)) ([5fbb607](https://github.com/ScottKirvan/UplinkStatus/commit/5fbb6079f3ca4414bcf46b601e3f8f3d9e374112))
+* detect success-graph gaps from raw sample timestamps, not buckets ([985c983](https://github.com/ScottKirvan/UplinkStatus/commit/985c9838b38ba06c177571bad542b27260cdb198))
+* detect success-graph gaps from raw sample timestamps, not buckets ([9bc3417](https://github.com/ScottKirvan/UplinkStatus/commit/9bc3417cd893643ca890b6852327cdbe1b83ea60))
+* fire only the newest scheduled callback in the retry-pacing tests ([432d1fa](https://github.com/ScottKirvan/UplinkStatus/commit/432d1faadda4909b8b5f4daf363511e4c199c2fc))
+* fire only the newest scheduled callback in the retry-pacing tests ([787505d](https://github.com/ScottKirvan/UplinkStatus/commit/787505dca5b67f42cb21271c6475d3b285c1c103))
+* let the sparkline claim its own width instead of splitting 50/50 ([ee13f49](https://github.com/ScottKirvan/UplinkStatus/commit/ee13f4927e9d9a2cb12875371b84873aa5f5ebb5))
+* let the sparkline claim its own width instead of splitting 50/50 ([0a06687](https://github.com/ScottKirvan/UplinkStatus/commit/0a06687e17b305b3d556746370fd21541d9d5b95))
+* pace failed-probe retries with a 250ms floor instead of retrying inline ([4cb7200](https://github.com/ScottKirvan/UplinkStatus/commit/4cb7200bf3d89f7a5d34dc2f73a3aba34d9a7493))
+* pace failed-probe retries with a 250ms floor instead of retrying inline ([270bd6a](https://github.com/ScottKirvan/UplinkStatus/commit/270bd6a71fa33bc61d2a5b5642f52bb478129ff4))
+* raise the sample cap so a reconnect failure burst can't evict it ([0c5b84f](https://github.com/ScottKirvan/UplinkStatus/commit/0c5b84f82d463703bce1c10a4dc0a07b2318492b))
+* raise the sample cap so a reconnect failure burst can't evict it ([dcfbab4](https://github.com/ScottKirvan/UplinkStatus/commit/dcfbab45f785ddffe2273a67877c930934446f3d))
+* settings-preference changes to a running probe cycle were dropped ([aea9d06](https://github.com/ScottKirvan/UplinkStatus/commit/aea9d06c6404bfa3a28904aa4ee03a85c18c8527))
+* settings-preference changes to a running probe cycle were dropped ([0f042fd](https://github.com/ScottKirvan/UplinkStatus/commit/0f042fd8fd05bb70d5f3b64331f618a1a265fa4a))
+* use fixed colors for the ping-success gradient sweep ([f871cc4](https://github.com/ScottKirvan/UplinkStatus/commit/f871cc4457e8fe34c02622a4dd09915c9859ed78))
+
 ## 0.0.0 (2026-08-05)
 
 
