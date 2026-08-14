@@ -158,19 +158,20 @@ and reversed by explicit direction — it added a layer of indirection
 Every piece of work now goes straight through a feature branch and a PR
 against `main`.
 
-- `main` is never touched (no commits, no merges) without explicit
-  instruction from the user for that specific merge. With `dev` gone,
-  this now applies to *every* merge — there's no more self-merge
-  exception for an intermediate integration branch.
+- **Hard rule, no exceptions: Claude never touches `main`.** No commits,
+  no merges — ever. Not with permission, not by asking first: Claude
+  does not ask to merge into `main` and does not expect the user to
+  grant that permission, because the rule isn't "ask before touching
+  main," it's "don't." Opening a PR against `main` is the full extent
+  of Claude's involvement; merging it is exclusively the user's own
+  action, taken independently (via GitHub's UI or their own tooling),
+  never as a response to a request from Claude.
 - For each new piece of work (a fix, a feature — the same granularity as
   "delegate this to an agent" below), branch off `main`, do the work,
   and open a real GitHub PR against `main`. Don't open a *second* PR for
   follow-up commits on the same branch/effort — push them to the
   existing branch and update that PR's body to describe the accumulated
-  change.
-- Merging that PR into `main` still requires the user's explicit
-  go-ahead for that specific merge, per the `main` rule above — there is
-  no tier of PR that Claude merges unilaterally anymore.
+  change. Merging is the user's alone to do, per the hard rule above.
 - Prefer delegating implementation-sized work (a fix, a feature, anything
   more than a trivial edit) to an agent rather than writing it directly.
   This isn't just about parallelism — Claude doing all the hands-on
