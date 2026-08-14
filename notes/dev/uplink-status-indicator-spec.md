@@ -301,6 +301,51 @@ signal. This applies to both graphs — the success line's bucketed gaps
 (a time bucket with zero attempts in it) get the same treatment as the
 latency line's per-sample ones.
 
+The success line's bucket *count* grows with how much of the configured
+window real elapsed time has covered, up to a fixed ceiling (48
+buckets) — a pure function of elapsed time, deliberately blind to how
+many real attempts back any given bucket (see the note on why that
+matters just below).
+
+A zero-attempt bucket is not, by itself, enough to call something a
+gap. It's one of two entirely different things: a **genuine gap** (a
+real stretch of elapsed time with no real attempts at all — an actual
+outage, or the `DISABLED`/out-of-scope marker period) or a
+**quantization artifact** (the bucket grid is simply finer than the
+real sample density happens to support at that point, even though
+probing never stopped). Deciding this from the bucket grid alone can't
+work in general: no fixed bucket count is blind to where real samples
+actually land, so *some* narrow-window/slow-pacing combination can
+always outrun *any* resolution and manufacture a spurious empty bucket.
+Concretely: narrowing the history window and/or raising the ping-pacing
+step delay can push the real per-probe interval past a bucket's fixed
+time-width, so individual buckets land empty by pigeonhole on a
+connection with no real interruption — and because bucket boundaries
+are recomputed fresh, anchored to the newest sample, on every new
+sample, *which* buckets come up empty shifts from one sample to the
+next, which is what read on-device as a shaded "no data" gap that
+changes size and flickers.
+
+The fix reaches past the bucket grid entirely for the real/artifact
+decision: it reasons from the window's **raw, un-bucketed real sample
+timestamps** instead — the same honest, per-sample source of truth the
+latency line's own gaps already use. The gap between two
+timestamp-adjacent real samples counts as genuine loss of signal only
+if it exceeds a threshold that adapts to the *recent real sampling
+cadence* (several times the median real inter-sample gap), floored at a
+fixed minimum for sessions with too few real gaps to establish a
+reliable cadence estimate — that floor is sized comfortably above the
+worst-case *single* real probe interval the app's own configurable
+bounds allow (maximum step delay plus a slow-but-real success riding up
+to the connect timeout, plus scheduling slop). A zero-attempt bucket
+becomes a shaded gap only if it falls inside a real gap by that
+reckoning; otherwise the line simply connects straight through it to
+the next real point rather than fabricating a break. This has been
+validated by simulation against realistic *jittered* probe timing
+(never perfectly even spacing) across the app's full window/step-delay
+range, with zero spurious gaps, and against injected genuine multi-
+second outages, with zero missed detections.
+
 Both sparklines' time axis is anchored to the *configured window*, not
 stretched to fill from whatever span of samples happens to be displayed
 so far. The newest retained sample always sits at the right edge; a

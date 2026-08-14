@@ -5,6 +5,7 @@ import org.junit.Assert.assertNotNull
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
+import kotlin.random.Random
 
 /**
  * Plain JVM unit tests for the recording/windowing/aggregation rules behind the settings
@@ -583,6 +584,118 @@ class ProbeHistoryTest {
         repeat(20) { index -> sparse = sparse.recordFailure(60_000L + index * 100L) }
         val sparsePoints = sparse.successSparkline(maxBuckets = 10)
         assertTrue(sparsePoints.any { it.y == null })
+    }
+
+    // --- Regression: gap detection must survive realistic (jittered) probe timing -----------
+    //
+    // Root cause of the on-device "the ping-success graph shows a shaded 'no data' gap that
+    // changes size and flickers on a perfectly steady connection" report: successSparkline used
+    // to decide "real gap" purely from a bucket's own zero-attempt count, which conflates a
+    // genuine absence of probing with the bucket grid simply being finer than real sample
+    // density supports at that point -- no fixed bucket count is blind to where samples actually
+    // land, so some window/pacing combination can always outrun it. The fix moves gap detection
+    // off the bucket grid entirely, onto the real, un-bucketed sample timestamps (see
+    // ProbeHistory.realGapFractions's own doc). These tests validate that directly against
+    // *realistic*, jittered probe timing -- real intervals vary with network RTT and OS
+    // scheduling, they are never exact multiples of a nominal cadence -- across the app's own
+    // configurable window (HISTORY_WINDOW_RANGE_MS: 1-30 minutes) and step-delay
+    // (STEP_DELAY_RANGE_MS: 0-1000ms) ranges, not just one idealized case.
+
+    /**
+     * No interior bucket may read as a gap on an uninterrupted connection, however finely the
+     * bucket grid happens to slice the window relative to the real sampling rate -- across a
+     * sweep of window sizes and nominal per-probe intervals spanning the app's configurable
+     * range, each with several seeds of +/-20% timing jitter (never perfectly even spacing).
+     */
+    @Test
+    fun `realistically jittered steady sampling never produces a spurious gap across window and pacing combinations`() {
+        val windowsMs = listOf(60_000L, 120_000L, 420_000L, 1_800_000L) // 1min .. 30min
+        val nominalIntervalsMs = listOf(20L, 120L, 300L, 600L, 1_000L, 2_000L)
+        val maxSamplesPerRun = 3_000 // keeps the test fast; well past what any bucket count needs
+
+        windowsMs.forEach { windowMs ->
+            nominalIntervalsMs.forEach { nominalIntervalMs ->
+                repeat(5) { seed ->
+                    val random = Random(windowMs * 1_000_003 + nominalIntervalMs * 97 + seed)
+                    var history = ProbeHistory(windowMs = windowMs)
+                    var t = 0L
+                    var samples = 0
+                    while (t <= windowMs && samples < maxSamplesPerRun) {
+                        history = history.recordSuccess(t, latencyMs = 10)
+                        samples++
+                        val jitterFraction = random.nextDouble(-0.2, 0.2)
+                        t += (nominalIntervalMs * (1.0 + jitterFraction)).toLong().coerceAtLeast(1L)
+                    }
+
+                    val points = history.successSparkline()
+
+                    assertTrue(
+                        "spurious gap: window=$windowMs interval=$nominalIntervalMs seed=$seed " +
+                            "points=${points.map { it.y }}",
+                        points.none { it.y == null },
+                    )
+                }
+            }
+        }
+    }
+
+    /**
+     * The other half of the same fix: a *genuine* sustained outage dropped into otherwise
+     * realistically-jittered steady sampling must still be detected and shaded -- closing gap
+     * detection off from spurious quantization gaps must not also close it off from real ones.
+     */
+    @Test
+    fun `a genuine outage amid realistically jittered sampling is still detected and shaded`() {
+        val windowMs = 120_000L
+        val nominalIntervalMs = 500L
+        val outageMs = 20_000L // a real, sustained silence -- comfortably past the adaptive threshold
+
+        repeat(5) { seed ->
+            val random = Random(seed * 7919L)
+            var history = ProbeHistory(windowMs = windowMs)
+            var t = 0L
+            var samples = 0
+            val outageStartsAfter = 40 // let real cadence establish itself before the outage
+            while (t <= windowMs && samples < 500) {
+                history = history.recordSuccess(t, latencyMs = 10)
+                samples++
+                val jitterFraction = random.nextDouble(-0.2, 0.2)
+                var step = (nominalIntervalMs * (1.0 + jitterFraction)).toLong().coerceAtLeast(1L)
+                if (samples == outageStartsAfter) step += outageMs
+                t += step
+            }
+
+            val spans = sparklineGapFractions(history.successSparkline())
+
+            assertTrue("seed=$seed: expected the injected outage to be shaded", spans.isNotEmpty())
+        }
+    }
+
+    /**
+     * Edge case for [ProbeHistory]'s gap-detection floor: with too few real samples to establish
+     * an adaptive cadence estimate (see `MIN_GAPS_FOR_ADAPTIVE_THRESHOLD`), a worst-case *single*
+     * real probe interval -- the maximum configurable 1000ms step delay plus a slow-but-real
+     * success riding right up to the 1000ms TCP connect timeout, plus generous OS-scheduling
+     * slop -- must still not be misread as a genuine gap.
+     */
+    @Test
+    fun `a worst-case single real probe interval with only a few samples is not mistaken for a gap`() {
+        repeat(200) { seed ->
+            val random = Random(seed * 104_729L)
+            var history = ProbeHistory(windowMs = 60_000)
+            var t = 0L
+            repeat(3) {
+                history = history.recordSuccess(t, latencyMs = 10)
+                val stepDelayMs = 1_000L
+                val slowConnectMs = random.nextLong(800, 1_000)
+                val schedulingSlopMs = random.nextLong(0, 300)
+                t += stepDelayMs + slowConnectMs + schedulingSlopMs
+            }
+
+            val points = history.successSparkline()
+
+            assertTrue("seed=$seed: spurious gap from worst-case single-probe timing", points.none { it.y == null })
+        }
     }
 
     @Test

@@ -355,15 +355,29 @@ data class ProbeHistory(
      * The success-rate trend: the *configured window* — not just the currently retained span,
      * see [windowFraction] — cut into equal time buckets, each carrying the fraction of that
      * bucket's attempts that succeeded (0..1 — an absolute scale, not autoscaled, since a
-     * percentage means something on its own). A bucket with no attempts in it is a gap, same
-     * rule as the latency line — which is exactly what every bucket earlier than the data
-     * actually reaches renders as, early in a session or just after a reset.
+     * percentage means something on its own).
      *
      * Bucketed rather than one point per sample because a per-sample success line can only
      * ever be 0 or 1 — a square wave that says nothing about the *rate*, which is the whole
-     * point of this graph. The resolution grows with real elapsed time instead of being fixed
-     * or tied to how many attempts have arrived — see [bucketCount]'s own doc for why that
-     * distinction matters.
+     * point of this graph. Bucket *resolution* — how many points the line is drawn from — is
+     * governed by [bucketCount] and grows with real elapsed time only (see its own doc).
+     *
+     * A bucket with zero real attempts in it is one of two entirely different things, and this
+     * is the one place in the class that has to tell them apart: a **genuine gap** (a real
+     * stretch of elapsed time with no real attempts at all — an actual outage, or the
+     * `DISABLED`/out-of-scope marker period) versus a **quantization artifact** (the bucket grid
+     * is simply finer than the real sample density happens to support at that point, even
+     * though probing never stopped). Deciding this from the bucket grid alone can't work: no
+     * choice of bucket count is blind to where samples actually landed, so *some* narrow-window/
+     * slow-pacing combination will always be able to outrun *any* fixed resolution and manufacture
+     * a spurious empty bucket, which is exactly the flicker this class once shipped with (see
+     * [realGapFractions]'s own doc for the full history). So this reaches past the bucket grid
+     * entirely for that decision: [realGapFractions] answers it from the *raw, un-bucketed* real
+     * sample timestamps, the same honest, per-sample source of truth [latencySparkline]'s gaps
+     * already use — a zero-attempt bucket becomes a `null` point (a real gap, eligible for
+     * [sparklineGapFractions] shading) only if it falls inside a real gap by that reckoning;
+     * otherwise it is dropped from the returned list entirely rather than fabricated as a break,
+     * so the line simply connects straight through it to the next real point.
      */
     fun successSparkline(maxBuckets: Int = DEFAULT_MAX_BUCKETS): List<SparklinePoint> {
         require(maxBuckets > 0) { "maxBuckets must be positive, was $maxBuckets" }
@@ -385,10 +399,15 @@ data class ProbeHistory(
             if (sample.succeeded) successes[index]++
         }
 
-        return (0 until buckets).map { index ->
+        val realGaps = realGapFractions(windowed, newest)
+
+        return (0 until buckets).mapNotNull { index ->
             val x = if (buckets == 1) 1f else index.toFloat() / (buckets - 1)
-            val y = if (attempts[index] == 0) null else successes[index].toFloat() / attempts[index]
-            SparklinePoint(x = x, y = y)
+            when {
+                attempts[index] > 0 -> SparklinePoint(x = x, y = successes[index].toFloat() / attempts[index])
+                realGaps.any { x in it } -> SparklinePoint(x = x, y = null)
+                else -> null // quantization artifact, not a real gap -- omit rather than fabricate a break.
+            }
         }
     }
 
@@ -406,11 +425,82 @@ data class ProbeHistory(
      * already-plotted dips readjusting with each new sample. Elapsed time only moves forward
      * (and, once the window is genuinely full, stops changing this at all — see [spanMs]), so
      * boundaries here are stable between any two samples taken close together, exactly the cases
-     * that used to reshuffle.
+     * that used to reshuffle. A later revision briefly *also* capped this by real sample count,
+     * as a way to keep resolution from outrunning sample density — that was reverted (see
+     * [realGapFractions]'s doc for what replaced it): capping by a count that itself grows by
+     * one on almost every sample reintroduces a milder version of the exact same reshuffling
+     * this elapsed-time-only formula exists to avoid. Resolution and "was there a real gap" are
+     * now fully decoupled instead — this stays a pure function of elapsed time, deliberately
+     * blind to how much real data backs any given bucket.
      */
     private fun bucketCount(maxBuckets: Int): Int {
         val coveredFraction = (spanMs.toFloat() / windowMs).coerceIn(0f, 1f)
         return (coveredFraction * maxBuckets).toInt().coerceIn(1, maxBuckets)
+    }
+
+    /**
+     * The x-fraction ranges (same axis as [windowFraction]) where the window's *raw, un-bucketed*
+     * real sample timestamps show a genuine absence of probing — entirely independent of
+     * [successSparkline]'s bucket grid, which is the fix for a real on-device bug.
+     *
+     * That bug: [bucketCount] used to be the *only* thing standing between "no attempts in this
+     * bucket" and "shaded no-data gap," via a bucket's zero-count alone. Once the window read as
+     * fully covered, bucket count pinned at [DEFAULT_MAX_BUCKETS], giving every bucket a *fixed*
+     * time-width (`windowMs / 48`). Narrowing the history window and/or raising the ping-pacing
+     * step delay could push the real per-probe interval past that fixed width, so individual
+     * buckets legitimately came up empty by pigeonhole on a connection with no real interruption
+     * at all — and because bucket boundaries are recomputed fresh, anchored to the newest sample,
+     * on every new sample, *which* buckets came up empty shifted from one sample to the next,
+     * which is what read on-device as a shaded gap that changes size and flickers. A prior fix
+     * capped [bucketCount] by real sample count to close this — closer, but still wrong in two
+     * ways confirmed by simulating realistic (jittered, not perfectly uniform) probe timing: (a)
+     * it only bounds *mean* samples-per-bucket at >= 1, so ordinary timing jitter still leaves
+     * individual buckets at zero fairly often (Poisson-ish clustering, not an even split), and
+     * (b) the cap itself became a second source of instability, since real sample count grows by
+     * one on almost every new sample whenever it's the binding term, reshuffling bucket count
+     * (and every point's x-position) on nearly every sample — a milder version of the exact
+     * "bounce" bug [bucketCount]'s own doc already describes fixing once.
+     *
+     * The real problem was never the bucket *count* — it's that a bucket's zero-count is *blind
+     * to where the real samples actually fell*, no matter how that count is chosen. So this
+     * reasons from the real, un-bucketed sample timestamps directly instead: for every pair of
+     * timestamp-adjacent real samples in [windowed], the raw gap between them is genuine loss of
+     * signal if it exceeds a threshold that adapts to the *recent real sampling cadence* —
+     * [GAP_CADENCE_MULTIPLIER] times the median real inter-sample gap — floored at
+     * [GAP_FLOOR_MS] so a session with too few real gaps to establish a reliable cadence
+     * ([MIN_GAPS_FOR_ADAPTIVE_THRESHOLD]) still has a sound absolute threshold to fall back on.
+     * [GAP_FLOOR_MS] itself is sized comfortably above the worst-case *single* real probe
+     * interval the app's own configurable bounds allow (max 1000ms step delay + the up-to-1000ms
+     * TCP connect timeout a slow-but-real success can take, plus scheduling slop) — validated by
+     * simulation against realistic jittered timing across the app's full window/step-delay range
+     * with zero false positives, and against injected genuine multi-second outages with zero
+     * false negatives (see this class's test suite for the same validation in code).
+     */
+    private fun realGapFractions(windowed: List<ProbeSample>, newest: Long): List<ClosedFloatingPointRange<Float>> {
+        if (windowed.size < 2) return emptyList()
+        val gaps = (1 until windowed.size).map { i -> windowed[i].timestampMs - windowed[i - 1].timestampMs }
+        val threshold = if (gaps.size >= MIN_GAPS_FOR_ADAPTIVE_THRESHOLD) {
+            maxOf(GAP_FLOOR_MS.toDouble(), GAP_CADENCE_MULTIPLIER * median(gaps))
+        } else {
+            GAP_FLOOR_MS.toDouble()
+        }
+        return gaps.indices.mapNotNull { i ->
+            if (gaps[i] > threshold) {
+                windowFraction(windowed[i].timestampMs, newest)..windowFraction(windowed[i + 1].timestampMs, newest)
+            } else {
+                null
+            }
+        }
+    }
+
+    /** The middle value of [values] (average of the two middle values for an even-sized list) —
+     * used by [realGapFractions] as a robust "typical recent cadence" estimate that a single
+     * outlying real gap (a genuine outage among otherwise-normal samples) can't skew the way a
+     * mean would. */
+    private fun median(values: List<Long>): Double {
+        val sorted = values.sorted()
+        val mid = sorted.size / 2
+        return if (sorted.size % 2 == 0) (sorted[mid - 1] + sorted[mid]) / 2.0 else sorted[mid].toDouble()
     }
 
     private fun appended(sample: ProbeSample): ProbeHistory = copy(samples = cappedSamples(samples + sample))
@@ -467,6 +557,32 @@ data class ProbeHistory(
         /** Upper bound on [successSparkline]'s bucket count — enough resolution for a card-sized
          * sparkline without plotting points finer than the eye can separate. */
         const val DEFAULT_MAX_BUCKETS: Int = 48
+
+        /** [realGapFractions]'s adaptive threshold is this many times the recent median real
+         * inter-sample gap — chosen (and validated by simulation, see this class's test suite)
+         * to comfortably clear ordinary timing jitter around any real cadence, including a
+         * single occasional slow-but-real probe, while still catching a sustained real absence
+         * a few multiples of that cadence long. */
+        private const val GAP_CADENCE_MULTIPLIER: Double = 4.0
+
+        /** Floor under [GAP_CADENCE_MULTIPLIER]'s adaptive threshold, and [realGapFractions]'s
+         * sole threshold when there are too few real gaps
+         * ([MIN_GAPS_FOR_ADAPTIVE_THRESHOLD]) to trust a cadence estimate at all. Sized
+         * comfortably above the worst-case *single* real probe interval the app's own
+         * configurable bounds allow: up to 1000ms of user-configured step delay, plus up to
+         * 1000ms for a slow-but-real success riding right up to the TCP connect timeout
+         * ([com.uplinkstatus.core.probe.ProbeTarget.DEFAULT_TIMEOUT_MS]), plus headroom for
+         * ordinary OS-scheduling slop on top -- validated by simulation (this class's test
+         * suite) to produce zero false positives even with only 2-4 real samples at that
+         * worst-case timing, across the app's full step-delay range. */
+        private const val GAP_FLOOR_MS: Long = 3_000L
+
+        /** Minimum number of real inter-sample gaps [realGapFractions] requires before trusting
+         * a median-based cadence estimate over just falling back to [GAP_FLOOR_MS] alone -- with
+         * only a handful of gaps, the "recent cadence" and "the one gap being tested" are too
+         * close to the same data point for a self-referential multiplier to mean anything (most
+         * starkly with a single gap, where the gap *is* the entire cadence estimate). */
+        private const val MIN_GAPS_FOR_ADAPTIVE_THRESHOLD: Int = 5
 
         /** Where a latency point sits when there is no range to scale it against. */
         const val FLAT_LINE_Y: Float = 0.5f
