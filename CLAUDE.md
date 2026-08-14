@@ -173,23 +173,30 @@ The `docs.yml` workflow auto-deploys this site to Pages on pushes to
   quality), not a compliance check. Fix simple issues found in review
   directly; send significant deviations from the stated requirements,
   or complex problems, back to the agent rather than patching over them.
-- No GitHub PR needed to land a feature branch (agent-authored or
-  Claude's own) on `dev` — a PR is pure overhead when Claude is both the
-  reviewer and the one merging, and a reviewed branch sitting open on
-  its own PR just adds a branch the user has to remember to switch to
-  for testing. Once a branch passes review, merge it into `dev` directly
-  (a real merge, not a rebase) and push. This is specifically about
-  feature-branch → `dev` merges; a `dev` → `main` merge still needs an
-  actual PR and the user's explicit go-ahead, per the `main` rule above.
-- One real consequence of skipping the PR: `.github/workflows/
-  android-ci.yml`'s `push` trigger only fires on `main`/`dev` (its
-  `pull_request` trigger is what covers other branches) — so a feature
-  branch merged straight in gets its first real CI signal *after* it's
-  already on `dev`, not before. This matters most for `:app`, which
-  needs the Android SDK CI has and a hosted session may not — accept
-  that and fix forward if CI goes red on `dev`, the same "drive to
-  green" discipline as a red PR, just applied post-merge instead of
-  pre-merge.
+- Open a real GitHub PR against `dev` for each new piece of work (a fix,
+  a feature — the same granularity as "delegate this to an agent" above),
+  even though Claude ends up being both the reviewer and the one who
+  merges it. This was tried the other way (skip the PR, merge the
+  branch straight into `dev`) and reversed by explicit direction — the
+  PR object itself is the point: a running diff and a body the user can
+  read for what changed and what to test, not a gate that needs someone
+  else's approval. Don't open a *second* PR for follow-up commits on
+  the same branch/effort — push them to the existing branch and update
+  that PR's body to describe the accumulated change, the way PR #35
+  (history graphs) and PR #47 (a `dev` → `main` promotion) both
+  naturally grew over many follow-up commits. Once it's ready, merge it
+  into `dev` directly (a real merge, not a rebase, not a squash — keep
+  the individual commits) — still no need to wait for the user's
+  per-PR go-ahead to do that, unlike a `dev` → `main` merge, which does
+  need the user's explicit go-ahead per the `main` rule above.
+- `.github/workflows/android-ci.yml`'s `pull_request` trigger covers
+  every branch a PR is open against, so opening the PR (rather than
+  pushing straight to `dev`) is also what gets `:app` a real CI signal
+  *before* it lands — the environment this file's own instructions run
+  in often has no Android SDK to check that locally. Still fix forward,
+  same "drive to green" discipline, if CI on `dev` itself ever goes red
+  after a merge (e.g. a merge-order interaction the PR's own CI run
+  against `dev`'s tip at push time couldn't have caught).
 
 ### Attribution
 
