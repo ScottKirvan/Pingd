@@ -5,7 +5,6 @@ import org.junit.Assert.assertNotNull
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
-import kotlin.random.Random
 
 /**
  * Plain JVM unit tests for the recording/windowing/aggregation rules behind the settings
@@ -533,17 +532,20 @@ class ProbeHistoryTest {
     }
 
     @Test
-    fun `gap shading also applies to the bucketed success sparkline, not just the per-sample latency one`() {
+    fun `the success sparkline never produces gap spans -- an empty bucket is a miss, not shaded no-data`() {
         // A history sparse enough, relative to its window, that some buckets between real
-        // attempts get none at all -- the same "no data" gap the latency line has, just
-        // bucketed instead of per-sample.
+        // attempts get none at all. This used to be a shaded "no data" gap, the same as the
+        // latency line's; per the current design, it is a 0% miss instead, with no gap span
+        // to shade at all -- sparklineGapFractions only ever finds something to shade here if
+        // successSparkline emitted a null y, which it no longer does.
         val history = ProbeHistory(windowMs = 100_000L)
             .recordSuccess(0, latencyMs = 10)
             .recordSuccess(100_000, latencyMs = 20)
 
-        val spans = sparklineGapFractions(history.successSparkline(maxBuckets = 10))
+        val points = history.successSparkline(maxBuckets = 10)
 
-        assertTrue(spans.isNotEmpty())
+        assertTrue(sparklineGapFractions(points).isEmpty())
+        assertTrue(points.any { it.y == 0f })
     }
 
     // --- Success sparkline: bucketing -----------------------------------------------------
@@ -630,12 +632,19 @@ class ProbeHistoryTest {
         assertEquals(before, after)
     }
 
+    /**
+     * Regression test for the on-device screenshot report: the ping-success graph was showing a
+     * gray shaded "no data" rectangle sitting in the middle of the line, between two regions of
+     * real data. Per the user's explicit instruction, a stretch with no real attempts must not
+     * be shaded or broken -- it must render exactly like a failed probe would: a 0% dip,
+     * connected normally to its neighbors.
+     */
     @Test
-    fun `a time bucket with no attempts in it is a gap, same rule as the latency line`() {
-        // A long silence in the middle (nothing probed between t=1s and t=59s) must read as
-        // "no data here," not as an interpolated rate nobody measured. windowMs set to exactly
-        // the data's own span (a fully-packed window) so the two clusters land cleanly in
-        // separate buckets.
+    fun `a time bucket with no real attempts in it is a miss (y = 0), not a shaded gap`() {
+        // A long silence in the middle (nothing probed between t=1s and t=59s), long enough
+        // relative to the bucket width to leave at least one bucket entirely empty. windowMs
+        // set to exactly the data's own span (a fully-packed window) so the two clusters land
+        // cleanly in separate buckets.
         var history = ProbeHistory(windowMs = 60_750)
         repeat(4) { index -> history = history.recordSuccess(index * 250L, latencyMs = 10) }
         repeat(4) { index -> history = history.recordFailure(60_000L + index * 250L) }
@@ -644,129 +653,88 @@ class ProbeHistoryTest {
 
         // The window is exactly fully covered (span == windowMs), so resolution is maxed out
         // at all 8 requested buckets -- the two four-sample clusters land in the first and last
-        // of them, with every bucket in between left empty.
+        // of them, with every bucket in between having zero real attempts.
         assertEquals(8, points.size)
         assertEquals(1f, points.first().y!!, 0.001f)
         assertEquals(0f, points.last().y!!, 0.001f)
+        // Every bucket between the clusters has no real attempts -- each collapses straight
+        // into a 0% miss (not null, not omitted), the same as if every attempt in it had
+        // failed, and connects normally to its neighbors rather than breaking the line.
+        points.subList(1, points.size - 1).forEach { assertEquals(0f, it.y!!, 0.001f) }
+        assertTrue(sparklineGapFractions(points).isEmpty())
 
-        // With more buckets than the two clusters can fill, the middle really is empty.
+        // With more buckets than the two clusters can fill, the middle really is empty --
+        // still all misses, never a null gap.
         var sparse = ProbeHistory(windowMs = 61_900)
         repeat(20) { index -> sparse = sparse.recordSuccess(index * 100L, latencyMs = 10) }
         repeat(20) { index -> sparse = sparse.recordFailure(60_000L + index * 100L) }
         val sparsePoints = sparse.successSparkline(maxBuckets = 10)
-        assertTrue(sparsePoints.any { it.y == null })
+        assertTrue(sparsePoints.none { it.y == null })
+        assertTrue(sparsePoints.any { it.y == 0f })
     }
 
-    // --- Regression: gap detection must survive realistic (jittered) probe timing -----------
+    // --- No-data-as-miss: the "gap" concept is gone from this graph entirely -----------------
     //
-    // Root cause of the on-device "the ping-success graph shows a shaded 'no data' gap that
-    // changes size and flickers on a perfectly steady connection" report: successSparkline used
-    // to decide "real gap" purely from a bucket's own zero-attempt count, which conflates a
-    // genuine absence of probing with the bucket grid simply being finer than real sample
-    // density supports at that point -- no fixed bucket count is blind to where samples actually
-    // land, so some window/pacing combination can always outrun it. The fix moves gap detection
-    // off the bucket grid entirely, onto the real, un-bucketed sample timestamps (see
-    // ProbeHistory.realGapFractions's own doc). These tests validate that directly against
-    // *realistic*, jittered probe timing -- real intervals vary with network RTT and OS
-    // scheduling, they are never exact multiples of a nominal cadence -- across the app's own
-    // configurable window (HISTORY_WINDOW_RANGE_MS: 1-30 minutes) and step-delay
-    // (STEP_DELAY_RANGE_MS: 0-1000ms) ranges, not just one idealized case.
+    // An earlier version of successSparkline tried to tell a "genuine gap" (a real stretch of
+    // elapsed time with no real attempts) apart from a "quantization artifact" (the bucket grid
+    // simply finer than real sample density supports) and shaded only the former, using an
+    // adaptive real-timestamp-based threshold (see git history for that design). Per explicit
+    // user instruction that design is gone: the settings screen showed a shaded "no data"
+    // rectangle sitting in the middle of the line between two regions of real data, and the user
+    // wants zero visual distinction between "no data" and "failed," full stop. A bucket with no
+    // real attempts is now unconditionally a 0% miss, connected normally to its neighbors, with
+    // the single exception of the leading run before the very first real sample ever recorded in
+    // the displayed window (see successSparkline's own doc for why that one case stays blank).
 
     /**
-     * No interior bucket may read as a gap on an uninterrupted connection, however finely the
-     * bucket grid happens to slice the window relative to the real sampling rate -- across a
-     * sweep of window sizes and nominal per-probe intervals spanning the app's configurable
-     * range, each with several seeds of +/-20% timing jitter (never perfectly even spacing).
+     * A genuine sustained outage -- long enough to leave several buckets with no real attempts
+     * at all -- collapses into a run of 0% dips connected straight through, not a shaded or
+     * broken gap. This is the direct fix for the on-device screenshot report.
      */
     @Test
-    fun `realistically jittered steady sampling never produces a spurious gap across window and pacing combinations`() {
-        val windowsMs = listOf(60_000L, 120_000L, 420_000L, 1_800_000L) // 1min .. 30min
-        val nominalIntervalsMs = listOf(20L, 120L, 300L, 600L, 1_000L, 2_000L)
-        val maxSamplesPerRun = 3_000 // keeps the test fast; well past what any bucket count needs
+    fun `a sustained outage renders as a run of 0 percent dips, never shaded and never a break`() {
+        var history = ProbeHistory(windowMs = 120_000L)
+        // Steady real sampling for the first 20 seconds...
+        repeat(40) { index -> history = history.recordSuccess(index * 500L, latencyMs = 10) }
+        // ...then total silence for 80 seconds (a real, sustained outage)...
+        // ...then steady real sampling resumes for the last 20 seconds, up to the window edge.
+        repeat(40) { index -> history = history.recordSuccess(100_000L + index * 500L, latencyMs = 10) }
 
-        windowsMs.forEach { windowMs ->
-            nominalIntervalsMs.forEach { nominalIntervalMs ->
-                repeat(5) { seed ->
-                    val random = Random(windowMs * 1_000_003 + nominalIntervalMs * 97 + seed)
-                    var history = ProbeHistory(windowMs = windowMs)
-                    var t = 0L
-                    var samples = 0
-                    while (t <= windowMs && samples < maxSamplesPerRun) {
-                        history = history.recordSuccess(t, latencyMs = 10)
-                        samples++
-                        val jitterFraction = random.nextDouble(-0.2, 0.2)
-                        t += (nominalIntervalMs * (1.0 + jitterFraction)).toLong().coerceAtLeast(1L)
-                    }
+        val points = history.successSparkline(maxBuckets = 48)
 
-                    val points = history.successSparkline()
-
-                    assertTrue(
-                        "spurious gap: window=$windowMs interval=$nominalIntervalMs seed=$seed " +
-                            "points=${points.map { it.y }}",
-                        points.none { it.y == null },
-                    )
-                }
-            }
-        }
+        assertTrue(points.none { it.y == null })
+        assertTrue(sparklineGapFractions(points).isEmpty())
+        // The outage sits squarely in the middle of the axis -- every point there is a miss.
+        val duringOutage = points.filter { it.x in 0.3f..0.7f }
+        assertTrue(duringOutage.isNotEmpty())
+        assertTrue(duringOutage.all { it.y == 0f })
     }
 
     /**
-     * The other half of the same fix: a *genuine* sustained outage dropped into otherwise
-     * realistically-jittered steady sampling must still be detected and shaded -- closing gap
-     * detection off from spurious quantization gaps must not also close it off from real ones.
+     * The one preserved exception: buckets before the very first real sample recorded anywhere
+     * in the displayed window stay blank (omitted), not a 0% miss -- ordinary session warm-up
+     * (e.g. right after a fresh install) must not read as "actively failing." Constructed so
+     * real attempts fill only the newer half of the window, leaving the older half with no real
+     * sample to anchor a bucket count off of on its own.
      */
     @Test
-    fun `a genuine outage amid realistically jittered sampling is still detected and shaded`() {
-        val windowMs = 120_000L
-        val nominalIntervalMs = 500L
-        val outageMs = 20_000L // a real, sustained silence -- comfortably past the adaptive threshold
-
-        repeat(5) { seed ->
-            val random = Random(seed * 7919L)
-            var history = ProbeHistory(windowMs = windowMs)
-            var t = 0L
-            var samples = 0
-            val outageStartsAfter = 40 // let real cadence establish itself before the outage
-            while (t <= windowMs && samples < 500) {
-                history = history.recordSuccess(t, latencyMs = 10)
-                samples++
-                val jitterFraction = random.nextDouble(-0.2, 0.2)
-                var step = (nominalIntervalMs * (1.0 + jitterFraction)).toLong().coerceAtLeast(1L)
-                if (samples == outageStartsAfter) step += outageMs
-                t += step
-            }
-
-            val spans = sparklineGapFractions(history.successSparkline())
-
-            assertTrue("seed=$seed: expected the injected outage to be shaded", spans.isNotEmpty())
+    fun `buckets before the very first real sample stay blank, not a 0 percent miss`() {
+        var history = ProbeHistory(windowMs = 60_000)
+        var t = 30_000L
+        while (t <= 60_000L) {
+            history = history.recordSuccess(t, latencyMs = 10)
+            t += 200L
         }
-    }
 
-    /**
-     * Edge case for [ProbeHistory]'s gap-detection floor: with too few real samples to establish
-     * an adaptive cadence estimate (see `MIN_GAPS_FOR_ADAPTIVE_THRESHOLD`), a worst-case *single*
-     * real probe interval -- the maximum configurable 1000ms step delay plus a slow-but-real
-     * success riding right up to the 1000ms TCP connect timeout, plus generous OS-scheduling
-     * slop -- must still not be misread as a genuine gap.
-     */
-    @Test
-    fun `a worst-case single real probe interval with only a few samples is not mistaken for a gap`() {
-        repeat(200) { seed ->
-            val random = Random(seed * 104_729L)
-            var history = ProbeHistory(windowMs = 60_000)
-            var t = 0L
-            repeat(3) {
-                history = history.recordSuccess(t, latencyMs = 10)
-                val stepDelayMs = 1_000L
-                val slowConnectMs = random.nextLong(800, 1_000)
-                val schedulingSlopMs = random.nextLong(0, 300)
-                t += stepDelayMs + slowConnectMs + schedulingSlopMs
-            }
+        val points = history.successSparkline(maxBuckets = 48)
 
-            val points = history.successSparkline()
-
-            assertTrue("seed=$seed: spurious gap from worst-case single-probe timing", points.none { it.y == null })
-        }
+        // Half the window's elapsed time is covered (span = 30s of a 60s window), so
+        // resolution is 24 buckets; the leading 12, before the first real sample at the
+        // window's midpoint, are omitted entirely rather than plotted as a 0f miss.
+        assertEquals(12, points.size)
+        assertTrue(points.none { it.x < 0.5f })
+        assertTrue(points.none { it.y == 0f })
+        assertTrue(points.all { it.y == 1f })
     }
 
     @Test
@@ -814,19 +782,22 @@ class ProbeHistoryTest {
     }
 
     @Test
-    fun `a real gap after an early sample still shows as an empty bucket once enough time has passed`() {
-        // Unlike the short-session case above, there is a genuine elapsed gap here: one sample
-        // right at session start, then nothing until a cluster arrives much later, still within
-        // the window. Enough real time has passed for multiple buckets, and the empty stretch
-        // between the two is a real absence of measurement, not fabricated resolution.
+    fun `a real silence after an early sample shows as a 0 percent miss once enough time has passed`() {
+        // Unlike the short-session case above, there is a genuine elapsed silence here: one
+        // sample right at session start, then nothing until a cluster arrives much later, still
+        // within the window. Enough real time has passed for multiple buckets, and the empty
+        // stretch between the two is a real absence of measurement -- rendered as a miss, not
+        // fabricated resolution and not a shaded gap.
         var history = ProbeHistory(windowMs = 60_000).recordSuccess(0, latencyMs = 10)
         repeat(8) { index -> history = history.recordSuccess(40_000L + index * 100L, latencyMs = 10) }
 
         val points = history.successSparkline(maxBuckets = 6)
 
         assertTrue(points.size > 1)
-        assertTrue(points.any { it.y == null })
-        assertTrue(points.filter { it.y != null }.all { it.y == 1f })
+        assertTrue(points.none { it.y == null })
+        assertTrue(points.any { it.y == 0f })
+        assertTrue(points.filter { it.y != 0f }.all { it.y == 1f })
+        assertTrue(sparklineGapFractions(points).isEmpty())
     }
 
     // --- Markers: master-toggle transitions -----------------------------------------------
