@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.1.1](https://github.com/ScottKirvan/UplinkStatus/compare/v0.1.0...v0.1.1) (2026-08-18)
+
+
+### Bug Fixes
+
+* plot the latency graph on a fixed scale instead of autoscaling ([f7069fe](https://github.com/ScottKirvan/UplinkStatus/commit/f7069fe887f038eed2891ecbf7faa3c83d9e1bac))
+
 ## [0.1.0](https://github.com/ScottKirvan/UplinkStatus/compare/v0.0.0...v0.1.0) (2026-08-14)
 
 
