@@ -277,17 +277,16 @@ latency trend with data that was never actually measured.
   line, not a zero and not a skipped/interpolated point — a gap is the
   honest representation of "no measurement," the same principle the
   tracer's own freeze-in-place behavior already follows for a single
-  failed probe. Vertical position is scaled to whatever latencies
-  actually occurred this session (min/max of the displayed samples,
-  not any absolute notion of "fast") with **fast plotting near the top
-  and slow near the bottom** — "up" reads as "better," which is both
-  the more intuitive direction and the one actually implemented; a
-  session where every reading is 40-60ms still fills the chart's
-  height to show the *shape* of that variation, even though every one
-  of those readings is fast in absolute terms. When every displayed
-  latency is identical (or only one succeeded) there is no range to
-  scale against, so those points sit on the middle line instead of
-  being pinned to an arbitrary edge.
+  failed probe. Vertical position is on a **fixed, absolute** scale —
+  the same green→yellow→red anchors described under "Coloring" below
+  (50ms/200ms/400ms) — with **fast plotting near the top and slow near
+  the bottom**: "up" reads as "better," and, because the scale is fixed
+  rather than scaled to this session's own observed range, a given
+  latency value always plots at the same height regardless of what else
+  has happened in the session. A latency at or beyond the red anchor
+  clamps to the bottom of the chart rather than plotting off-canvas or
+  needing a special case, the same way one at or below the green anchor
+  clamps to the top.
 
 A gap bounded by real data on at least one side (a mid-outage or
 still-ongoing loss of signal, not the graph simply not having filled up
@@ -378,17 +377,15 @@ variations on one:
 - **Latency** is colored green→yellow→red by each point's own
   **absolute** latency in milliseconds — green at or below 50ms, yellow
   at 200ms, red at or above 400ms, linearly interpolated between
-  adjacent anchors and clamped beyond them. This is deliberately a
-  *different scale* than the line's vertical position (which stays
-  session-relative, per the fast-top/slow-bottom description above): a
-  session where every reading is 40-60ms plots across the full height
-  of the chart (relative scaling) while every one of those points still
-  reads solidly green (absolute scaling) — position and color are two
-  independent readings of the same data, not one shared scale. Because
-  color varies point-to-point independent of position, the line is
-  drawn as a sequence of small two-color-gradient pieces (one per pair
-  of consecutive points, from that pair's start color to its end color)
-  rather than as one path in one flat color.
+  adjacent anchors and clamped beyond them. This is the *same* fixed
+  scale the line's vertical position is plotted against (see the
+  fast-top/slow-bottom description above) — position and color are two
+  views of the same fixed anchors, not two independent scales, so a
+  point near the bottom of the chart is always a point colored reddest,
+  and vice versa. Because color varies point-to-point independent of
+  position, the line is drawn as a sequence of small two-color-gradient
+  pieces (one per pair of consecutive points, from that pair's start
+  color to its end color) rather than as one path in one flat color.
 
 The green/yellow/red anchor colors are a fixed, deliberate choice
 (Material green/amber/red 500) rather than drawn from
