@@ -263,7 +263,7 @@ class ProbeHistoryTest {
         val history = ProbeHistory(windowMs = window)
             .recordSuccess(0, latencyMs = 10)
             .recordFailure(1_000)
-            .recordSuccess(2_000, latencyMs = 20)
+            .recordSuccess(2_000, latencyMs = 400)
 
         val points = history.latencySparkline()
 
@@ -274,8 +274,8 @@ class ProbeHistoryTest {
         assertNull(points[1].y)
         assertNotNull(points[2].y)
         // ...and it is genuinely absent rather than plotted at the bottom of the scale.
-        // Fast plots high, slow plots low: the 10ms sample (fastest) sits at the top of the
-        // scale, the 20ms sample (slowest) at the bottom -- "up" means "better."
+        // Fast plots high, slow plots low, on the fixed absolute scale: the 10ms sample sits
+        // at the top, the 400ms (at-the-red-anchor) sample at the bottom -- "up" means "better."
         assertEquals(1f, points[0].y!!, 0.001f)
         assertEquals(0f, points[2].y!!, 0.001f)
     }
@@ -290,15 +290,86 @@ class ProbeHistoryTest {
     @Test
     fun `the fastest latency plots at the top of the scale, the slowest at the bottom`() {
         val history = ProbeHistory(windowMs = window)
-            .recordSuccess(0, latencyMs = 10) // fastest
-            .recordSuccess(1_000, latencyMs = 55) // middle
-            .recordSuccess(2_000, latencyMs = 100) // slowest
+            .recordSuccess(0, latencyMs = 10) // fastest, below the green anchor
+            .recordSuccess(1_000, latencyMs = 200) // exactly the yellow anchor -> middle
+            .recordSuccess(2_000, latencyMs = 400) // at/beyond the red anchor -> bottom
 
         val points = history.latencySparkline()
 
         assertEquals(1f, points[0].y!!, 0.001f) // fastest -> top
-        assertEquals(0.5f, points[1].y!!, 0.001f) // exactly midway -> middle
+        assertEquals(0.5f, points[1].y!!, 0.001f) // yellow anchor -> middle
         assertEquals(0f, points[2].y!!, 0.001f) // slowest -> bottom
+    }
+
+    // --- Latency sparkline: fixed absolute scale (not session-relative) -------------------
+
+    /**
+     * Regression test for the on-device report that the latency graph "appears to be auto
+     * scaling" -- it previously plotted each point relative to that *session's own* observed
+     * min/max latency, so the same latency value could land at a different height depending on
+     * what else happened to be in the history. The fix ties `y` to the same fixed
+     * green/yellow/red anchors [latencyColorFraction] already uses for color, so a given latency
+     * always plots at the same height regardless of session history.
+     */
+    @Test
+    fun `the same latency plots at the same height regardless of what else is in the session`() {
+        // Two histories with wildly different min/max, but both containing a 90ms sample.
+        val narrowRange = ProbeHistory(windowMs = window)
+            .recordSuccess(0, latencyMs = 85)
+            .recordSuccess(1_000, latencyMs = 90)
+            .recordSuccess(2_000, latencyMs = 95)
+
+        val wideRange = ProbeHistory(windowMs = window)
+            .recordSuccess(0, latencyMs = 5)
+            .recordSuccess(1_000, latencyMs = 90)
+            .recordSuccess(2_000, latencyMs = 900)
+
+        val narrowY = narrowRange.latencySparkline()[1].y!!
+        val wideY = wideRange.latencySparkline()[1].y!!
+
+        assertEquals(narrowY, wideY, 0.001f)
+        // And it should match the fixed scale directly, not just match itself across histories.
+        assertEquals(1f - latencyColorFraction(90), narrowY, 0.001f)
+    }
+
+    @Test
+    fun `y decreases monotonically as latency increases across the green-yellow-red range`() {
+        // Strictly between the green and red anchors, so every step is a real interpolated
+        // move rather than two points both clamped flat at the same end.
+        val latencies = listOf(50L, 75L, 125L, 200L, 300L, 400L)
+        var history = ProbeHistory(windowMs = window)
+        latencies.forEachIndexed { index, latencyMs -> history = history.recordSuccess(index * 1_000L, latencyMs) }
+
+        val ys = history.latencySparkline().map { it.y!! }
+
+        ys.zipWithNext().forEach { (earlier, later) ->
+            assertTrue("y must strictly decrease as latency increases: $ys", later < earlier)
+        }
+    }
+
+    @Test
+    fun `latency at or beyond the red anchor clamps to the bottom of the scale instead of going off-canvas`() {
+        val history = ProbeHistory(windowMs = window)
+            .recordSuccess(0, latencyMs = 400) // exactly the red anchor
+            .recordSuccess(1_000, latencyMs = 50_000) // a wildly slow outlier
+
+        val points = history.latencySparkline()
+
+        assertEquals(0f, points[0].y!!, 0.001f)
+        assertEquals(0f, points[1].y!!, 0.001f)
+        points.forEach { assertTrue(it.y!! in 0f..1f) }
+    }
+
+    @Test
+    fun `latency at or below the green anchor clamps to the top of the scale`() {
+        val history = ProbeHistory(windowMs = window)
+            .recordSuccess(0, latencyMs = 0)
+            .recordSuccess(1_000, latencyMs = 50) // exactly the green anchor
+
+        val points = history.latencySparkline()
+
+        assertEquals(1f, points[0].y!!, 0.001f)
+        assertEquals(1f, points[1].y!!, 0.001f)
     }
 
     @Test
@@ -333,13 +404,13 @@ class ProbeHistoryTest {
     }
 
     @Test
-    fun `identical latencies sit on the middle line rather than being pinned to an edge`() {
+    fun `identical latencies plot at the same fixed height, not an arbitrary middle line`() {
         val history = ProbeHistory(windowMs = window)
             .recordSuccess(0, latencyMs = 42)
             .recordSuccess(1_000, latencyMs = 42)
 
         history.latencySparkline().forEach { point ->
-            assertEquals(ProbeHistory.FLAT_LINE_Y, point.y!!, 0.001f)
+            assertEquals(1f - latencyColorFraction(42), point.y!!, 0.001f)
         }
     }
 

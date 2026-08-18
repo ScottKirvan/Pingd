@@ -35,14 +35,15 @@ data class ProbeSample(
 data class SparklinePoint(
     val x: Float,
     val y: Float?,
-    /** The raw measured latency (ms) behind this point's [y], carried through purely so the
-     * latency graph can color each point by *absolute* latency ([latencyColorFraction]) — a
-     * deliberately different scale than [y]'s session-relative min/max autoscaling, see
-     * [ProbeHistory.latencySparkline]'s own doc. Always `null` on [ProbeHistory.successSparkline]
-     * points, which have no latency of their own; `null` here exactly when [y] is `null` on the
-     * latency sparkline (a failed probe has neither a position nor a color to give). This is
-     * the only field on this class that isn't itself display-ready — the ms→`Color` mapping is
-     * an `:app`-side, Compose-specific concern this pure-Kotlin module has no dependency on; see
+    /** The raw measured latency (ms) behind this point's [y], carried through separately even
+     * though [ProbeHistory.latencySparkline] now derives [y] itself from this same value via
+     * [latencyColorFraction] — it's what lets the latency graph's line coloring
+     * ([latencyColorFraction]) stay pure ms→fraction arithmetic with no notion of a plotted
+     * position at all. Always `null` on [ProbeHistory.successSparkline] points, which have no
+     * latency of their own; `null` here exactly when [y] is `null` on the latency sparkline (a
+     * failed probe has neither a position nor a color to give). This is the only field on this
+     * class that isn't itself display-ready — the ms→`Color` mapping is an `:app`-side,
+     * Compose-specific concern this pure-Kotlin module has no dependency on; see
      * [latencyColorFraction] for the pure, unit-tested part of that mapping.
      */
     val latencyMs: Long? = null,
@@ -91,11 +92,12 @@ private const val LATENCY_COLOR_RED_MS = 400L
 
 /**
  * How far [latencyMs] sits toward "slow" on the latency graph's **absolute** green→yellow→red
- * color scale — deliberately a different scale than [SparklinePoint.y]'s session-relative
- * min/max position (see [ProbeHistory.latencySparkline]'s doc for why those two are kept
- * independent). Returns `0f` at or below [LATENCY_COLOR_GREEN_MS] (fully green), `0.5f` at
- * [LATENCY_COLOR_YELLOW_MS] (fully yellow), `1f` at or above [LATENCY_COLOR_RED_MS] (fully red),
- * clamped beyond either end and linearly interpolated between adjacent anchors otherwise.
+ * color scale. This is also the fixed scale [ProbeHistory.latencySparkline] plots
+ * [SparklinePoint.y] against (as `1f - latencyColorFraction(latencyMs)`), so a point's vertical
+ * position and its line color always agree — see that function's own doc. Returns `0f` at or
+ * below [LATENCY_COLOR_GREEN_MS] (fully green), `0.5f` at [LATENCY_COLOR_YELLOW_MS] (fully
+ * yellow), `1f` at or above [LATENCY_COLOR_RED_MS] (fully red), clamped beyond either end and
+ * linearly interpolated between adjacent anchors otherwise.
  *
  * Pure arithmetic, with no notion of `Color` at all — turning this fraction into an actual
  * on-screen color (picking the green/yellow/red endpoints and interpolating between them) is an
@@ -310,43 +312,34 @@ data class ProbeHistory(
 
     /**
      * The latency trend, one point per *displayed* sample (see [windowedSamples]):
-     * [SparklinePoint.y] is the sample's latency scaled against the displayed min/max —
-     * **fast plots high, slow plots low** (`y = 1` is the fastest displayed latency, `y = 0` is
-     * the slowest) — and `null` for a failed probe. [SparklinePoint.x] is [windowFraction] —
-     * see its doc for why the axis is anchored to the configured window rather than stretched
-     * to fill from whatever span is currently displayed.
+     * [SparklinePoint.y] is the sample's latency plotted on a **fixed, absolute** scale —
+     * **fast plots high, slow plots low** — and `null` for a failed probe. [SparklinePoint.x] is
+     * [windowFraction] — see its doc for why the axis is anchored to the configured window
+     * rather than stretched to fill from whatever span is currently displayed.
      *
-     * This min/max scaling is deliberately *relative* to whatever latencies actually occurred
-     * this session, not tied to any absolute notion of "fast" or "slow" — a session where every
-     * reading is 40-60ms should still fill the chart's height and show the *shape* of that
-     * variation, even though every one of those readings is fast in absolute terms. Each point's
-     * *absolute* latency is carried separately in [SparklinePoint.latencyMs], for callers that
-     * want to color the line by an absolute scale instead (see [latencyColorFraction]) — the two
-     * are deliberately independent scales, not one shared one.
+     * The scale is deliberately *not* relative to whatever latencies happened to occur this
+     * session: the same latency value always plots at the same vertical position, session to
+     * session and history to history, so the height of a point is itself meaningful rather than
+     * only meaningful relative to the rest of the currently displayed data. Concretely, `y` is
+     * derived straight from [latencyColorFraction] — the same fixed green→yellow→red anchors
+     * ([LATENCY_COLOR_GREEN_MS]/[LATENCY_COLOR_YELLOW_MS]/[LATENCY_COLOR_RED_MS]) already used to
+     * *color* this graph's line — as `1f - latencyColorFraction(latencyMs)`, so a point's
+     * position and its color always agree: the reddest point is always the lowest one. That
+     * reuses [latencyColorFraction]'s own clamping too, so a latency at or beyond
+     * [LATENCY_COLOR_RED_MS] plots pinned at the bottom (`y = 0f`) rather than off-canvas or
+     * needing a special case here, exactly the way one at or below [LATENCY_COLOR_GREEN_MS]
+     * plots pinned at the top (`y = 1f`).
      *
      * One point per *sample*, never aggregated, precisely so a failure stays a visible gap
-     * exactly where it happened. When every displayed latency is identical (or only one
-     * succeeded) there is no range to scale against, so those points sit on the middle line
-     * rather than being pinned to an arbitrary edge.
+     * exactly where it happened.
      */
     fun latencySparkline(): List<SparklinePoint> {
         val windowed = windowedSamples
         if (windowed.isEmpty()) return emptyList()
-        val latencies = windowed.mapNotNull { it.latencyMs }
-        val min = latencies.minOrNull()
-        val max = latencies.maxOrNull()
         val newest = windowed.last().timestampMs
         return windowed.map { sample ->
             val x = windowFraction(sample.timestampMs, newest)
-            val y = sample.latencyMs?.let { latency ->
-                if (min == null || max == null || max == min) {
-                    FLAT_LINE_Y
-                } else {
-                    // Fast (== min) -> 1 (top), slow (== max) -> 0 (bottom): "up" reads as
-                    // "better," matching how position on this chart is meant to be read.
-                    (max - latency).toFloat() / (max - min)
-                }
-            }
+            val y = sample.latencyMs?.let { latency -> 1f - latencyColorFraction(latency) }
             SparklinePoint(x = x, y = y, latencyMs = sample.latencyMs)
         }
     }
@@ -583,8 +576,5 @@ data class ProbeHistory(
          * close to the same data point for a self-referential multiplier to mean anything (most
          * starkly with a single gap, where the gap *is* the entire cadence estimate). */
         private const val MIN_GAPS_FOR_ADAPTIVE_THRESHOLD: Int = 5
-
-        /** Where a latency point sits when there is no range to scale it against. */
-        const val FLAT_LINE_Y: Float = 0.5f
     }
 }
