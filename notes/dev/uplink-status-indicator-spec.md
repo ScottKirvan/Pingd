@@ -288,62 +288,49 @@ latency trend with data that was never actually measured.
   needing a special case, the same way one at or below the green anchor
   clamps to the top.
 
-A gap bounded by real data on at least one side (a mid-outage or
-still-ongoing loss of signal, not the graph simply not having filled up
-yet) is additionally shaded, not just left as a break in the line — a
-break with nothing else marking it reads as a rendering glitch rather
-than a deliberate "nothing was measured here." A gap at the very start
-of the window is deliberately left unshaded: it's indistinguishable
-from the window still filling up (the normal, expected look early in a
-session), and shading it would misrepresent ordinary warm-up as a lost
-signal. This applies to both graphs — the success line's bucketed gaps
-(a time bucket with zero attempts in it) get the same treatment as the
-latency line's per-sample ones.
+A gap in the **latency** line, bounded by real data on at least one side
+(a mid-outage or still-ongoing loss of signal, not the graph simply not
+having filled up yet), is additionally shaded, not just left as a break
+in the line — a break with nothing else marking it reads as a rendering
+glitch rather than a deliberate "nothing was measured here." A gap at
+the very start of the window is deliberately left unshaded: it's
+indistinguishable from the window still filling up (the normal,
+expected look early in a session), and shading it would misrepresent
+ordinary warm-up as a lost signal.
+
+**The success line has no gap concept at all — no shading, no break.**
+A time bucket with zero real attempts in it is treated exactly as if
+every attempt in it had failed: it plots at 0%, a dip connected normally
+to its neighbors, with nothing visually distinguishing "nothing was
+attempted here" from "everything attempted here failed." (An earlier
+version of this graph tried to draw that distinction — shading a bucket
+only when an adaptive, real-sample-timestamp-based threshold judged the
+silence "genuine" rather than an artifact of the bucket grid outrunning
+real sample density — but it still produced an on-device report of a
+shaded "no data" region sitting in the middle of otherwise-real data.
+The distinction itself was the problem: from the user's point of view,
+"no data" and "failed" are not different enough to deserve different
+treatment, so the success graph no longer tries to tell them apart.)
+
+The one exception: the run of buckets before the very first real sample
+recorded anywhere in the currently displayed window stays blank —
+omitted from the line entirely, not a 0% dip. That boundary is the same
+one the ping-success card's own big number already draws (see the
+"before the first probe" note below): collapsing ordinary session
+warm-up — the normal look for, e.g., the first few seconds after a
+fresh install — into a flatlined "0% loss" would misrepresent "hasn't
+started checking yet" as "actively failing," which is a worse,
+more misleading result than the shaded-gap flicker this simplification
+replaces.
 
 The success line's bucket *count* grows with how much of the configured
 window real elapsed time has covered, up to a fixed ceiling (48
 buckets) — a pure function of elapsed time, deliberately blind to how
-many real attempts back any given bucket (see the note on why that
-matters just below).
-
-A zero-attempt bucket is not, by itself, enough to call something a
-gap. It's one of two entirely different things: a **genuine gap** (a
-real stretch of elapsed time with no real attempts at all — an actual
-outage, or the `DISABLED`/out-of-scope marker period) or a
-**quantization artifact** (the bucket grid is simply finer than the
-real sample density happens to support at that point, even though
-probing never stopped). Deciding this from the bucket grid alone can't
-work in general: no fixed bucket count is blind to where real samples
-actually land, so *some* narrow-window/slow-pacing combination can
-always outrun *any* resolution and manufacture a spurious empty bucket.
-Concretely: narrowing the history window and/or raising the ping-pacing
-step delay can push the real per-probe interval past a bucket's fixed
-time-width, so individual buckets land empty by pigeonhole on a
-connection with no real interruption — and because bucket boundaries
-are recomputed fresh, anchored to the newest sample, on every new
-sample, *which* buckets come up empty shifts from one sample to the
-next, which is what read on-device as a shaded "no data" gap that
-changes size and flickers.
-
-The fix reaches past the bucket grid entirely for the real/artifact
-decision: it reasons from the window's **raw, un-bucketed real sample
-timestamps** instead — the same honest, per-sample source of truth the
-latency line's own gaps already use. The gap between two
-timestamp-adjacent real samples counts as genuine loss of signal only
-if it exceeds a threshold that adapts to the *recent real sampling
-cadence* (several times the median real inter-sample gap), floored at a
-fixed minimum for sessions with too few real gaps to establish a
-reliable cadence estimate — that floor is sized comfortably above the
-worst-case *single* real probe interval the app's own configurable
-bounds allow (maximum step delay plus a slow-but-real success riding up
-to the connect timeout, plus scheduling slop). A zero-attempt bucket
-becomes a shaded gap only if it falls inside a real gap by that
-reckoning; otherwise the line simply connects straight through it to
-the next real point rather than fabricating a break. This has been
-validated by simulation against realistic *jittered* probe timing
-(never perfectly even spacing) across the app's full window/step-delay
-range, with zero spurious gaps, and against injected genuine multi-
-second outages, with zero missed detections.
+many real attempts back any given bucket. This resolution question is
+independent of the no-gaps rule above: whatever the bucket count, a
+zero-attempt bucket (other than the pre-first-sample exception) is
+always a miss now, never a decision about whether the silence behind it
+was "genuine."
 
 Both sparklines' time axis is anchored to the *configured window*, not
 stretched to fill from whatever span of samples happens to be displayed
@@ -368,12 +355,15 @@ variations on one:
   is purely positional/decorative, not a data encoding: the color at a
   given x-position never depends on the success rate plotted there,
   only on where it sits on the axis. The gradient is anchored to the
-  full canvas width, not to whichever disjoint segment (see the gap
-  handling above) happens to be drawn — a segment sitting in the middle
-  of the timeline shows the middle portion of the overall sweep rather
-  than resetting to its own local start-to-end gradient, which is what
-  a gradient brush would do by default if built per-segment instead of
-  once against the whole canvas.
+  full canvas width rather than to the line as drawn, so that if the
+  line ever is split into more than one segment — in practice this
+  graph no longer produces the kind of gap that would cause that (see
+  above), but the drawing code is shared with the latency graph, which
+  still can — a segment sitting in the middle of the timeline shows the
+  middle portion of the overall sweep rather than resetting to its own
+  local start-to-end gradient, which is what a gradient brush would do
+  by default if built per-segment instead of once against the whole
+  canvas.
 - **Latency** is colored green→yellow→red by each point's own
   **absolute** latency in milliseconds — green at or below 50ms, yellow
   at 200ms, red at or above 400ms, linearly interpolated between
