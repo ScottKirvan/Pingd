@@ -678,10 +678,11 @@ class ProbeHistoryTest {
     fun `the success line plots a rate per time bucket, not a zero-or-one square wave`() {
         // 8 attempts over a fully-packed 7-second window, 6 of them successful. Buckets are
         // fixed 3.5-second slots of absolute time (not an even relative split of the retained
-        // span), so the two buckets end up with 3 and 4 real attempts respectively rather than
-        // 4 and 4 -- the t=0 attempt lands exactly on the window's own left edge, a boundary a
-        // fixed slot grid can occasionally exclude (see successBucketSlot's doc) -- but the core
-        // point stands either way: a fractional rate per bucket, not a 0/1 square wave.
+        // span): the t=0 attempt lands exactly on the window's own left edge, a boundary that
+        // rounds it into its own bucket a naive constant-width count wouldn't otherwise reach --
+        // the display is widened by one bucket rather than silently dropping it (see
+        // successSparkline's own doc), so t=0 gets bucket 0 to itself, and the remaining two
+        // clusters (3 and 4 real attempts respectively) fill buckets 1 and 2.
         var history = steadyStateHistory(windowMs = 7_000, bucketWidthMs = 3_500)
         listOf(true, true, true, false, true, true, true, false).forEachIndexed { index, ok ->
             val at = index * 1_000L
@@ -690,9 +691,10 @@ class ProbeHistoryTest {
 
         val points = history.successSparkline(bucketWidthMs = 3_500)
 
-        assertEquals(2, points.size)
-        assertEquals(2f / 3f, points[0].y!!, 0.001f) // t=1000,2000,3000 -> 2 successes / 3 attempts.
-        assertEquals(0.75f, points[1].y!!, 0.001f) // t=4000,5000,6000,7000 -> 3 successes / 4 attempts.
+        assertEquals(3, points.size)
+        assertEquals(1f, points[0].y!!, 0.001f) // t=0 alone -> 1 success / 1 attempt.
+        assertEquals(2f / 3f, points[1].y!!, 0.001f) // t=1000,2000,3000 -> 2 successes / 3 attempts.
+        assertEquals(0.75f, points[2].y!!, 0.001f) // t=4000,5000,6000,7000 -> 3 successes / 4 attempts.
     }
 
     @Test
@@ -715,15 +717,17 @@ class ProbeHistoryTest {
         // displayed buckets -- the opposite of the old design, where count was pinned at
         // DEFAULT_MAX_BUCKETS and width varied instead. windowMs is set well past this
         // history's own warm-up era (a 2000-second span against a 1-second bucket width), so
-        // this is purely ceil(windowMs / bucketWidthMs) steady-state arithmetic: exactly
-        // windowMs / 1000 buckets for each of these three window sizes.
+        // this is purely ceil(windowMs / bucketWidthMs) steady-state arithmetic, plus exactly one
+        // extra bucket in each case: windowedSamples' own earliest sample rounds to a slot the
+        // naive ceil() count alone wouldn't reach, and the display is widened by one bucket
+        // rather than silently dropping it (see successSparkline's own doc).
         val bucketWidthMs = 1_000L
         var history = steadyStateHistory(windowMs = 30 * 60_000L, bucketWidthMs = bucketWidthMs)
         repeat(2_000) { index -> history = history.recordSuccess(index * 1_000L, latencyMs = 10) }
 
-        assertEquals(60, history.withWindowMs(60_000L).successSparkline(bucketWidthMs = bucketWidthMs).size)
-        assertEquals(420, history.withWindowMs(7 * 60_000L).successSparkline(bucketWidthMs = bucketWidthMs).size)
-        assertEquals(1_800, history.withWindowMs(30 * 60_000L).successSparkline(bucketWidthMs = bucketWidthMs).size)
+        assertEquals(61, history.withWindowMs(60_000L).successSparkline(bucketWidthMs = bucketWidthMs).size)
+        assertEquals(421, history.withWindowMs(7 * 60_000L).successSparkline(bucketWidthMs = bucketWidthMs).size)
+        assertEquals(1_801, history.withWindowMs(30 * 60_000L).successSparkline(bucketWidthMs = bucketWidthMs).size)
     }
 
     /**
@@ -735,6 +739,13 @@ class ProbeHistoryTest {
      * the narrower window's buckets must be exactly the trailing slice of the wider window's own
      * buckets: same real-world slot, same real samples behind each one, same value -- proof that
      * narrowing/widening only changes how many already-assigned buckets are in view.
+     *
+     * The one legitimate exception, excluded from the comparison below: the narrower window's own
+     * *leftmost* bucket can carry a genuinely different value than the wider window's -- not a
+     * rebinning artifact, but [windowedSamples]' own hard real-time cutoff (not aligned to bucket
+     * boundaries) excluding some of that bucket's older real attempts from the narrower window's
+     * count while the wider window still includes them. Every other (interior) bucket is
+     * unaffected by that and must match exactly.
      */
     @Test
     fun `a sample's bucket grouping is stable across a window-length change -- narrowing never rebins`() {
@@ -755,13 +766,15 @@ class ProbeHistoryTest {
         val narrow = history.withWindowMs(3 * 60_000L).successSparkline(bucketWidthMs)
 
         assertTrue("narrowing must never show more buckets than the wider window did", narrow.size <= wide.size)
-        // Both windows share the same newest sample, so the narrow window's buckets are exactly
-        // the wide window's own trailing buckets -- not a freshly rebinned grid of a different
-        // width.
-        assertEquals(wide.takeLast(narrow.size).map { it.y }, narrow.map { it.y })
+        // Both windows share the same newest sample, so the narrow window's *interior* buckets
+        // (everything but its own leftmost -- see this test's own doc) are exactly the wide
+        // window's own trailing buckets -- not a freshly rebinned grid of a different width.
+        assertEquals(wide.takeLast(narrow.size - 1).map { it.y }, narrow.drop(1).map { it.y })
 
         // Widening back afterward must reveal exactly the same values as before narrowing, per
-        // sample -- not a second, independently rebinned grid.
+        // sample -- not a second, independently rebinned grid. Both sides share the same windowMs
+        // here (420_000L), so there is no leftmost-bucket exception to carve out -- this must
+        // match exactly, in full.
         val widenedAgain = history.withWindowMs(3 * 60_000L).withWindowMs(7 * 60_000L).successSparkline(bucketWidthMs)
         assertEquals(wide.map { it.y }, widenedAgain.map { it.y })
     }
@@ -827,16 +840,23 @@ class ProbeHistoryTest {
 
         val points = history.successSparkline(bucketWidthMs = 7_594)
 
-        // The window is exactly fully covered (span == windowMs), so resolution is maxed out
-        // at all 8 buckets that fit -- the two four-sample clusters land in the first and last
-        // of them, with every bucket in between having zero real attempts.
-        assertEquals(8, points.size)
-        assertEquals(1f, points.first().y!!, 0.001f)
+        // The window is exactly fully covered (span == windowMs), so resolution is maxed out at
+        // every bucket that fits: 8 from ceil(60_750 / 7_594), plus one more -- windowedSamples'
+        // own earliest sample, t=0, lands exactly on a bucket boundary and rounds into a slot the
+        // naive ceil() count alone wouldn't reach; the display is widened by one bucket to
+        // include it rather than silently drop it (see successSparkline's own doc). That gives
+        // t=0 a narrow bucket of its own, separate from the rest of the leading cluster
+        // (t=250,500,750, which share the next bucket over) -- both still real successes, at the
+        // very start of the axis, with every bucket after them and before the trailing failure
+        // cluster having zero real attempts.
+        assertEquals(9, points.size)
+        assertEquals(1f, points[0].y!!, 0.001f) // t=0 alone.
+        assertEquals(1f, points[1].y!!, 0.001f) // t=250, 500, 750.
         assertEquals(0f, points.last().y!!, 0.001f)
-        // Every bucket between the clusters has no real attempts -- each collapses straight
+        // Every bucket between the two clusters has no real attempts -- each collapses straight
         // into a 0% miss (not null, not omitted), the same as if every attempt in it had
         // failed, and connects normally to its neighbors rather than breaking the line.
-        points.subList(1, points.size - 1).forEach { assertEquals(0f, it.y!!, 0.001f) }
+        points.subList(2, points.size - 1).forEach { assertEquals(0f, it.y!!, 0.001f) }
         assertTrue(sparklineGapFractions(points).isEmpty())
 
         // With more buckets than the two clusters can fill, the middle really is empty --
@@ -889,17 +909,27 @@ class ProbeHistoryTest {
 
         // bucketCount + 1 samples, one full extra tick past a bare minimum warm-up, so the
         // retained span is exactly windowMs (not one pacing interval short of it) regardless of
-        // how a given implementation decides "how full is full." No steadyStateHistory primer
-        // needed here: the first sample (i=1, t=1000) is already exactly one bucketWidthMs past
-        // its own warm-up anchor by the time the tracked/stability range below is exercised (see
-        // this test's own values), so the session's brief warm-up era never overlaps it.
-        var history = ProbeHistory(windowMs = stableWindowMs)
+        // how a given implementation decides "how full is full." steadyStateHistory here matters:
+        // without it, the very first sample recorded (i=1, t=1000) *is* this history's own
+        // warm-up anchor, so its own elapsed-since-anchor is trivially 0 forever -- it never
+        // "ages out" of warm-up no matter how much later real time passes elsewhere in the
+        // session, and stays in the display (and forces extra warm-up-width buckets into view)
+        // for as long as the configured window is wide enough to still include it. That's not
+        // what this test is about; steadyStateHistory keeps it purely a steady-state check.
+        var history = steadyStateHistory(windowMs = stableWindowMs, bucketWidthMs = bucketWidthMs)
         for (i in 1..(bucketCount + 1)) {
             val t = i * 1_000L
             history = if (succeededAt(i)) history.recordSuccess(t, latencyMs = 10) else history.recordFailure(t)
         }
-        // The window is now fully packed: one real sample per fixed slot, bucketCount points.
-        assertEquals(bucketCount, history.successSparkline(bucketWidthMs).size)
+        // The window is now fully packed: one real sample per fixed slot, plus one extra bucket
+        // throughout -- windowedSamples' own earliest sample always lands exactly on the
+        // window's cutoff boundary here, which (per the closed-on-right slot convention) rounds
+        // it into the slot just *before* the naive bucketCount-wide range, and the display is
+        // widened by one bucket to include it rather than silently dropping it. That extra
+        // bucket is a constant, uniform offset every tick (not a source of instability) -- the
+        // tracked-index math below only cares about position *from the right edge*, which this
+        // doesn't change.
+        assertEquals(bucketCount + 1, history.successSparkline(bucketWidthMs).size)
 
         // Track the sample recorded at i = trackedI. At k ticks later it must sit exactly k
         // positions in from the right edge, still carrying its own known outcome.
@@ -940,6 +970,101 @@ class ProbeHistoryTest {
         // The stability check above must have actually exercised multiple ticks, not vacuously
         // passed because the loop's range never satisfied its own guards.
         assertNotNull(previousValue)
+    }
+
+    // --- Full-coverage invariant: every windowed sample lands in exactly one displayed bucket ---
+    //
+    // Regression test for a bug an independent Python port of this exact bucketing logic found
+    // by stress-testing across window sizes and pacing intervals: the original left-edge
+    // detection compared raw slot *numbers* (`naiveLeftmostSlot < warmupSlotBase`) to decide
+    // whether to apply a real-time-based correction at all -- a strict `<` comparison that is a
+    // false negative exactly *at* the boundary itself (when the two are equal). That silently
+    // excluded real, already-counted-in-attemptCount samples from the display for a substantial,
+    // repeated fraction of ticks in ordinary usage -- not the tiny, already-accepted "up to one
+    // bucket-width" boundary artifact successBucketSlot's own doc describes, which this is a
+    // categorically different, much larger problem from. The fix (see successSparkline's own
+    // doc) replaced the heuristic with the actual invariant this test verifies directly and
+    // unconditionally: the display must always reach back at least as far as windowedSamples'
+    // own earliest retained sample.
+    //
+    // [SparklinePoint] doesn't expose raw per-bucket attempt counts, so this test verifies the
+    // invariant through a closed-form identity instead of inspecting bucket values directly:
+    // successSparkline's returned list omits only a *leading* run of buckets (the ones strictly
+    // before the earliest windowed sample's own slot -- see its own doc), so its length must
+    // always equal `newestSlot - earliestWindowedSampleSlot + 1`, with no clamping shortening it.
+    // Under the bug, [firstSampleIndex]'s `coerceIn(0, ...)` clamp masked what would otherwise
+    // have been a negative index -- silently truncating the returned list below that identity's
+    // value instead of surfacing the problem. bucketSlot/warmupLevel/successBucketSlot are
+    // mirrored here test-locally (the same technique used to find this bug in the first place,
+    // and the established pattern elsewhere in this suite for algorithm-level verification) to
+    // compute the identity's two slot numbers from the outside, using only [ProbeHistory]'s
+    // public [samples] and [BUCKET_WIDTH_MS].
+
+    private fun testSuccessBucketSlot(timestampMs: Long, bucketWidthMs: Long): Long =
+        Math.floorDiv(timestampMs - 1, bucketWidthMs)
+
+    private fun testWarmupLevel(elapsedMs: Long, bucketWidthMs: Long): Int {
+        val warmupLevels = 6 // must match ProbeHistory's own private WARMUP_LEVELS.
+        val unit = (bucketWidthMs / ((1L shl warmupLevels) - 1)).coerceAtLeast(1L)
+        for (level in 0 until warmupLevels - 1) {
+            val boundary = ((1L shl (level + 1)) - 1) * unit
+            if (elapsedMs < boundary) return level
+        }
+        return warmupLevels - 1
+    }
+
+    private fun testBucketSlot(timestampMs: Long, bucketWidthMs: Long, anchorMs: Long): Long {
+        val warmupLevels = 6
+        val warmupEndMs = anchorMs + bucketWidthMs
+        if (timestampMs >= warmupEndMs) return testSuccessBucketSlot(timestampMs, bucketWidthMs)
+        val warmupSlotBase = testSuccessBucketSlot(warmupEndMs, bucketWidthMs)
+        return warmupSlotBase - warmupLevels + testWarmupLevel(timestampMs - anchorMs, bucketWidthMs)
+    }
+
+    @Test
+    fun `every windowed sample lands in exactly one displayed bucket, at every tick of a running session`() {
+        // A sweep of window sizes and pacing intervals -- the same dimensions the independent
+        // Python port swept to find this bug, including the exact window/interval combinations
+        // it reported triggering on (60_000/500, 60_000/200, 60_000/50).
+        val windowSizesMs = listOf(60_000L, 120_000L, 420_000L)
+        val intervalsMs = listOf(50L, 200L, 500L, 1_000L, 2_000L)
+
+        windowSizesMs.forEach { windowMs ->
+            intervalsMs.forEach { intervalMs ->
+                var history = ProbeHistory(windowMs = windowMs)
+                val bucketWidthMs = ProbeHistory.BUCKET_WIDTH_MS
+
+                // Many consecutive ticks -- covering session warm-up, the transition into a
+                // fully-packed window, and long-running steady state, for every config.
+                repeat(250) { i ->
+                    val t = i * intervalMs
+                    history = if (i % 5 != 0) {
+                        history.recordSuccess(t, latencyMs = 10)
+                    } else {
+                        history.recordFailure(t)
+                    }
+
+                    val anchorMs = history.samples.first().timestampMs
+                    val newest = history.samples.last().timestampMs
+                    // Mirrors windowedSamples' own documented cutoff rule exactly -- see its doc.
+                    val cutoff = newest - windowMs
+                    val earliestWindowed = history.samples.first { it.timestampMs >= cutoff }.timestampMs
+
+                    val newestSlot = testBucketSlot(newest, bucketWidthMs, anchorMs)
+                    val earliestWindowedSlot = testBucketSlot(earliestWindowed, bucketWidthMs, anchorMs)
+                    val expectedSize = (newestSlot - earliestWindowedSlot + 1).toInt()
+
+                    val actualSize = history.successSparkline().size
+                    assertEquals(
+                        "windowMs=$windowMs intervalMs=$intervalMs tick=$i: successSparkline() returned " +
+                            "$actualSize points but the earliest windowed sample (t=$earliestWindowed) needs " +
+                            "$expectedSize to be fully covered -- real data would be silently dropped from the line",
+                        expectedSize,
+                        actualSize,
+                    )
+                }
+            }
+        }
     }
 
     // --- Session warm-up: resolution starts fine and coarsens into the fixed grid (Problem 2) ---
