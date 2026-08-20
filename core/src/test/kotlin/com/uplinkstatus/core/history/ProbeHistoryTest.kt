@@ -704,23 +704,26 @@ class ProbeHistoryTest {
      * attempt count at all any more (it depends only on the configured window at a fixed width --
      * see [ProbeHistory.successSparkline]'s own doc): this checks that property directly.
      *
-     * Both histories are paced *densely* (100ms/50ms, comfortably finer than any warm-up
-     * sub-bucket) and share the exact same first/newest
-     * timestamps, deliberately to keep this test isolated from a *different*, legitimate source
-     * of size variation: an empty warm-up sub-bucket is now omitted rather than shown as a 0%
-     * miss (see the dedicated "session warm-up: no false dips" test group), so a genuinely
-     * *sparse* history and a *dense* one covering the same elapsed span can legitimately produce
-     * different sizes for that unrelated reason -- not the attempt-count-inflates-bucket-count
-     * regression this test exists to catch. Both histories here are dense enough that no warm-up
-     * sub-bucket is ever empty for either, so any size difference could only come from that
-     * regression.
+     * Both histories are built via [steadyStateHistory], which pushes the session's warm-up
+     * anchor safely into the past before either one's own `t >= 0` samples are recorded --
+     * exactly the same isolation technique the bucket-width group above uses, and for the same
+     * reason: an empty warm-up sub-bucket is omitted rather than shown as a 0% miss (see the
+     * dedicated "session warm-up: no false dips" test group), and *which* warm-up levels a given
+     * pacing happens to land in is itself pacing-dependent -- a genuinely different, already-
+     * legitimate source of size variation this test must not conflate with the
+     * attempt-count-inflates-bucket-count regression it actually exists to catch. Isolating both
+     * histories from warm-up entirely removes that confound regardless of what the two pacings
+     * happen to be, rather than relying on picking pacing values finer than every warm-up level
+     * (fragile: warm-up's finest level width is itself a function of the production bucket width,
+     * which this fix's own change to [ProbeHistory.BUCKET_WIDTH_MS] already demonstrated once).
      */
     @Test
     fun `visible resolution depends on elapsed time, not on how many attempts arrived in it`() {
-        var normal = ProbeHistory(windowMs = 60_000)
+        val bucketWidthMs = ProbeHistory.BUCKET_WIDTH_MS
+        var normal = steadyStateHistory(windowMs = 60_000, bucketWidthMs = bucketWidthMs)
         repeat(201) { index -> normal = normal.recordSuccess(index * 100L, latencyMs = 10) } // t=0..20_000.
 
-        var doubled = ProbeHistory(windowMs = 60_000)
+        var doubled = steadyStateHistory(windowMs = 60_000, bucketWidthMs = bucketWidthMs)
         // Twice the attempts, packed into the exact same 0..20_000 span.
         repeat(401) { index -> doubled = doubled.recordSuccess(index * 50L, latencyMs = 10) }
 
@@ -805,19 +808,20 @@ class ProbeHistoryTest {
      * next, checked directly too -- for as long as it is neither the live point nor within one
      * slot-width of aging off the window's trailing edge.
      *
-     * Swept across bucket widths spanning fast pacing (200ms) through the production default
-     * ([ProbeHistory.BUCKET_WIDTH_MS], ~8.75s -- the width a real 7-minute-default session
-     * actually uses) up to a 60s width paired with a 30-minute window, the widest the settings
-     * screen's slider allows (see `UplinkPreferences.HISTORY_WINDOW_RANGE_MS`). This property
-     * predates this branch (from the earlier "fixed absolute time slots" PR) but is exercised
-     * again by this branch's own bucket-width/warm-up changes, so its coverage is widened here
-     * alongside the other two properties in this file.
+     * Swept across bucket widths spanning fast pacing (200ms) through the production width
+     * ([ProbeHistory.BUCKET_WIDTH_MS], 3_000ms -- anchored at the narrowest configurable
+     * 1-minute window, see that constant's own doc) up to a 60s width paired with a 30-minute
+     * window, the widest the settings screen's slider allows (see
+     * `UplinkPreferences.HISTORY_WINDOW_RANGE_MS`). This property predates this branch (from the
+     * earlier "fixed absolute time slots" PR) but is exercised again by this branch's own
+     * bucket-width/warm-up changes, so its coverage is widened here alongside the other two
+     * properties in this file.
      */
     @Test
     fun `an interior bucket's value never changes on a later tick under steady, unchanging conditions`() {
         assertInteriorBucketStable(bucketWidthMs = 200L, bucketCount = 48) // fast pacing.
         assertInteriorBucketStable(bucketWidthMs = 1_000L, bucketCount = 48) // the original test's own config.
-        assertInteriorBucketStable(bucketWidthMs = ProbeHistory.BUCKET_WIDTH_MS, bucketCount = 48) // production default width (~7min window).
+        assertInteriorBucketStable(bucketWidthMs = ProbeHistory.BUCKET_WIDTH_MS, bucketCount = 48) // production width (narrowest-window-anchored).
         assertInteriorBucketStable(bucketWidthMs = 60_000L, bucketCount = 30) // 30-minute window, the widest configurable.
     }
 
@@ -1128,18 +1132,19 @@ class ProbeHistoryTest {
 
     @Test
     fun `point count increases as real samples arrive during warm-up, before a full bucket-width has passed`() {
-        val bucketWidthMs = ProbeHistory.BUCKET_WIDTH_MS // production default, ~8_750ms.
+        val bucketWidthMs = ProbeHistory.BUCKET_WIDTH_MS // production width, 3_000ms.
         var history = ProbeHistory(windowMs = 60_000)
         var previousSize = 0
         var sawIncrease = false
-        // These six elapsed times land in six *different* warm-up levels (unit ~= 138ms at this
-        // bucket width, levels doubling from there -- see warmupLevel's own doc): under the
-        // design this replaces, every one of these but the very first (t=0) would instead
-        // collapse into the same single, un-subdivided ~8.75s bucket, since none of them reach
-        // bucketWidthMs. windowMs (60s) stays far wider than the elapsed real time (5s)
-        // throughout, so the display's left edge stays pinned at the session's own start the
-        // whole time -- what makes the point count provably non-decreasing here.
-        listOf(0L, 200L, 500L, 1_200L, 2_500L, 5_000L).forEach { t ->
+        // These six elapsed times land in six *different* warm-up levels (unit = 47ms at this
+        // bucket width, levels doubling from there -- see warmupLevel's own doc: [0,47), [47,141),
+        // [141,329), [329,705), [705,1_457), [1_457,3_000]). Under the design this replaces, every
+        // one of these but the very first (t=0) would instead collapse into the same single,
+        // un-subdivided 3_000ms bucket, since none of them reach bucketWidthMs. windowMs (60s)
+        // stays far wider than the elapsed real time (2s) throughout, so the display's left
+        // edge stays pinned at the session's own start the whole time -- what makes the point
+        // count provably non-decreasing here.
+        listOf(0L, 100L, 200L, 400L, 1_000L, 2_000L).forEach { t ->
             history = history.recordSuccess(t, latencyMs = 10)
             val size = history.successSparkline(bucketWidthMs).size
             assertTrue(
@@ -1159,7 +1164,7 @@ class ProbeHistoryTest {
 
     /**
      * The permanence guarantee the task requires explicitly, mirroring the pre-existing
-     * "an interior bucket's value never changes on a later tick" test one level down. `t = 500`
+     * "an interior bucket's value never changes on a later tick" test one level down. `t = 70`
      * lands in its own warm-up level (see the previous test's reasoning for these exact
      * boundaries), with a known outcome (failure) nothing else ever shares a bucket with -- every
      * later insertion below deliberately lands in a *different* level or, eventually, well past
@@ -1173,8 +1178,8 @@ class ProbeHistoryTest {
         val bucketWidthMs = ProbeHistory.BUCKET_WIDTH_MS
         var history = ProbeHistory(windowMs = 60_000)
             .recordSuccess(0, latencyMs = 10) // level 0
-            .recordSuccess(200, latencyMs = 10) // level 1
-            .recordFailure(500) // level 2 -- the tracked bucket, a known failure.
+            .recordSuccess(100, latencyMs = 10) // level 1
+            .recordFailure(200) // level 2 -- the tracked bucket, a known failure.
         val afterSeed = history.successSparkline(bucketWidthMs)
         // Confirms the setup really did land these three in three separate, consecutive buckets
         // (not the ordinary un-subdivided grid's own single bucket) before tracking begins.
@@ -1182,19 +1187,167 @@ class ProbeHistoryTest {
         val trackedValue = afterSeed[2].y
         assertEquals(0f, trackedValue)
 
-        // t=1_200..5_000 are later warm-up levels (3, 4, 5); t=8_749 still warm-up but folds into
-        // level 5's own wide catch-all bucket; t=10_000 onward are ordinary, post-warm-up,
-        // steady-state buckets. None of them ever falls back into level 2's own narrow span.
-        val laterTimestamps = listOf(1_200L, 2_500L, 5_000L, 8_749L, 10_000L, 30_000L, 55_000L)
+        // t=400..2_000 are later warm-up levels (3, 4, 5); t=3_000 still warm-up but folds into
+        // level 5's own wide catch-all bucket (the boundary instant itself -- see bucketSlot's
+        // own doc); t=3_001 onward are ordinary, post-warm-up, steady-state buckets. None of them
+        // ever falls back into level 2's own narrow span.
+        val laterTimestamps = listOf(400L, 1_000L, 2_000L, 3_000L, 3_001L, 30_000L, 55_000L)
         laterTimestamps.forEach { t ->
             history = history.recordSuccess(t, latencyMs = 10)
             val points = history.successSparkline(bucketWidthMs)
             assertEquals(
-                "the warm-up-assigned t=500 bucket's value changed after recording t=$t -- a permanence violation",
+                "the warm-up-assigned t=200 bucket's value changed after recording t=$t -- a permanence violation",
                 trackedValue,
                 points[2].y,
             )
         }
+    }
+
+    // --- Narrow-window responsiveness (on-device report: at the 1-minute window, the line raced
+    // to full width in ~9-15 real seconds instead of the actual 60, and thereafter only scrolled
+    // once every ~8.75s -- a visibly chunkier cadence than the latency line's continuous
+    // per-sample motion right next to it) ------------------------------------------------------
+    //
+    // Root cause: [ProbeHistory.BUCKET_WIDTH_MS] used to be anchored at [DEFAULT_WINDOW_MS] (7
+    // minutes) / 48, ~8_750ms. That's fine resolution *at* the default window, but at the
+    // *narrowest* configurable 1-minute window it left only ~7 total buckets, all of which
+    // (warm-up included) resolve within about 9-15 real seconds -- so the display reached its
+    // full, final shape in roughly a quarter of the window it was supposedly covering, and
+    // thereafter only scrolled once every ~8.75 seconds. The fix re-anchors [BUCKET_WIDTH_MS] at
+    // [NARROWEST_WINDOW_MS] instead (see that constant's own doc, and [ANCHOR_BUCKET_COUNT]'s /
+    // [BUCKET_WIDTH_MS]'s doc for the specific 3_000ms width chosen and the false-dip floor that
+    // bounds it from below). These tests check the two user-facing properties the on-device
+    // report was actually about -- neither was covered by the bucket-count/stability/no-false-
+    // dips tests above, which are about correctness invariants, not perceived responsiveness.
+
+    /**
+     * Property 1 from the on-device report: at the narrowest configurable window, the display
+     * should take a *reasonable fraction* of the window's own real duration to reach full
+     * resolution, not race to full width in a handful of seconds. Concrete thresholds: at 25% of
+     * the window's elapsed real time (15 real seconds into a 60-second window -- deliberately the
+     * exact figure the on-device report described, "a few seconds" rounding up to the top of the
+     * "9-15 seconds" estimate), the display must show well under half of its eventual full
+     * resolution ([ANCHOR_BUCKET_COUNT] / 2 = 10 points); by the time 95% of the window has
+     * elapsed (57 of 60 seconds), it must be close to fully resolved (within 2 points of
+     * [ANCHOR_BUCKET_COUNT]). Both thresholds hold with real headroom at the chosen production
+     * width (3_000ms: 15s of elapsed time covers only 5 ordinary buckets past the first real
+     * sample's own boundary-widened one, 6 total, well under the 10-point ceiling; 57s covers 19
+     * of the 20 anchor buckets plus the same one-bucket boundary widening, comfortably within 2 of
+     * full). Dense (250ms), unjittered pacing -- far finer than the 3_000ms production bucket
+     * width -- keeps this purely about the *count* of populated ordinary buckets over elapsed
+     * time, with no empty-bucket omissions of any kind to complicate the arithmetic.
+     */
+    @Test
+    fun `at the narrowest configurable window, resolution builds up over roughly the real window duration`() {
+        val windowMs = ProbeHistory.NARROWEST_WINDOW_MS // 60_000ms -- the on-device report's own setting.
+        val bucketWidthMs = ProbeHistory.BUCKET_WIDTH_MS
+        var history = steadyStateHistory(windowMs = windowMs, bucketWidthMs = bucketWidthMs)
+
+        var sizeAt15s = -1
+        var sizeAt57s = -1
+        var t = 0L
+        while (t <= windowMs) {
+            history = history.recordSuccess(t, latencyMs = 10)
+            if (t >= 15_000L && sizeAt15s == -1) sizeAt15s = history.successSparkline(bucketWidthMs).size
+            if (t >= 57_000L && sizeAt57s == -1) sizeAt57s = history.successSparkline(bucketWidthMs).size
+            t += 250L
+        }
+
+        assertTrue(
+            "at ~15s into a 60s window, resolution should still be well under half-built (was $sizeAt15s of " +
+                "${ProbeHistory.ANCHOR_BUCKET_COUNT}) -- racing to near-full this early is the exact bug this " +
+                "fix addresses",
+            sizeAt15s in 1..(ProbeHistory.ANCHOR_BUCKET_COUNT / 2),
+        )
+        assertTrue(
+            "at ~57s into a 60s window, resolution should be nearly fully built (was $sizeAt57s of " +
+                "${ProbeHistory.ANCHOR_BUCKET_COUNT})",
+            sizeAt57s >= ProbeHistory.ANCHOR_BUCKET_COUNT - 2,
+        )
+        assertTrue("resolution must have genuinely grown between the two checkpoints", sizeAt57s > sizeAt15s)
+    }
+
+    /**
+     * Property 2 from the on-device report: the scroll cadence (how often a new bucket opens,
+     * shifting the line) must be reasonably fine relative to realistic probe pacing, not an
+     * "8+ second jump." [ProbeHistory.BUCKET_WIDTH_MS] *is* that cadence -- a new ordinary bucket
+     * opens exactly every [ProbeHistory.BUCKET_WIDTH_MS] of real elapsed time, by construction --
+     * so this is a direct, permanent guard on that one number rather than a simulation, pinning
+     * both edges of the range this fix's own investigation established:
+     *
+     * - A **floor** of 2_000ms: the app's own worst-case realistic gap between two real probe
+     *   attempts, 2 x `UplinkPreferences.STEP_DELAY_RANGE_MS`'s upper bound (1_000ms) -- see
+     *   [ProbeCycleRunner]'s "ping, ping, fake" cycle doc. A width at or below this figure can
+     *   fabricate a false 0% dip in the *ordinary* grid on a perfectly healthy, all-success
+     *   session (see the dedicated reproduction test below) -- this fix's own most aggressive
+     *   candidate width (1_250ms, anchored at [ANCHOR_BUCKET_COUNT] = 48) hit exactly this failure
+     *   mode in the "no false dips" sweep above before being replaced by the current, safer width.
+     * - A **ceiling** of 4_000ms: comfortably under half the pre-fix default-anchored width
+     *   (~8_750ms) that produced the on-device "8+ second jump" report in the first place, so a
+     *   regression back toward that old cadence would fail this test long before reaching it.
+     */
+    @Test
+    fun `the production bucket width -- the scroll cadence -- clears the false-dip floor with margin and stays well under the old sluggish width`() {
+        assertTrue(
+            "bucket width (${ProbeHistory.BUCKET_WIDTH_MS}ms) must clear the app's worst-case realistic " +
+                "single probe gap (2_000ms) with real margin, or the ordinary grid can fabricate false dips",
+            ProbeHistory.BUCKET_WIDTH_MS >= 2_500L,
+        )
+        assertTrue(
+            "bucket width (${ProbeHistory.BUCKET_WIDTH_MS}ms) must stay well under the old default-anchored " +
+                "width (~8_750ms) that produced the on-device \"8+ second jump\" report",
+            ProbeHistory.BUCKET_WIDTH_MS <= 4_000L,
+        )
+    }
+
+    /**
+     * Direct, deterministic reproduction of the failure mode [BUCKET_WIDTH_MS]'s own doc and the
+     * test above reference: once bucket width drops to or below the worst-case realistic gap
+     * between two real probes, the *ordinary* (post-warm-up, no-exceptions-allowed) grid can show
+     * a fabricated 0% miss on a stream where every single probe actually succeeded. This uses an
+     * explicit narrow [bucketWidthMs] override (2_000ms, exactly the documented worst-case gap) to
+     * demonstrate the mechanism in isolation, independent of whatever the current production width
+     * happens to be -- proof the floor in [BUCKET_WIDTH_MS]'s own doc is a real constraint and not
+     * just an assumption.
+     */
+    @Test
+    fun `a bucket width at the worst-case realistic gap can fabricate a false miss in the ordinary grid`() {
+        val bucketWidthMs = 2_000L // exactly the documented worst-case single-probe gap.
+        var history = steadyStateHistory(windowMs = 60_000, bucketWidthMs = bucketWidthMs)
+            .recordSuccess(0, latencyMs = 10)
+            .recordSuccess(2_001, latencyMs = 10) // one ms past the worst-case gap -- straddles a whole bucket.
+
+        val points = history.successSparkline(bucketWidthMs)
+
+        assertTrue(
+            "expected a fabricated 0% miss between the two real (all-success) attempts -- points: " +
+                points.map { it.y },
+            points.any { it.y == 0f },
+        )
+    }
+
+    /**
+     * The production width's own answer to the reproduction above: spaced at exactly the app's
+     * documented worst-case realistic gap (2_000ms, deterministic -- no jitter needed, since
+     * production width already clears 2_000ms without relying on jitter margin), repeated across
+     * a fully-packed narrowest-configurable window, an all-success stream must show no false miss
+     * at the production [ProbeHistory.BUCKET_WIDTH_MS]. Complements the broader jittered sweep in
+     * "an all-success session produces no false failure dips at any realistic pacing" above with a
+     * focused, non-jittered check pinned exactly at the documented worst case.
+     */
+    @Test
+    fun `the production bucket width shows no false miss at exactly the documented worst-case realistic gap`() {
+        val bucketWidthMs = ProbeHistory.BUCKET_WIDTH_MS
+        var history = steadyStateHistory(windowMs = ProbeHistory.NARROWEST_WINDOW_MS, bucketWidthMs = bucketWidthMs)
+        var t = 0L
+        while (t <= ProbeHistory.NARROWEST_WINDOW_MS) {
+            history = history.recordSuccess(t, latencyMs = 10)
+            t += 2_000L // the documented worst-case gap, back-to-back, deterministically.
+        }
+
+        val points = history.successSparkline(bucketWidthMs)
+
+        assertTrue("an all-success stream must show no 0% miss: ${points.map { it.y }}", points.none { it.y == 0f })
     }
 
     // --- No-data-as-miss: the "gap" concept is gone from this graph entirely -----------------
