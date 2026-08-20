@@ -1,0 +1,92 @@
+name: Build Android
+
+on:
+  release:
+    types: [published]
+  workflow_dispatch:
+    inputs:
+      tag_name:
+        description: 'Release tag to build (e.g. v1.2.0). Builds from HEAD if blank; does NOT upload to Play Store.'
+        required: false
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.release.tag_name || inputs.tag_name || github.ref }}
+
+      - name: Validate Gradle wrapper
+        uses: gradle/actions/wrapper-validation@v4
+
+      - name: Set up JDK 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - name: Set up Android SDK
+        uses: android-actions/setup-android@v3
+
+      - name: Set up Gradle
+        uses: gradle/actions/setup-gradle@v4
+
+      - name: Decode keystore
+        run: echo "${{ secrets.KEYSTORE_BASE64 }}" | base64 --decode > app/keystore.jks
+
+      - name: Compute version
+        id: version
+        env:
+          TAG: ${{ github.event.release.tag_name || inputs.tag_name }}
+        run: |
+          VERSION_CODE=$(date -u +"%y%j%H%M")
+          echo "version_code=$VERSION_CODE" >> "$GITHUB_OUTPUT"
+          # Strip leading 'v' from tag (v1.2.0 → 1.2.0); fall back to gradle default
+          VERSION_NAME="${TAG#v}"
+          echo "version_name=${VERSION_NAME:-}" >> "$GITHUB_OUTPUT"
+
+      - name: Build release APK and AAB
+        env:
+          STORE_FILE: keystore.jks
+          STORE_PASSWORD: ${{ secrets.STORE_PASSWORD }}
+          KEY_ALIAS: ${{ secrets.KEY_ALIAS }}
+          KEY_PASSWORD: ${{ secrets.KEY_PASSWORD }}
+          VERSION_CODE: ${{ steps.version.outputs.version_code }}
+          VERSION_NAME: ${{ steps.version.outputs.version_name }}
+        run: ./gradlew assembleRelease bundleRelease --stacktrace
+
+      # On release events: attach APK + AAB to the GitHub release
+      - name: Upload APK and AAB to GitHub Release
+        if: github.event_name == 'release'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release upload "${{ github.event.release.tag_name }}" \
+            app/build/outputs/apk/release/app-release.apk \
+            app/build/outputs/bundle/release/app-release.aab \
+            --repo "${{ github.repository }}" \
+            --clobber
+
+      # On manual dispatch: upload as artifact for sideload testing
+      - name: Upload APK artifact (manual dispatch)
+        if: github.event_name == 'workflow_dispatch'
+        uses: actions/upload-artifact@v4
+        with:
+          name: uplinkstatus-release-apk
+          path: app/build/outputs/apk/release/app-release.apk
+          retention-days: 14
+
+      # Play Store upload only on release events (not manual dispatch)
+      - name: Upload AAB to Play Store (alpha)
+        if: github.event_name == 'release'
+        uses: r0adkll/upload-google-play@v1
+        with:
+          serviceAccountJsonPlainText: ${{ secrets.PLAY_STORE_JSON_KEY }}
+          packageName: com.uplinkstatus.app
+          releaseFiles: app/build/outputs/bundle/release/app-release.aab
+          tracks: alpha
+          status: completed

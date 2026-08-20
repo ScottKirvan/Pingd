@@ -9,19 +9,34 @@ android {
     compileSdk = 36
 
     defaultConfig {
-        // Placeholder application id — not a real, claimed package. Revisit before
-        // any Play Store submission (out of scope for this stage and this brief).
-        applicationId = "com.bojustudio.pingd.app"
+        applicationId = "com.bojustudio.pingd"
         minSdk = 34
         targetSdk = 36
-        versionCode = 1
-        versionName = "0.1.0"
+        // VERSION_CODE and VERSION_NAME are injected by CI (date-based code that always
+        // increases; tag-derived name). Fall back to static values for local builds.
+        versionCode = System.getenv("VERSION_CODE")?.toIntOrNull() ?: 1
+        versionName = System.getenv("VERSION_NAME") ?: "0.1.0"
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
     }
 
+    signingConfigs {
+        // Only created when signing env vars are present (CI release/manual dispatch).
+        // Local builds and CI unit-test runs produce unsigned release APKs as before.
+        val storeFilePath = System.getenv("STORE_FILE")
+        if (storeFilePath != null) {
+            create("release") {
+                storeFile = file(storeFilePath)
+                storePassword = System.getenv("STORE_PASSWORD")
+                keyAlias = System.getenv("KEY_ALIAS")
+                keyPassword = System.getenv("KEY_PASSWORD")
+            }
+        }
+    }
+
     buildTypes {
         release {
+            signingConfig = signingConfigs.findByName("release")
             isMinifyEnabled = false
         }
     }
