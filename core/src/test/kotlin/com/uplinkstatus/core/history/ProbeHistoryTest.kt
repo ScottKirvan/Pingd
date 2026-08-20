@@ -538,33 +538,58 @@ class ProbeHistoryTest {
         // latency line's; per the current design, it is a 0% miss instead, with no gap span
         // to shade at all -- sparklineGapFractions only ever finds something to shade here if
         // successSparkline emitted a null y, which it no longer does.
-        val history = ProbeHistory(windowMs = 100_000L)
+        val history = steadyStateHistory(windowMs = 100_000L, bucketWidthMs = 10_000)
             .recordSuccess(0, latencyMs = 10)
             .recordSuccess(100_000, latencyMs = 20)
 
-        val points = history.successSparkline(maxBuckets = 10)
+        val points = history.successSparkline(bucketWidthMs = 10_000) // ceil(100_000 / 10).
 
         assertTrue(sparklineGapFractions(points).isEmpty())
         assertTrue(points.any { it.y == 0f })
     }
 
-    // --- Success sparkline: bucketing -----------------------------------------------------
+    // --- Success sparkline: fixed bucket width, window-varying bucket count (Problem 1) -----
+    //
+    // Direct regression tests for: the bucket grid's width used to be `windowMs / maxBuckets`,
+    // so every edit to the "History window" slider changed the width of every bucket, which
+    // reassigns *every* retained sample to a different bucket -- a full rebin, not a rescale,
+    // undoing the fixed-slot design's own value-stability guarantee. successSparkline now takes
+    // an (optional, test-only) [bucketWidthMs] instead of a bucket count, defaulting to the true
+    // constant [ProbeHistory.BUCKET_WIDTH_MS]; bucket *count* is whatever fits the configured
+    // window at that fixed width. Most tests below use an explicit override purely to get round,
+    // easy-to-reason-about numbers -- production (`:app`) always uses the default.
+    //
+    // Several of these tests build their history through [steadyStateHistory], which prepends a
+    // throwaway sample far enough in the past that it can never appear in the displayed window
+    // *and* pushes the session's warm-up anchor (see the "Session warm-up" group further down)
+    // safely behind every real sample the test records at or after `t = 0`. That isolates these
+    // steady-state bucketing assertions from warm-up, which has its own dedicated tests and would
+    // otherwise subdivide the first bucketWidthMs of *every* fresh history in this file.
+
+    /**
+     * Builds a history whose warm-up era (see [ProbeHistory.successSparkline]'s "Session
+     * warm-up" doc) is already over, and whose primer sample is already outside the displayed
+     * window, before any of a test's own `t >= 0` samples are recorded -- see this group's own
+     * header comment for why.
+     */
+    private fun steadyStateHistory(windowMs: Long, bucketWidthMs: Long): ProbeHistory =
+        ProbeHistory(windowMs = windowMs).recordFailure(-(windowMs + bucketWidthMs + 1))
 
     @Test
     fun `the success line plots a rate per time bucket, not a zero-or-one square wave`() {
-        // 8 attempts over a fully-packed 7-second window, 6 of them successful. Buckets are now
+        // 8 attempts over a fully-packed 7-second window, 6 of them successful. Buckets are
         // fixed 3.5-second slots of absolute time (not an even relative split of the retained
         // span), so the two buckets end up with 3 and 4 real attempts respectively rather than
         // 4 and 4 -- the t=0 attempt lands exactly on the window's own left edge, a boundary a
         // fixed slot grid can occasionally exclude (see successBucketSlot's doc) -- but the core
         // point stands either way: a fractional rate per bucket, not a 0/1 square wave.
-        var history = ProbeHistory(windowMs = 7_000)
+        var history = steadyStateHistory(windowMs = 7_000, bucketWidthMs = 3_500)
         listOf(true, true, true, false, true, true, true, false).forEachIndexed { index, ok ->
             val at = index * 1_000L
             history = if (ok) history.recordSuccess(at, latencyMs = 10) else history.recordFailure(at)
         }
 
-        val points = history.successSparkline(maxBuckets = 2)
+        val points = history.successSparkline(bucketWidthMs = 3_500)
 
         assertEquals(2, points.size)
         assertEquals(2f / 3f, points[0].y!!, 0.001f) // t=1000,2000,3000 -> 2 successes / 3 attempts.
@@ -573,36 +598,87 @@ class ProbeHistoryTest {
 
     @Test
     fun `success buckets use an absolute zero-to-one scale, not an autoscaled one`() {
-        var history = ProbeHistory(windowMs = 7_000)
+        var history = steadyStateHistory(windowMs = 7_000, bucketWidthMs = 3_500)
         repeat(8) { index -> history = history.recordSuccess(index * 1_000L, latencyMs = 10) }
 
         // All-success buckets sit at the top of the scale, and would still sit at the top if
         // the rate were, say, uniformly 50% -- an autoscaled percentage graph would be
-        // unreadable, since "always 50%" and "always 100%" would look identical. maxBuckets is
-        // capped at 2 so every bucket actually has attempts behind it -- at the default
-        // resolution the window is small enough that most of 48 buckets would be empty gaps,
-        // which is a different (already covered) rule, not what this test is about.
-        assertTrue(history.successSparkline(maxBuckets = 2).all { it.y == 1f })
+        // unreadable, since "always 50%" and "always 100%" would look identical. bucketWidthMs
+        // is set so the window holds exactly 2 buckets, each with real attempts behind it -- at
+        // the default resolution the window is small enough that most buckets would be empty
+        // gaps, which is a different (already covered) rule, not what this test is about.
+        assertTrue(history.successSparkline(bucketWidthMs = 3_500).all { it.y == 1f })
     }
 
     @Test
-    fun `resolution grows with elapsed time instead of dotting out one sample per bucket`() {
-        // successSparkline always divides the window into the full maxBuckets fixed slots now
-        // (no separate bucket-count-growing logic -- see its own doc); the "resolution grows
-        // with elapsed real time" appearance instead falls straight out of the leading-blank
-        // rule: early in a session, most of those fixed slots simply sit before the first real
-        // sample and are omitted, so only the handful with real data behind them get drawn.
-        var history = ProbeHistory(windowMs = window) // 60_000ms / 48 buckets = 1_250ms slots.
-        repeat(3) { index -> history = history.recordSuccess(index * 1_000L, latencyMs = 10) }
-        // Barely any of the window has elapsed yet (t=0..2000, inside one or two 1_250ms
-        // slots): far fewer than the full 48 points, not a fabricated one-point-per-bucket line.
-        assertTrue(history.successSparkline().size < 5)
+    fun `bucket count grows with the configured window instead of staying pinned`() {
+        // With bucket width now a true constant, more of the configured window means more
+        // displayed buckets -- the opposite of the old design, where count was pinned at
+        // DEFAULT_MAX_BUCKETS and width varied instead. windowMs is set well past this
+        // history's own warm-up era (a 2000-second span against a 1-second bucket width), so
+        // this is purely ceil(windowMs / bucketWidthMs) steady-state arithmetic: exactly
+        // windowMs / 1000 buckets for each of these three window sizes.
+        val bucketWidthMs = 1_000L
+        var history = steadyStateHistory(windowMs = 30 * 60_000L, bucketWidthMs = bucketWidthMs)
+        repeat(2_000) { index -> history = history.recordSuccess(index * 1_000L, latencyMs = 10) }
 
-        // Advance to the window's own span -- fully covered now, so every requested bucket has
-        // real data behind it and the full requested resolution is drawn.
-        history = history.recordSuccess(window, latencyMs = 10)
-        val points = history.successSparkline(maxBuckets = 10)
-        assertEquals(10, points.size)
+        assertEquals(60, history.withWindowMs(60_000L).successSparkline(bucketWidthMs = bucketWidthMs).size)
+        assertEquals(420, history.withWindowMs(7 * 60_000L).successSparkline(bucketWidthMs = bucketWidthMs).size)
+        assertEquals(1_800, history.withWindowMs(30 * 60_000L).successSparkline(bucketWidthMs = bucketWidthMs).size)
+    }
+
+    /**
+     * The specific property this task adds beyond the pre-existing fixed-slot design: a sample's
+     * bucket must be stable *across a window-length change*, not just across ticks of the clock.
+     * Before this fix, bucket width was `windowMs / bucketCount`, so calling [withWindowMs] alone
+     * -- no new samples, no time passing -- changed every bucket's width and silently rebinned
+     * every retained sample. With width now the true constant [ProbeHistory.BUCKET_WIDTH_MS],
+     * the narrower window's buckets must be exactly the trailing slice of the wider window's own
+     * buckets: same real-world slot, same real samples behind each one, same value -- proof that
+     * narrowing/widening only changes how many already-assigned buckets are in view.
+     */
+    @Test
+    fun `a sample's bucket grouping is stable across a window-length change -- narrowing never rebins`() {
+        val bucketWidthMs = 10_000L
+        var history = steadyStateHistory(windowMs = 7 * 60_000L, bucketWidthMs = bucketWidthMs)
+        // 20 minutes of steady, 1-second-paced samples with a deterministic pass/fail pattern --
+        // no real outage, so any difference in a bucket's value below can only be a rebinning
+        // artifact, never a genuine change in the underlying data.
+        repeat(1_200) { i ->
+            history = if (i % 7 != 0) {
+                history.recordSuccess(i * 1_000L, latencyMs = 10)
+            } else {
+                history.recordFailure(i * 1_000L)
+            }
+        }
+
+        val wide = history.withWindowMs(7 * 60_000L).successSparkline(bucketWidthMs)
+        val narrow = history.withWindowMs(3 * 60_000L).successSparkline(bucketWidthMs)
+
+        assertTrue("narrowing must never show more buckets than the wider window did", narrow.size <= wide.size)
+        // Both windows share the same newest sample, so the narrow window's buckets are exactly
+        // the wide window's own trailing buckets -- not a freshly rebinned grid of a different
+        // width.
+        assertEquals(wide.takeLast(narrow.size).map { it.y }, narrow.map { it.y })
+
+        // Widening back afterward must reveal exactly the same values as before narrowing, per
+        // sample -- not a second, independently rebinned grid.
+        val widenedAgain = history.withWindowMs(3 * 60_000L).withWindowMs(7 * 60_000L).successSparkline(bucketWidthMs)
+        assertEquals(wide.map { it.y }, widenedAgain.map { it.y })
+    }
+
+    @Test
+    fun `an additional attempt within an already-covered span does not change the visible resolution`() {
+        var history = steadyStateHistory(windowMs = 60_000, bucketWidthMs = 6_000)
+        repeat(30) { index -> history = history.recordSuccess(index * 1_000L, latencyMs = 10) }
+        val before = history.successSparkline(bucketWidthMs = 6_000).size
+
+        // A burst of extra attempts landing inside the same already-covered span, not extending
+        // it -- must not reshuffle the resolution that was already settled on.
+        repeat(500) { index -> history = history.recordSuccess(29_000L + index, latencyMs = 10) }
+        val after = history.successSparkline(bucketWidthMs = 6_000).size
+
+        assertEquals(before, after)
     }
 
     /**
@@ -611,13 +687,13 @@ class ProbeHistoryTest {
      * with every new sample. Root cause at the time: bucket count used to be `samples.size / 4`,
      * so a burst of attempts arriving without much real time passing (pacing changes, retry
      * bursts, or simply more probes landing) changed the bucket count -- and therefore every
-     * bucket's boundaries -- on almost every recorded sample. That was fixed by tying bucket
-     * *count* to elapsed time instead of attempt count; bucket count no longer varies at all any
-     * more (buckets are now fixed-width absolute-time slots, always up to `maxBuckets` of them --
-     * see [ProbeHistory.successSparkline]'s own doc), so this now checks the same underlying
-     * property one level down: how many of those fixed slots have real data in them, and
-     * therefore how many points get drawn, depends only on how much real elapsed time two
-     * histories cover, not on how many attempts happened to land in that time.
+     * bucket's boundaries -- on almost every recorded sample. Bucket count no longer depends on
+     * attempt count at all any more (it depends only on the configured window at a fixed width --
+     * see [ProbeHistory.successSparkline]'s own doc): this checks that property directly, with
+     * default `bucketWidthMs` so both histories also exercise the very-first-sample warm-up
+     * ladder identically (same first/newest timestamps in both, so the same slot arithmetic
+     * either way -- see [ProbeHistory.bucketSlot]'s doc for why that only depends on the
+     * timestamps involved, never on how many samples sit between them).
      */
     @Test
     fun `visible resolution depends on elapsed time, not on how many attempts arrived in it`() {
@@ -633,20 +709,6 @@ class ProbeHistoryTest {
         assertEquals(sparse.successSparkline().size, burst.successSparkline().size)
     }
 
-    @Test
-    fun `an additional attempt within an already-covered span does not change the visible resolution`() {
-        var history = ProbeHistory(windowMs = 60_000)
-        repeat(30) { index -> history = history.recordSuccess(index * 1_000L, latencyMs = 10) }
-        val before = history.successSparkline(maxBuckets = 10).size
-
-        // A burst of extra attempts landing inside the same already-covered span, not extending
-        // it -- must not reshuffle the resolution that was already settled on.
-        repeat(500) { index -> history = history.recordSuccess(29_000L + index, latencyMs = 10) }
-        val after = history.successSparkline(maxBuckets = 10).size
-
-        assertEquals(before, after)
-    }
-
     /**
      * Regression test for the on-device screenshot report: the ping-success graph was showing a
      * gray shaded "no data" rectangle sitting in the middle of the line, between two regions of
@@ -659,15 +721,15 @@ class ProbeHistoryTest {
         // A long silence in the middle (nothing probed between t=1s and t=59s), long enough
         // relative to the bucket width to leave at least one bucket entirely empty. windowMs
         // set to exactly the data's own span (a fully-packed window) so the two clusters land
-        // cleanly in separate buckets.
-        var history = ProbeHistory(windowMs = 60_750)
+        // cleanly in separate buckets. bucketWidthMs mirrors the old ceil(60_750 / 8) width.
+        var history = steadyStateHistory(windowMs = 60_750, bucketWidthMs = 7_594)
         repeat(4) { index -> history = history.recordSuccess(index * 250L, latencyMs = 10) }
         repeat(4) { index -> history = history.recordFailure(60_000L + index * 250L) }
 
-        val points = history.successSparkline(maxBuckets = 8)
+        val points = history.successSparkline(bucketWidthMs = 7_594)
 
         // The window is exactly fully covered (span == windowMs), so resolution is maxed out
-        // at all 8 requested buckets -- the two four-sample clusters land in the first and last
+        // at all 8 buckets that fit -- the two four-sample clusters land in the first and last
         // of them, with every bucket in between having zero real attempts.
         assertEquals(8, points.size)
         assertEquals(1f, points.first().y!!, 0.001f)
@@ -679,11 +741,11 @@ class ProbeHistoryTest {
         assertTrue(sparklineGapFractions(points).isEmpty())
 
         // With more buckets than the two clusters can fill, the middle really is empty --
-        // still all misses, never a null gap.
-        var sparse = ProbeHistory(windowMs = 61_900)
+        // still all misses, never a null gap. bucketWidthMs mirrors the old ceil(61_900 / 10).
+        var sparse = steadyStateHistory(windowMs = 61_900, bucketWidthMs = 6_190)
         repeat(20) { index -> sparse = sparse.recordSuccess(index * 100L, latencyMs = 10) }
         repeat(20) { index -> sparse = sparse.recordFailure(60_000L + index * 100L) }
-        val sparsePoints = sparse.successSparkline(maxBuckets = 10)
+        val sparsePoints = sparse.successSparkline(bucketWidthMs = 6_190)
         assertTrue(sparsePoints.none { it.y == null })
         assertTrue(sparsePoints.any { it.y == 0f })
     }
@@ -722,19 +784,23 @@ class ProbeHistoryTest {
     @Test
     fun `an interior bucket's value never changes on a later tick under steady, unchanging conditions`() {
         val stableWindowMs = 48_000L // 48 buckets -> exactly 1_000ms fixed slots.
-        val maxBuckets = 48
+        val bucketWidthMs = 1_000L
+        val bucketCount = 48
         fun succeededAt(i: Int) = i % 5 != 0 // deterministic, steady failure rate -- no real outage.
 
-        // maxBuckets + 1 samples, one full extra tick past a bare minimum warm-up, so the
+        // bucketCount + 1 samples, one full extra tick past a bare minimum warm-up, so the
         // retained span is exactly windowMs (not one pacing interval short of it) regardless of
-        // how a given implementation decides "how full is full."
+        // how a given implementation decides "how full is full." No steadyStateHistory primer
+        // needed here: the first sample (i=1, t=1000) is already exactly one bucketWidthMs past
+        // its own warm-up anchor by the time the tracked/stability range below is exercised (see
+        // this test's own values), so the session's brief warm-up era never overlaps it.
         var history = ProbeHistory(windowMs = stableWindowMs)
-        for (i in 1..(maxBuckets + 1)) {
+        for (i in 1..(bucketCount + 1)) {
             val t = i * 1_000L
             history = if (succeededAt(i)) history.recordSuccess(t, latencyMs = 10) else history.recordFailure(t)
         }
-        // The window is now fully packed: one real sample per fixed slot, maxBuckets points.
-        assertEquals(maxBuckets, history.successSparkline(maxBuckets).size)
+        // The window is now fully packed: one real sample per fixed slot, bucketCount points.
+        assertEquals(bucketCount, history.successSparkline(bucketWidthMs).size)
 
         // Track the sample recorded at i = trackedI. At k ticks later it must sit exactly k
         // positions in from the right edge, still carrying its own known outcome.
@@ -742,15 +808,15 @@ class ProbeHistoryTest {
         val trackedExpected = if (succeededAt(trackedI)) 1f else 0f
         var previousValue: Float? = null
 
-        for (i in (maxBuckets + 2)..(maxBuckets + 31)) {
+        for (i in (bucketCount + 2)..(bucketCount + 31)) {
             val t = i * 1_000L
             history = if (succeededAt(i)) history.recordSuccess(t, latencyMs = 10) else history.recordFailure(t)
 
             val k = i - trackedI // ticks since the tracked sample was recorded
-            // Not live (k > 0) and not within one slot-width of the trailing edge (k <= maxBuckets - 2).
-            if (k <= 0 || k > maxBuckets - 2) continue
+            // Not live (k > 0) and not within one slot-width of the trailing edge (k <= bucketCount - 2).
+            if (k <= 0 || k > bucketCount - 2) continue
 
-            val points = history.successSparkline(maxBuckets)
+            val points = history.successSparkline(bucketWidthMs)
             val index = points.size - 1 - k
             if (index !in points.indices) continue
 
@@ -777,6 +843,89 @@ class ProbeHistoryTest {
         assertNotNull(previousValue)
     }
 
+    // --- Session warm-up: resolution starts fine and coarsens into the fixed grid (Problem 2) ---
+    //
+    // Direct regression tests for: a fresh session's very first fixed-width bucket can span the
+    // *entire* bucketWidthMs (several seconds at the default width) before a second ordinary
+    // bucket ever opens, which without more shows one flatlined point pinned at the right edge
+    // for that whole stretch. [ProbeHistory.bucketSlot] now subdivides just that first bucket
+    // into progressively wider sub-buckets (see its own doc, and [ProbeHistory.warmupLevel]'s),
+    // anchored to the very first real sample ever recorded. The hard constraint from the task:
+    // whatever bucket an early sample lands in during this stretch is a *permanent* fact about
+    // it, exactly like every other bucket assignment in this design -- never recomputed
+    // differently as more samples (warm-up or steady-state) arrive later.
+
+    @Test
+    fun `point count increases as real samples arrive during warm-up, before a full bucket-width has passed`() {
+        val bucketWidthMs = ProbeHistory.BUCKET_WIDTH_MS // production default, ~8_750ms.
+        var history = ProbeHistory(windowMs = 60_000)
+        var previousSize = 0
+        var sawIncrease = false
+        // These six elapsed times land in six *different* warm-up levels (unit ~= 138ms at this
+        // bucket width, levels doubling from there -- see warmupLevel's own doc): under the
+        // design this replaces, every one of these but the very first (t=0) would instead
+        // collapse into the same single, un-subdivided ~8.75s bucket, since none of them reach
+        // bucketWidthMs. windowMs (60s) stays far wider than the elapsed real time (5s)
+        // throughout, so the display's left edge stays pinned at the session's own start the
+        // whole time -- what makes the point count provably non-decreasing here.
+        listOf(0L, 200L, 500L, 1_200L, 2_500L, 5_000L).forEach { t ->
+            history = history.recordSuccess(t, latencyMs = 10)
+            val size = history.successSparkline(bucketWidthMs).size
+            assertTrue(
+                "point count must never shrink as more real samples arrive: was $previousSize, now $size at t=$t",
+                size >= previousSize,
+            )
+            if (size > previousSize) sawIncrease = true
+            previousSize = size
+        }
+        assertTrue("expected the point count to grow more than once during warm-up, not jump straight to a flat count", sawIncrease)
+        assertEquals(
+            "each of these six samples was deliberately chosen to land in its own distinct warm-up level",
+            6,
+            previousSize,
+        )
+    }
+
+    /**
+     * The permanence guarantee the task requires explicitly, mirroring the pre-existing
+     * "an interior bucket's value never changes on a later tick" test one level down. `t = 500`
+     * lands in its own warm-up level (see the previous test's reasoning for these exact
+     * boundaries), with a known outcome (failure) nothing else ever shares a bucket with -- every
+     * later insertion below deliberately lands in a *different* level or, eventually, well past
+     * warm-up into an ordinary steady-state bucket, and that tracked bucket's value must not move
+     * even once. If bucket membership here were ever recomputed from "how many samples currently
+     * exist" instead of each sample's own fixed timestamp, this is exactly the check that would
+     * catch it.
+     */
+    @Test
+    fun `a value assigned during warm-up never changes later, through the rest of warm-up or into steady state`() {
+        val bucketWidthMs = ProbeHistory.BUCKET_WIDTH_MS
+        var history = ProbeHistory(windowMs = 60_000)
+            .recordSuccess(0, latencyMs = 10) // level 0
+            .recordSuccess(200, latencyMs = 10) // level 1
+            .recordFailure(500) // level 2 -- the tracked bucket, a known failure.
+        val afterSeed = history.successSparkline(bucketWidthMs)
+        // Confirms the setup really did land these three in three separate, consecutive buckets
+        // (not the ordinary un-subdivided grid's own single bucket) before tracking begins.
+        assertEquals(3, afterSeed.size)
+        val trackedValue = afterSeed[2].y
+        assertEquals(0f, trackedValue)
+
+        // t=1_200..5_000 are later warm-up levels (3, 4, 5); t=8_749 still warm-up but folds into
+        // level 5's own wide catch-all bucket; t=10_000 onward are ordinary, post-warm-up,
+        // steady-state buckets. None of them ever falls back into level 2's own narrow span.
+        val laterTimestamps = listOf(1_200L, 2_500L, 5_000L, 8_749L, 10_000L, 30_000L, 55_000L)
+        laterTimestamps.forEach { t ->
+            history = history.recordSuccess(t, latencyMs = 10)
+            val points = history.successSparkline(bucketWidthMs)
+            assertEquals(
+                "the warm-up-assigned t=500 bucket's value changed after recording t=$t -- a permanence violation",
+                trackedValue,
+                points[2].y,
+            )
+        }
+    }
+
     // --- No-data-as-miss: the "gap" concept is gone from this graph entirely -----------------
     //
     // An earlier version of successSparkline tried to tell a "genuine gap" (a real stretch of
@@ -797,14 +946,14 @@ class ProbeHistoryTest {
      */
     @Test
     fun `a sustained outage renders as a run of 0 percent dips, never shaded and never a break`() {
-        var history = ProbeHistory(windowMs = 120_000L)
+        var history = steadyStateHistory(windowMs = 120_000L, bucketWidthMs = 2_500)
         // Steady real sampling for the first 20 seconds...
         repeat(40) { index -> history = history.recordSuccess(index * 500L, latencyMs = 10) }
         // ...then total silence for 80 seconds (a real, sustained outage)...
         // ...then steady real sampling resumes for the last 20 seconds, up to the window edge.
         repeat(40) { index -> history = history.recordSuccess(100_000L + index * 500L, latencyMs = 10) }
 
-        val points = history.successSparkline(maxBuckets = 48)
+        val points = history.successSparkline(bucketWidthMs = 2_500) // ceil(120_000 / 48).
 
         assertTrue(points.none { it.y == null })
         assertTrue(sparklineGapFractions(points).isEmpty())
@@ -823,14 +972,19 @@ class ProbeHistoryTest {
      */
     @Test
     fun `buckets before the very first real sample stay blank, not a 0 percent miss`() {
-        var history = ProbeHistory(windowMs = 60_000) // 48 fixed 1_250ms slots.
+        // steadyStateHistory here isolates this test's subject -- the leading-blank rule *within
+        // an already-displayed window* -- from session warm-up (a separate, dedicated test group
+        // below): without it, the very first of these 200ms-paced real samples would itself
+        // become the session's own warm-up anchor and get subdivided, which is not what this
+        // test is about. 48 fixed 1_250ms slots (60_000 / 48).
+        var history = steadyStateHistory(windowMs = 60_000, bucketWidthMs = 1_250)
         var t = 30_000L
         while (t <= 60_000L) {
             history = history.recordSuccess(t, latencyMs = 10)
             t += 200L
         }
 
-        val points = history.successSparkline(maxBuckets = 48)
+        val points = history.successSparkline(bucketWidthMs = 1_250)
 
         // Real attempts start at t=30_000, the window's own midpoint -- the first ~23 of the 48
         // fixed slots (everything before that point) have no real sample in them at all and are
@@ -843,10 +997,10 @@ class ProbeHistoryTest {
 
     @Test
     fun `success buckets span the full axis from oldest to newest once the window is genuinely full`() {
-        var history = ProbeHistory(windowMs = 39_000)
+        var history = steadyStateHistory(windowMs = 39_000, bucketWidthMs = 7_800) // ceil(39_000 / 5).
         repeat(40) { index -> history = history.recordSuccess(index * 1_000L, latencyMs = 10) }
 
-        val points = history.successSparkline(maxBuckets = 5)
+        val points = history.successSparkline(bucketWidthMs = 7_800)
 
         assertEquals(0f, points.first().x, 0.001f)
         assertEquals(1f, points.last().x, 0.001f)
@@ -871,19 +1025,24 @@ class ProbeHistoryTest {
         assertEquals(1f, points[1].x, 0.001f)
     }
 
+    /**
+     * A short real session (700ms of data in a 60-second window) is exactly the case session
+     * warm-up (see the dedicated test group below) now gives *more* honest detail to, not less:
+     * with a 10-second bucketWidthMs, the old design would have shown a single flatlined point
+     * for this entire stretch (everything here sits inside one ordinary fixed slot); the warm-up
+     * ladder instead subdivides that first slot by real elapsed time since the very first sample,
+     * so these 8 samples (100ms apart, spanning warm-up levels 0-2) land in 3 distinct buckets
+     * instead of 1 -- still far fewer than the 6 the configured window could hold once genuinely
+     * full, not six buckets where most would just be gaps for time that hasn't happened yet.
+     */
     @Test
-    fun `a short session collapses to a couple of honest points instead of fabricating empty buckets`() {
-        var history = ProbeHistory(windowMs = 60_000) // maxBuckets=6 -> 10_000ms fixed slots.
+    fun `a short session shows genuinely increasing detail instead of one flatlined point`() {
+        var history = ProbeHistory(windowMs = 60_000) // bucketWidthMs=10_000 -> 6 fixed slots.
         repeat(8) { index -> history = history.recordSuccess(index * 100L, latencyMs = 10) }
 
-        val points = history.successSparkline(maxBuckets = 6)
+        val points = history.successSparkline(bucketWidthMs = 10_000)
 
-        // 700ms of real data inside a 60-second window (t=0..700, entirely inside the first
-        // 10_000ms slot except the single t=0 sample, which lands on that slot's own left edge
-        // and so belongs to the slot just before it -- see successBucketSlot's doc): far fewer
-        // than the full 6 requested buckets, not six buckets where five would just be gaps for
-        // time that hasn't happened yet.
-        assertTrue(points.size < 3)
+        assertEquals(3, points.size)
         assertTrue(points.all { it.y == 1f })
     }
 
@@ -897,7 +1056,7 @@ class ProbeHistoryTest {
         var history = ProbeHistory(windowMs = 60_000).recordSuccess(0, latencyMs = 10)
         repeat(8) { index -> history = history.recordSuccess(40_000L + index * 100L, latencyMs = 10) }
 
-        val points = history.successSparkline(maxBuckets = 6)
+        val points = history.successSparkline(bucketWidthMs = 10_000)
 
         assertTrue(points.size > 1)
         assertTrue(points.none { it.y == null })
