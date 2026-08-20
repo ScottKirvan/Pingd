@@ -537,11 +537,11 @@ class ProbeHistoryTest {
         assertTrue(points.all { it.y == null })
     }
 
-    // --- Synthetic latency sparkline (debug aid) --------------------------------------------
+    // --- Raw ping sparkline (debug aid) -----------------------------------------------------
 
     @Test
-    fun `an empty history draws no synthetic latency line at all`() {
-        assertTrue(ProbeHistory(windowMs = window).syntheticLatencySparkline().isEmpty())
+    fun `an empty history draws no raw ping line at all`() {
+        assertTrue(ProbeHistory(windowMs = window).rawPingSparkline().isEmpty())
     }
 
     @Test
@@ -549,7 +549,7 @@ class ProbeHistoryTest {
         var history = ProbeHistory(windowMs = window)
         repeat(5) { index -> history = history.recordFailure(index * 1_000L) }
 
-        val points = history.syntheticLatencySparkline()
+        val points = history.rawPingSparkline()
 
         assertEquals(5, points.size)
         assertTrue(points.all { it.y != null })
@@ -559,7 +559,7 @@ class ProbeHistoryTest {
     fun `a success plots at the fixed height a real 60ms sample would`() {
         val history = ProbeHistory(windowMs = window).recordSuccess(0, latencyMs = 999)
 
-        val point = history.syntheticLatencySparkline().single()
+        val point = history.rawPingSparkline().single()
 
         assertEquals(1f - latencyColorFraction(60), point.y!!, 0.001f)
         assertEquals(60L, point.latencyMs)
@@ -569,7 +569,7 @@ class ProbeHistoryTest {
     fun `a failure plots at the fixed height a real 900ms sample would`() {
         val history = ProbeHistory(windowMs = window).recordFailure(0)
 
-        val point = history.syntheticLatencySparkline().single()
+        val point = history.rawPingSparkline().single()
 
         assertEquals(1f - latencyColorFraction(900), point.y!!, 0.001f)
         assertEquals(900L, point.latencyMs)
@@ -581,7 +581,7 @@ class ProbeHistoryTest {
             .recordSuccess(0, latencyMs = 10)
             .recordFailure(1_000)
 
-        val (successY, failureY) = history.syntheticLatencySparkline().map { it.y!! }
+        val (successY, failureY) = history.rawPingSparkline().map { it.y!! }
 
         assertTrue((successY - failureY) > 0.5f)
     }
@@ -598,9 +598,9 @@ class ProbeHistoryTest {
         }
 
         val realXs = history.latencySparkline().map { it.x }
-        val syntheticXs = history.syntheticLatencySparkline().map { it.x }
+        val rawPingXs = history.rawPingSparkline().map { it.x }
 
-        assertEquals(realXs, syntheticXs)
+        assertEquals(realXs, rawPingXs)
     }
 
     // --- Gap shading spans (sparklineGapFractions) ----------------------------------------
