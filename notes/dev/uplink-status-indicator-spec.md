@@ -358,27 +358,80 @@ bucket's width, which reassigns *every* retained sample to a different
 bucket: a full rebin, not a rescale, silently undoing the fixed-slot
 value-stability the paragraph above describes, just triggered by a
 settings change instead of the passage of time. The width is now a
-true constant instead — 7 minutes / 48 (the app's default window and
-its old default bucket count), about 8.75 seconds — so a sample's
-bucket depends only on its own timestamp and the session's own start
-(see "session warm-up" below), never on the currently configured
-window. This is the specific behavior the success and latency graphs
-now "share": neither one ever reassigns a real sample to a different
-bucket just because the window slider moved. (The latency graph never
-had this problem in the first place — it plots one point per sample
-with no binning at all, so there was nothing for it to rebin.)
+true constant instead, so a sample's bucket depends only on its own
+timestamp and the session's own start (see "session warm-up" below),
+never on the currently configured window. This is the specific
+behavior the success and latency graphs now "share": neither one ever
+reassigns a real sample to a different bucket just because the window
+slider moved. (The latency graph never had this problem in the first
+place — it plots one point per sample with no binning at all, so there
+was nothing for it to rebin.)
 
-Bucket *count*, in consequence, is no longer pinned at 48 — with width
-fixed, it's simply how many of those fixed-width slots fit in the
-configured window, from roughly 7 at the narrowest configurable
-1-minute window to a few hundred at the widest configurable 30-minute
-one. This is a *different* kind of bucket-count variation than the
-attempt-count-driven one described and rejected two paragraphs below:
-count still never depends on attempt count, or on when the line
-happens to be redrawn — only on the configured window, which is exactly
-as stable a basis as a pinned 48 used to be. None of this is a
-performance concern: this is small-array arithmetic on the main/UI
-thread from Compose state, not a hot path at any of these sizes.
+**What that constant should actually be took two rounds to get right.**
+The first version anchored it at the *default* 7-minute window and its
+old default bucket count (48) — about 8.75 seconds. That rendered the
+default view identically to the fixed-48-bucket grid it replaced, but
+left the *narrowest* configurable window (1 minute) starved of
+resolution: at that width, a 1-minute window holds only ~7 total
+buckets, all of which (warm-up included) resolve within roughly 9-15
+real seconds — so the display raced to its final shape in about a
+quarter of the window it was supposedly covering, and thereafter only
+scrolled once every ~8.75 seconds, a visibly chunkier cadence than the
+latency line's continuous per-sample motion right next to it. Both
+were reported from the same on-device session at the 1-minute window
+setting specifically, and both trace to the same root cause: a single
+global width constant can only be "enough resolution" for the window it
+was sized against, and the default-anchored version was sized against
+the wrong end of the configurable range. (This exact risk was flagged
+as an open question before the default-anchored version was first
+built — "the 1-minute end of the slider gives a coarser ~7 bins... I'd
+want whoever implements this to weigh in" — but shipped anchored at the
+default anyway for lack of on-device evidence that the narrow end was a
+real problem. This report is that evidence.)
+
+The fix re-anchors the constant at the *narrowest* configurable window
+(1 minute) instead — the end of the range where responsiveness matters
+most, since a bucket-width-sized wait there is the largest fraction of
+the whole window. But the anchor's own bucket-count target could not
+simply be turned up for more resolution: [successSparkline]'s ordinary,
+post-warm-up grid treats an empty bucket as an unconditional 0% miss
+(see below), which is only honest if the bucket is wide enough that
+ordinary pacing could never leave it empty on a healthy connection. A
+single real gap between two consecutive successful probes that reaches
+or exceeds the bucket width can straddle an entire bucket and leave it
+empty even though nothing failed — the exact false-positive-outage
+problem the warm-up ladder below has its own dedicated fix for, just
+relocated to the *permanent* grid, where no such exception is allowed.
+This was not hypothetical: a first attempt at the narrow-window fix
+(48 buckets at the 1-minute window, ~1.25-second buckets) reproduced
+this exact failure directly in testing, at realistic slower pacing
+(1.5-2 second step delays) — a reliable, not rare, false dip on an
+all-success stream. The app's own worst-case realistic gap between two
+real probes is 2 seconds (twice the step-delay slider's own 1-second
+ceiling — see the "ping, ping, fake" cycle above: two real probes per
+automatic ack, so the gap from an automatic ack back to the next real
+probe is two step-delay waits, the largest the cycle ever produces).
+The shipped fix instead targets 20 buckets at the 1-minute window —
+3-second-wide buckets — clearing that 2-second floor with a deliberate
+~50% safety margin for real-world pacing jitter, while still cutting
+the old cadence (~8.75 seconds) by roughly two-thirds.
+
+Bucket *count*, in consequence, is no longer pinned at any single
+number — with width fixed, it's simply how many of those fixed-width
+slots fit in the configured window: 20 at the narrowest configurable
+1-minute window (by construction), 140 at the default 7-minute window
+(itself a one-time step up in the default view's own resolution from
+the 48 it rendered under the first, default-anchored version — more
+buckets is never a worse graph, only a finer one), and 600 at the
+widest configurable 30-minute one. This is a *different* kind of
+bucket-count variation than the attempt-count-driven one described and
+rejected two paragraphs below: count still never depends on attempt
+count, or on when the line happens to be redrawn — only on the
+configured window, which is exactly as stable a basis as a pinned
+count used to be. None of this is a performance concern: this is
+small-array arithmetic on the main/UI thread from Compose state, not a
+hot path at any of these sizes, confirmed rather than assumed for the
+now-larger widest-window count by this fix's own test coverage.
 
 Whatever that count comes out to, the display is guaranteed to reach
 back far enough to cover every real sample the window is currently
@@ -420,9 +473,9 @@ describes. Rather than wait a full bucket-width of real time for a
 second point to appear, that first bucket is subdivided into six
 progressively wider sub-buckets — an exponential/doubling ladder
 anchored to the timestamp of the very first real sample ever recorded
-in the session, starting near 139ms (fine enough to give distinct
+in the session, starting near 47ms (fine enough to give distinct
 points to typical probe pacing) and doubling five times up to the full
-~8.75s bucket width, at which point every later sample uses the
+3-second bucket width, at which point every later sample uses the
 ordinary fixed grid with no subdivision at all, permanently, for the
 rest of the session. Each sample's warm-up sub-bucket, like every
 other bucket assignment on this graph, is a permanent fact decided
@@ -433,8 +486,8 @@ scoped to session start instead of scoped to every tick.
 
 **An empty warm-up sub-bucket is left blank, not plotted as a 0% miss
 — the one place on this graph the ordinary no-gaps rule doesn't
-apply.** The warm-up ladder's finest levels (as narrow as ~139ms at
-the default bucket width) are routinely narrower than any realistic
+apply.** The warm-up ladder's finest levels (as narrow as ~47ms at
+the production bucket width) are routinely narrower than any realistic
 real-world probe pacing (the app's configurable step delay, roughly
 doubled by the tracer's own cycle structure, runs from a few hundred
 milliseconds to a few seconds between attempts), so it is *ordinary*,

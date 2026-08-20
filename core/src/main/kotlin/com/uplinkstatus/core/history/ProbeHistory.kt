@@ -415,9 +415,9 @@ data class ProbeHistory(
      *
      * ### Bucket width is a true constant — never a function of the configured window
      * [bucketWidthMs] defaults to [BUCKET_WIDTH_MS], a fixed constant anchored at
-     * [DEFAULT_WINDOW_MS] / [DEFAULT_MAX_BUCKETS] — **not** `windowMs / someBucketCount`, which
-     * an earlier version of this method computed instead. That formula meant every edit to the
-     * "History window" slider changed the bucket grid's own width, which reassigns *every*
+     * [NARROWEST_WINDOW_MS] / [ANCHOR_BUCKET_COUNT] — **not** `windowMs / someBucketCount`,
+     * which an earlier version of this method computed instead. That formula meant every edit to
+     * the "History window" slider changed the bucket grid's own width, which reassigns *every*
      * retained sample to a different bucket — a full rebin, not a rescale, undoing the exact
      * value-stability the fixed-slot design above exists to guarantee, just triggered by a
      * settings change instead of the passage of time. (The latency graph never had this problem:
@@ -427,24 +427,50 @@ data class ProbeHistory(
      * true constant, a sample's bucket depends only on its own timestamp, [bucketWidthMs], and
      * the session's own start (see [bucketSlot]) — never on [windowMs] — so changing the window
      * slider changes only how many already-assigned buckets are currently in view, never which
-     * bucket any sample belongs to. The default is anchored at the *default* window specifically
-     * so the default on-screen experience (a fresh install, before the window slider is ever
-     * touched) renders bucket-for-bucket identically to the fixed-[DEFAULT_MAX_BUCKETS]-bucket
-     * grid this replaced.
+     * bucket any sample belongs to.
      *
-     * One consequence: bucket *count* is no longer pinned at [DEFAULT_MAX_BUCKETS] — with width
+     * The anchor is [NARROWEST_WINDOW_MS] (the settings screen's 1-minute slider floor), not
+     * [DEFAULT_WINDOW_MS], and that choice is itself a fix, not an arbitrary pick. An earlier
+     * version of this constant anchored at the *default* 7-minute window instead, specifically so
+     * a fresh install's default view rendered bucket-for-bucket identically to the
+     * fixed-48-bucket grid that redesign replaced. That left the width at ~8.75 seconds — fine at
+     * the default window, but at the *narrowest* configurable 1-minute window it meant only
+     * ~7 buckets total, all of which (warm-up included) resolve within about 9-15 real seconds —
+     * so the display raced to its full, final shape in roughly a quarter of the window it was
+     * supposedly covering, and thereafter only scrolled once every ~8.75 seconds, a visibly
+     * chunkier cadence than the latency graph's continuous per-sample motion right next to it.
+     * Both were on-device reports at the 1-minute window specifically, and both trace to the same
+     * root cause: anchoring the one global width constant to the default window starves the
+     * *narrow* end of the configurable range of resolution, since a fixed width can only be
+     * "enough buckets" for the window it was sized against. Anchoring at the narrowest window
+     * instead means the short end of the range — where responsiveness matters most, since that's
+     * where a bucket-width-sized wait is the largest fraction of the whole window — gets full
+     * resolution, and every wider window gets *more* buckets, never fewer, as a direct
+     * consequence (see the next paragraph). This exact risk was flagged before the
+     * default-anchored version was first built, but it shipped anchored at the default anyway
+     * for lack of on-device evidence that the narrow end was a real problem; this on-device
+     * report is that evidence.
+     *
+     * One consequence: bucket *count* is no longer pinned at [ANCHOR_BUCKET_COUNT] — with width
      * fixed, however many of those fixed-width slots fit in the configured [windowMs] is what
      * gets displayed (`ceil(windowMs / bucketWidthMs)`, occasionally a handful more during
-     * session warm-up — see below): as few as ~7 at the narrowest configurable 1-minute window,
-     * a few hundred at the widest configurable 30-minute one. None of that is a performance
-     * concern — this is small-array arithmetic on the main/UI thread from Compose state, not a
-     * hot path at any of these sizes. [DEFAULT_MAX_BUCKETS] no longer means "the bucket count,"
-     * only the anchor used to derive [BUCKET_WIDTH_MS] (see its own doc). This is a *different*
-     * kind of bucket-count variation than the one already forbidden elsewhere in this class's own
+     * session warm-up — see below): exactly [ANCHOR_BUCKET_COUNT] (20) at the narrowest
+     * configurable 1-minute window (by construction — see [BUCKET_WIDTH_MS]'s own doc), 140 at
+     * the *default* 7-minute window (a deliberate, one-time step down in the default view's own
+     * resolution from the 48 it rendered before this fix — see [BUCKET_WIDTH_MS]'s own doc for
+     * why 20, not 48, is the right anchor count once the false-dip floor on the width is taken
+     * into account; 140 is still nearly 3x the old default-window count, not a coarser graph, just
+     * a differently-derived one), and 600 at the widest configurable 30-minute one. None of that
+     * is a performance concern — this is small-array arithmetic on the main/UI thread from
+     * Compose state, not a hot path at any of these sizes, confirmed rather than assumed for the
+     * new, larger end of that range by this fix's own test coverage (see the "wide window" sweep
+     * in the test suite). [ANCHOR_BUCKET_COUNT] no longer means "the bucket count," only the
+     * anchor used to derive [BUCKET_WIDTH_MS] (see its own doc). This is a *different* kind of
+     * bucket-count variation than the one already forbidden elsewhere in this class's own
      * history: count still never depends on attempt count, or on when the line happens to be
      * redrawn — only on the *configured window*, exactly as stable a basis as
-     * [DEFAULT_MAX_BUCKETS] itself used to be (see the "resolution grows with elapsed time"
-     * test in the suite, which is about attempt-count independence and is unaffected by this).
+     * [ANCHOR_BUCKET_COUNT] itself used to be (see the "resolution grows with elapsed time" test
+     * in the suite, which is about attempt-count independence and is unaffected by this).
      *
      * ### Session warm-up: resolution starts fine and coarsens into the fixed grid
      * A session's very first fixed-width slot can span the *entire* width of [bucketWidthMs] —
@@ -513,7 +539,7 @@ data class ProbeHistory(
      *   subdivides a session's first [bucketWidthMs] into (see the "session warm-up" section
      *   above), with zero real attempts, wherever it sits in the display (not only at the very
      *   start). Unlike the ordinary grid's wide, multi-second-to-minutes buckets, warm-up's
-     *   finest levels (as narrow as ~139ms at the default width) are routinely narrower than any
+     *   finest levels (as narrow as ~47ms at the production bucket width) are routinely narrower than any
      *   realistic probe pacing (the app's configurable step delay plus the tracer's own cycle
      *   overhead runs from roughly 400ms to several seconds between attempts — see
      *   `UplinkPreferences.STEP_DELAY_RANGE_MS`), so it is *ordinary*, not rare, for two
@@ -795,31 +821,95 @@ data class ProbeHistory(
          */
         const val MAX_SAMPLES: Int = 20_000
 
-        /** Anchor for [BUCKET_WIDTH_MS]: the bucket count [successSparkline] used, at the
-         * default window, before bucket width became a fixed constant independent of [windowMs]
-         * (see [BUCKET_WIDTH_MS]'s own doc) — enough resolution for a card-sized sparkline
-         * without plotting points finer than the eye can separate. No longer itself the
-         * displayed bucket count for every window, which now varies with [windowMs] — this is
-         * only the count at [DEFAULT_WINDOW_MS] specifically, chosen so a fresh install's
-         * default view is unchanged by that redesign. */
-        const val DEFAULT_MAX_BUCKETS: Int = 48
+        /** The narrowest configurable "History window" — must track
+         * `UplinkPreferences.HISTORY_WINDOW_RANGE_MS`'s lower bound in `:app` (duplicated here,
+         * not referenced directly, since `:core` has no dependency on `:app`; `:app`'s own range
+         * is itself documented as bounded below by this same value, so the two are meant to be
+         * read together). [BUCKET_WIDTH_MS] is anchored to *this* window rather than
+         * [DEFAULT_WINDOW_MS] — see that constant's own doc, and [successSparkline]'s "Bucket
+         * width is a true constant" doc section, for why: anchoring the one global width constant
+         * to the *default* window instead left the *narrow* end of the configurable range
+         * starved of resolution, which is exactly what an on-device report at this window setting
+         * surfaced. */
+        const val NARROWEST_WINDOW_MS: Long = 60_000L
 
-        /** The fixed, [windowMs]-independent bucket width [successSparkline] bins by unless a
+        /** Anchor for [BUCKET_WIDTH_MS]: the bucket count [successSparkline] displays at
+         * [NARROWEST_WINDOW_MS] specifically (by construction — see [BUCKET_WIDTH_MS]'s own doc).
+         * Chosen not for its own sake but as the value that, divided into
+         * [NARROWEST_WINDOW_MS], lands [BUCKET_WIDTH_MS] comfortably above the app's own
+         * worst-case realistic gap between two real probe attempts — see [BUCKET_WIDTH_MS]'s own
+         * doc for why that lower bound on the width exists at all. Not itself the displayed
+         * bucket count for every window, which grows proportionally wider than this at every
+         * window past the narrowest one (see [successSparkline]'s own doc for the exact counts at
+         * the default and widest configurable windows). */
+        const val ANCHOR_BUCKET_COUNT: Int = 20
+
+        /**
+         * The fixed, [windowMs]-independent bucket width [successSparkline] bins by unless a
          * caller overrides it directly (a test-only escape hatch — `:app` always uses this
-         * default). Anchored at [DEFAULT_WINDOW_MS] / [DEFAULT_MAX_BUCKETS] (an exact division,
-         * 8_750ms) specifically so the default on-screen experience — a fresh install, before
-         * the "History window" slider is ever touched — renders the exact same resolution it
-         * always has. See [successSparkline]'s own doc for why this must be a true constant and
-         * never a function of the currently configured [windowMs]: an earlier version computed
-         * it as `windowMs / bucketCount`, so every slider edit silently rebinned every retained
-         * sample into a new bucket. */
-        const val BUCKET_WIDTH_MS: Long = DEFAULT_WINDOW_MS / DEFAULT_MAX_BUCKETS
+         * default). Anchored at [NARROWEST_WINDOW_MS] / [ANCHOR_BUCKET_COUNT] (an exact division,
+         * 3_000ms).
+         *
+         * That anchor window is deliberate — see [NARROWEST_WINDOW_MS]'s own doc — but
+         * [ANCHOR_BUCKET_COUNT] (and therefore this width) is not simply "as much resolution as
+         * fits": there is a hard floor this width must clear, discovered by this fix's own test
+         * suite rather than assumed. [successSparkline]'s **ordinary**, post-warm-up grid treats
+         * a bucket with zero real attempts as an unconditional 0% miss — deliberately, with no
+         * per-bucket "does this silence look real" exception (see that method's own doc; that
+         * exception was already tried and explicitly rejected once for this exact grid). That
+         * rule is only honest when a bucket can *only* be empty because of a genuine outage —
+         * which requires the bucket to be wide enough that ordinary pacing could never skip one
+         * outright. A single real gap between two consecutive successful probes that reaches or
+         * exceeds the bucket width can straddle an entire bucket and leave it with zero attempts
+         * on a perfectly healthy connection, which this grid would then draw as a fabricated
+         * outage dip — precisely the false-positive failure this class's warm-up ladder already
+         * has its own dedicated fix for ([WARMUP_LEVELS]'s empty-sub-bucket omission), just
+         * relocated to the *permanent* grid instead of warm-up's brief opening stretch, and with
+         * no omission exception available there to fall back on. This was not a hypothetical
+         * concern: an earlier, more aggressive version of this fix anchored at
+         * [ANCHOR_BUCKET_COUNT] = 48 (1_250ms buckets) and this exact failure mode showed up
+         * directly in this fix's own "all-success session produces no false failure dips" test,
+         * at realistic slower pacing settings (1500-2000ms nominal step delay) — not a corner
+         * case, a reliable reproduction.
+         *
+         * The app's own worst-case realistic single gap between two real probes is 2 ×
+         * `UplinkPreferences.STEP_DELAY_RANGE_MS`'s upper bound (1_000ms) = 2_000ms — see
+         * [ProbeCycleRunner]'s "ping, ping, fake" cycle doc: two real probes per fake ack, so the
+         * gap from a fake ack back to the next real probe is two step-delay waits, the largest
+         * gap the cycle ever produces. [ANCHOR_BUCKET_COUNT] = 20 is chosen so this width clears
+         * that 2_000ms figure with a deliberate ~50% safety margin (3_000ms), not just barely —
+         * covering real-world scheduling jitter around the nominal figure, the same margin this
+         * fix's own no-false-dips test sweep already validates against (±15% jitter on nominal
+         * intervals up to 2_000ms, i.e. gaps up to 2_300ms in that sweep, comfortably inside the
+         * 3_000ms floor).
+         *
+         * Within that floor, smaller is still better for the narrow-window responsiveness this
+         * fix exists to improve — 3_000ms is the narrowest width that clears the floor at a round,
+         * exact divisor of [NARROWEST_WINDOW_MS]. At this width, a fresh session at the 1-minute
+         * window takes the full 60 seconds to reach its full 20 buckets (each bucket represents
+         * 3_000ms of real elapsed time, and 20 of them is 60 seconds) — the honest "fills in as
+         * time actually passes" behavior of a strip chart, rather than racing to full width in a
+         * handful of seconds the way the old 8_750ms-wide, default-window-anchored grid did at
+         * this same window setting (its ~7 total buckets, warm-up included, all resolved within
+         * roughly 9-15 real seconds). And a new bucket opens roughly every 3 seconds instead of
+         * every ~8.75 — visibly finer-grained scrolling, much closer to the latency graph's own
+         * continuous per-sample motion, without opening the false-dip hole above.
+         *
+         * Every wider window gets proportionally *more* buckets than the narrowest one, never
+         * fewer, as a direct consequence of width being fixed — see [successSparkline]'s own doc
+         * for why that's the right trade (more resolution is strictly better, and the array sizes
+         * involved stay trivial even at the widest configurable window). See [successSparkline]'s
+         * own doc for why this must be a true constant and never a function of the currently
+         * configured [windowMs]: an earlier version computed it as `windowMs / bucketCount`, so
+         * every slider edit silently rebinned every retained sample into a new bucket.
+         */
+        const val BUCKET_WIDTH_MS: Long = NARROWEST_WINDOW_MS / ANCHOR_BUCKET_COUNT
 
         /** How many progressively wider sub-buckets [warmupLevel] divides a session's very
          * first [BUCKET_WIDTH_MS]-wide slot into — see [successSparkline]'s "session warm-up"
          * doc section for why, and [warmupLevel]'s own doc for the exact doubling ladder this
-         * produces. Six levels at the default bucket width means an initial resolution near
-         * 139ms, doubling five times up to the full ~8.75s bucket width — fine enough to show
+         * produces. Six levels at the production bucket width means an initial resolution near
+         * 47ms, doubling five times up to the full 3_000ms bucket width — fine enough to show
          * distinct points for typical probe pacing (0-1000ms, see
          * `UplinkPreferences.STEP_DELAY_RANGE_MS`) without an unbounded number of levels. */
         private const val WARMUP_LEVELS: Int = 6
