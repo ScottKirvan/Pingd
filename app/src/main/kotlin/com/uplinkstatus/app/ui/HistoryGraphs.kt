@@ -99,6 +99,13 @@ private val PING_SUCCESS_SWEEP_START = Color(0xFF3B82F6) // blue
 private val PING_SUCCESS_SWEEP_MID = Color(0xFF8B5CF6) // violet
 private val PING_SUCCESS_SWEEP_END = Color(0xFFEC4899) // pink
 
+/** The synthetic-latency debug line's color where it's drawn overlaid on the ping-success
+ * card's own canvas (see [Sparkline]'s `overlayPoints` doc) -- white, so it reads as a distinct
+ * layer against the ping-success line's own blue/violet/pink sweep regardless of where on that
+ * sweep it crosses, and at a low alpha so the overlay stays visually secondary to the card's own
+ * data rather than competing with it. */
+private val SYNTHETIC_LATENCY_OVERLAY_COLOR = Color.White.copy(alpha = 0.3f)
+
 /** Turns a raw latency into a point on the [LATENCY_COLOR_FAST]→[LATENCY_COLOR_MID]→
  * [LATENCY_COLOR_SLOW] scale, via [latencyColorFraction]'s pure threshold math -- the only place
  * an actual `Color` gets involved, since [latencyColorFraction] itself has no notion of one. */
@@ -237,6 +244,10 @@ fun HistoryGraphs(modifier: Modifier = Modifier) {
                     valueTag = TAG_PING_SUCCESS_VALUE,
                     sparklineTag = TAG_PING_SUCCESS_SPARKLINE,
                     textColumnWidth = textColumnWidth,
+                    // Temporary: the synthetic-latency debug line, overlaid directly on this
+                    // card's own canvas -- see Sparkline's `overlayPoints` doc. Still drawn on
+                    // the separate "Synthetic latency" card below too; this doesn't replace it.
+                    overlayPoints = history.syntheticLatencySparkline(),
                 )
                 HistoryGraphCard(
                     title = "Latency",
@@ -350,6 +361,10 @@ private fun HistoryGraphCard(
     valueTag: String,
     sparklineTag: String,
     textColumnWidth: Dp,
+    // Empty for every card except ping-success, whose canvas the synthetic-latency debug line
+    // is drawn onto -- see Sparkline's own doc for why this stays a translucent overlay on the
+    // existing canvas rather than a second Canvas stacked on top.
+    overlayPoints: List<SparklinePoint> = emptyList(),
 ) {
     Card(modifier = Modifier.fillMaxWidth().testTag(cardTag)) {
         Row(
@@ -375,6 +390,7 @@ private fun HistoryGraphCard(
                 coloring = coloring,
                 markerColor = MaterialTheme.colorScheme.outline,
                 gapColor = gapColor,
+                overlayPoints = overlayPoints,
                 // Fills whatever width the text column (above) didn't claim -- the only
                 // weighted child in this Row, so it gets 100% of the remainder rather than
                 // splitting it. That remainder is now identical across every card, since the
@@ -423,6 +439,17 @@ private data class PlottedPoint(val offset: Offset, val source: SparklinePoint)
  * Purely arithmetic aside from the coloring itself: every position value arrives already reduced
  * to the unit square by [ProbeHistory], so there is no scaling or aggregation decision left here
  * to disagree with the numbers above it.
+ *
+ * [overlayPoints], when non-empty, draws a second line on this same `Canvas`, on top of
+ * everything above -- a translucent, fixed-color ([SYNTHETIC_LATENCY_OVERLAY_COLOR]) connected
+ * line, positioned by the exact same `x`/`y` -> pixel mapping [points] itself uses, since both
+ * already share the same 0..1 unit-square convention [ProbeHistory] produces (see that class's
+ * own doc). No separate scaling step, and no second `Canvas`: a genuinely separate `Canvas`
+ * stacked in a `Box` would need its own size to exactly match this one's for the two lines to
+ * align, a second thing that could drift out of sync; drawing into the same `Canvas` makes that
+ * alignment automatic rather than something to maintain. Ignores [coloring]/[markers]/[gapColor]
+ * entirely -- this is a temporary visual comparison aid, not a second full data series with its
+ * own gap/marker treatment.
  */
 @Composable
 private fun Sparkline(
@@ -432,6 +459,7 @@ private fun Sparkline(
     markerColor: Color,
     gapColor: Color,
     modifier: Modifier = Modifier,
+    overlayPoints: List<SparklinePoint> = emptyList(),
 ) {
     Canvas(modifier = modifier) {
         if (points.isEmpty()) return@Canvas
@@ -462,23 +490,7 @@ private fun Sparkline(
             )
         }
 
-        var current = mutableListOf<PlottedPoint>()
-        val segments = mutableListOf<List<PlottedPoint>>()
-        points.forEach { point ->
-            val y = point.y
-            if (y == null) {
-                if (current.isNotEmpty()) {
-                    segments += current
-                    current = mutableListOf()
-                }
-            } else {
-                current += PlottedPoint(
-                    offset = Offset(x = point.x * size.width, y = inset + (1f - y) * usableHeight),
-                    source = point,
-                )
-            }
-        }
-        if (current.isNotEmpty()) segments += current
+        val segments = plottedSegments(points, size, inset, usableHeight)
 
         // Anchored to the whole canvas width, once, outside the per-segment loop below -- see
         // this function's own doc for why that (and not each drawPath call's own local bounds)
@@ -493,7 +505,43 @@ private fun Sparkline(
                 is SparklineColoring.ByValue -> drawByValueSegment(segment, coloring.colorFor, stroke)
             }
         }
+
+        // Drawn last, on top of everything above -- see this function's own doc.
+        if (overlayPoints.isNotEmpty()) {
+            plottedSegments(overlayPoints, size, inset, usableHeight).forEach { segment ->
+                drawFlatColorSegment(segment, SYNTHETIC_LATENCY_OVERLAY_COLOR, stroke)
+            }
+        }
     }
+}
+
+/** Converts [points] into pixel-space [PlottedPoint] runs, broken at every gap ([SparklinePoint.y]
+ * of `null`) -- the same conversion [Sparkline]'s own main line and its [overlayPoints] both need,
+ * factored out so the two can't silently diverge in how a point becomes a pixel. */
+private fun plottedSegments(
+    points: List<SparklinePoint>,
+    size: Size,
+    inset: Float,
+    usableHeight: Float,
+): List<List<PlottedPoint>> {
+    var current = mutableListOf<PlottedPoint>()
+    val segments = mutableListOf<List<PlottedPoint>>()
+    points.forEach { point ->
+        val y = point.y
+        if (y == null) {
+            if (current.isNotEmpty()) {
+                segments += current
+                current = mutableListOf()
+            }
+        } else {
+            current += PlottedPoint(
+                offset = Offset(x = point.x * size.width, y = inset + (1f - y) * usableHeight),
+                source = point,
+            )
+        }
+    }
+    if (current.isNotEmpty()) segments += current
+    return segments
 }
 
 /** [SparklineColoring.Sweep]: one path (or dot), one shared [brush] -- the whole segment moves
@@ -513,6 +561,29 @@ private fun DrawScope.drawSweepSegment(
         drawPath(
             path = path,
             brush = brush,
+            style = Stroke(width = stroke, cap = StrokeCap.Round, join = StrokeJoin.Round),
+        )
+    }
+}
+
+/** [Sparkline]'s `overlayPoints`: one flat, already-translucent [color] for the whole segment --
+ * simpler than [SparklineColoring.Sweep]/[SparklineColoring.ByValue], which this overlay doesn't
+ * use at all (see [Sparkline]'s own doc for why). */
+private fun DrawScope.drawFlatColorSegment(
+    segment: List<PlottedPoint>,
+    color: Color,
+    stroke: Float,
+) {
+    if (segment.size == 1) {
+        drawCircle(color = color, radius = stroke, center = segment.first().offset)
+    } else {
+        val path = Path().apply {
+            moveTo(segment.first().offset.x, segment.first().offset.y)
+            segment.drop(1).forEach { lineTo(it.offset.x, it.offset.y) }
+        }
+        drawPath(
+            path = path,
+            color = color,
             style = Stroke(width = stroke, cap = StrokeCap.Round, join = StrokeJoin.Round),
         )
     }
