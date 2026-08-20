@@ -194,6 +194,34 @@ class HistoryGraphsTest {
     }
 
     @Test
+    fun `the synthetic-latency debug line overlaid on the ping-success card renders without crashing`() {
+        // Same reasoning as the debug card's own crash-safety test above: the overlay is drawn
+        // into the ping-success card's Canvas from the exact same syntheticLatencySparkline()
+        // points, so it needs the same range of shapes exercised against it -- empty, sparse,
+        // dense, and alongside a marker -- since a Canvas draw call crashing on an edge case
+        // (e.g. a single-point segment) wouldn't be caught by a semantics-tree assertion.
+        setContent()
+        composeTestRule.waitForIdle() // empty history
+
+        seed(count = 3)
+        composeTestRule.waitForIdle() // sparse, short session -- exercises the single-point path
+
+        var index = 3
+        repeat(200) {
+            UplinkProbeHistory.recordSuccess(latencyMs = 10, timestampMs = (index++) * 150L)
+        }
+        composeTestRule.waitForIdle() // dense burst, many overlay points
+
+        UplinkProbeHistory.recordFailure(timestampMs = (index++) * 150L)
+        composeTestRule.waitForIdle() // a failure -- the overlay's 900ms synthetic point
+
+        UplinkProbeHistory.recordMasterToggleTransition(timestampMs = (index++) * 150L)
+        composeTestRule.waitForIdle() // alongside a marker too
+
+        composeTestRule.onNodeWithTag(TAG_PING_SUCCESS_CARD).assertExists()
+    }
+
+    @Test
     // Robolectric's default (unqualified) virtual screen is far wider than a real phone -- wide
     // enough that even a content-sized text column still leaves every card's sparkline a
     // comfortable, near-equal share, so it can't reproduce the inconsistency this test exists to
