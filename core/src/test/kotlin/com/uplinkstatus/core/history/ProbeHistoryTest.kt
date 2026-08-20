@@ -552,8 +552,12 @@ class ProbeHistoryTest {
 
     @Test
     fun `the success line plots a rate per time bucket, not a zero-or-one square wave`() {
-        // 8 attempts over a fully-packed 7-second window, 6 of them successful, split evenly
-        // across two buckets: bucket 1 has 3/4, bucket 2 has 3/4.
+        // 8 attempts over a fully-packed 7-second window, 6 of them successful. Buckets are now
+        // fixed 3.5-second slots of absolute time (not an even relative split of the retained
+        // span), so the two buckets end up with 3 and 4 real attempts respectively rather than
+        // 4 and 4 -- the t=0 attempt lands exactly on the window's own left edge, a boundary a
+        // fixed slot grid can occasionally exclude (see successBucketSlot's doc) -- but the core
+        // point stands either way: a fractional rate per bucket, not a 0/1 square wave.
         var history = ProbeHistory(windowMs = 7_000)
         listOf(true, true, true, false, true, true, true, false).forEachIndexed { index, ok ->
             val at = index * 1_000L
@@ -563,8 +567,8 @@ class ProbeHistoryTest {
         val points = history.successSparkline(maxBuckets = 2)
 
         assertEquals(2, points.size)
-        assertEquals(0.75f, points[0].y!!, 0.001f)
-        assertEquals(0.75f, points[1].y!!, 0.001f)
+        assertEquals(2f / 3f, points[0].y!!, 0.001f) // t=1000,2000,3000 -> 2 successes / 3 attempts.
+        assertEquals(0.75f, points[1].y!!, 0.001f) // t=4000,5000,6000,7000 -> 3 successes / 4 attempts.
     }
 
     @Test
@@ -583,12 +587,19 @@ class ProbeHistoryTest {
 
     @Test
     fun `resolution grows with elapsed time instead of dotting out one sample per bucket`() {
-        var history = ProbeHistory(windowMs = window)
+        // successSparkline always divides the window into the full maxBuckets fixed slots now
+        // (no separate bucket-count-growing logic -- see its own doc); the "resolution grows
+        // with elapsed real time" appearance instead falls straight out of the leading-blank
+        // rule: early in a session, most of those fixed slots simply sit before the first real
+        // sample and are omitted, so only the handful with real data behind them get drawn.
+        var history = ProbeHistory(windowMs = window) // 60_000ms / 48 buckets = 1_250ms slots.
         repeat(3) { index -> history = history.recordSuccess(index * 1_000L, latencyMs = 10) }
-        // Barely any of the window has elapsed yet: a single honest point, not three.
-        assertEquals(1, history.successSparkline().size)
+        // Barely any of the window has elapsed yet (t=0..2000, inside one or two 1_250ms
+        // slots): far fewer than the full 48 points, not a fabricated one-point-per-bucket line.
+        assertTrue(history.successSparkline().size < 5)
 
-        // Advance to the window's own span -- fully covered now, so resolution is maxed out.
+        // Advance to the window's own span -- fully covered now, so every requested bucket has
+        // real data behind it and the full requested resolution is drawn.
         history = history.recordSuccess(window, latencyMs = 10)
         val points = history.successSparkline(maxBuckets = 10)
         assertEquals(10, points.size)
@@ -597,15 +608,19 @@ class ProbeHistoryTest {
     /**
      * Regression test for the on-device report that the ping-success graph stayed a single dot
      * for several seconds, then had its left edge "bounce" and already-plotted dips readjust
-     * with every new sample. Root cause: bucket count used to be `samples.size / 4`, so a burst
-     * of attempts arriving without much real time passing (pacing changes, retry bursts, or
-     * simply more probes landing) changed the bucket count -- and therefore every bucket's
-     * boundaries -- on almost every recorded sample. Bucket count must depend only on how much
-     * of the window elapsed time has actually covered, so two histories covering the same span
-     * produce the same resolution regardless of how many attempts happened to land in it.
+     * with every new sample. Root cause at the time: bucket count used to be `samples.size / 4`,
+     * so a burst of attempts arriving without much real time passing (pacing changes, retry
+     * bursts, or simply more probes landing) changed the bucket count -- and therefore every
+     * bucket's boundaries -- on almost every recorded sample. That was fixed by tying bucket
+     * *count* to elapsed time instead of attempt count; bucket count no longer varies at all any
+     * more (buckets are now fixed-width absolute-time slots, always up to `maxBuckets` of them --
+     * see [ProbeHistory.successSparkline]'s own doc), so this now checks the same underlying
+     * property one level down: how many of those fixed slots have real data in them, and
+     * therefore how many points get drawn, depends only on how much real elapsed time two
+     * histories cover, not on how many attempts happened to land in that time.
      */
     @Test
-    fun `bucket count depends on elapsed time, not on how many attempts arrived in it`() {
+    fun `visible resolution depends on elapsed time, not on how many attempts arrived in it`() {
         val sparse = ProbeHistory(windowMs = 60_000)
             .recordSuccess(0, latencyMs = 10)
             .recordSuccess(29_850, latencyMs = 10)
@@ -619,7 +634,7 @@ class ProbeHistoryTest {
     }
 
     @Test
-    fun `an additional attempt within an already-covered span does not change the bucket count`() {
+    fun `an additional attempt within an already-covered span does not change the visible resolution`() {
         var history = ProbeHistory(windowMs = 60_000)
         repeat(30) { index -> history = history.recordSuccess(index * 1_000L, latencyMs = 10) }
         val before = history.successSparkline(maxBuckets = 10).size
@@ -673,6 +688,95 @@ class ProbeHistoryTest {
         assertTrue(sparsePoints.any { it.y == 0f })
     }
 
+    // --- Bucket-value stability across ticks (the "graph reshapes instead of scrolling" bug) ---
+    //
+    // Direct regression test for the on-device report: "the graph changes shape every tick
+    // rather than just scrolling, exacerbated by changing the ping rate while watching." Root
+    // cause: successSparkline used to bin each sample by its *fractional distance from `newest`*
+    // ([ProbeHistory.windowFraction]) -- a value every retained sample's position is measured
+    // against, and which shifts on every single new sample. A sample sitting near a bucket
+    // boundary could therefore flip to the neighboring bucket on almost any tick purely because
+    // "now" moved forward slightly, with nothing about the connection actually changing --
+    // confirmed by porting that exact old algorithm into a standalone simulation and measuring
+    // single-tick swings of tens of percentage points in a bucket with nothing real going on, up
+    // to 100 points at narrow-window/slow-pacing settings (exactly what "changing the ping rate
+    // while watching" would trigger). The fix bins each sample into a fixed, absolute-time slot
+    // instead (see [ProbeHistory.successSparkline]'s doc) -- a slot's membership is a pure
+    // function of which real samples exist, not of when the line happens to be redrawn.
+
+    /**
+     * The test that should have caught the original bug and didn't. Setup: one real sample per
+     * second in a window whose default bucket width is also exactly one second (`windowMs` =
+     * `maxBuckets` * 1000ms), so every fixed slot ends up with exactly one real attempt -- no
+     * averaging needed to reason about expected values -- following a known, deterministic
+     * pass/fail pattern (fails every 5th attempt). Once the window is fully packed, a specific
+     * real sample's point is identified purely by its distance from the *right* edge (the newest
+     * point): since exactly one new sample lands and exactly one new fixed slot opens on every
+     * tick, that distance increases by exactly one index per tick as long as nothing is
+     * migrating between buckets. Under steady, unchanging conditions (no real outage, no setting
+     * change), that tracked point must report the pattern's own known outcome on every single
+     * later tick -- and therefore must never change from one tick to the next, checked directly
+     * too -- for as long as it is neither the live point nor within one slot-width of aging off
+     * the window's trailing edge.
+     */
+    @Test
+    fun `an interior bucket's value never changes on a later tick under steady, unchanging conditions`() {
+        val stableWindowMs = 48_000L // 48 buckets -> exactly 1_000ms fixed slots.
+        val maxBuckets = 48
+        fun succeededAt(i: Int) = i % 5 != 0 // deterministic, steady failure rate -- no real outage.
+
+        // maxBuckets + 1 samples, one full extra tick past a bare minimum warm-up, so the
+        // retained span is exactly windowMs (not one pacing interval short of it) regardless of
+        // how a given implementation decides "how full is full."
+        var history = ProbeHistory(windowMs = stableWindowMs)
+        for (i in 1..(maxBuckets + 1)) {
+            val t = i * 1_000L
+            history = if (succeededAt(i)) history.recordSuccess(t, latencyMs = 10) else history.recordFailure(t)
+        }
+        // The window is now fully packed: one real sample per fixed slot, maxBuckets points.
+        assertEquals(maxBuckets, history.successSparkline(maxBuckets).size)
+
+        // Track the sample recorded at i = trackedI. At k ticks later it must sit exactly k
+        // positions in from the right edge, still carrying its own known outcome.
+        val trackedI = 20
+        val trackedExpected = if (succeededAt(trackedI)) 1f else 0f
+        var previousValue: Float? = null
+
+        for (i in (maxBuckets + 2)..(maxBuckets + 31)) {
+            val t = i * 1_000L
+            history = if (succeededAt(i)) history.recordSuccess(t, latencyMs = 10) else history.recordFailure(t)
+
+            val k = i - trackedI // ticks since the tracked sample was recorded
+            // Not live (k > 0) and not within one slot-width of the trailing edge (k <= maxBuckets - 2).
+            if (k <= 0 || k > maxBuckets - 2) continue
+
+            val points = history.successSparkline(maxBuckets)
+            val index = points.size - 1 - k
+            if (index !in points.indices) continue
+
+            val value = points[index].y!!
+            assertEquals(
+                "tracked sample (i=$trackedI) must still report its own known outcome at tick i=$i",
+                trackedExpected,
+                value,
+                0.001f,
+            )
+            previousValue?.let { previous ->
+                assertEquals(
+                    "an interior, already-closed bucket's value must not change from one tick to the next",
+                    previous,
+                    value,
+                    0.001f,
+                )
+            }
+            previousValue = value
+        }
+
+        // The stability check above must have actually exercised multiple ticks, not vacuously
+        // passed because the loop's range never satisfied its own guards.
+        assertNotNull(previousValue)
+    }
+
     // --- No-data-as-miss: the "gap" concept is gone from this graph entirely -----------------
     //
     // An earlier version of successSparkline tried to tell a "genuine gap" (a real stretch of
@@ -715,11 +819,11 @@ class ProbeHistoryTest {
      * in the displayed window stay blank (omitted), not a 0% miss -- ordinary session warm-up
      * (e.g. right after a fresh install) must not read as "actively failing." Constructed so
      * real attempts fill only the newer half of the window, leaving the older half with no real
-     * sample to anchor a bucket count off of on its own.
+     * sample in it at all.
      */
     @Test
     fun `buckets before the very first real sample stay blank, not a 0 percent miss`() {
-        var history = ProbeHistory(windowMs = 60_000)
+        var history = ProbeHistory(windowMs = 60_000) // 48 fixed 1_250ms slots.
         var t = 30_000L
         while (t <= 60_000L) {
             history = history.recordSuccess(t, latencyMs = 10)
@@ -728,11 +832,11 @@ class ProbeHistoryTest {
 
         val points = history.successSparkline(maxBuckets = 48)
 
-        // Half the window's elapsed time is covered (span = 30s of a 60s window), so
-        // resolution is 24 buckets; the leading 12, before the first real sample at the
-        // window's midpoint, are omitted entirely rather than plotted as a 0f miss.
-        assertEquals(12, points.size)
-        assertTrue(points.none { it.x < 0.5f })
+        // Real attempts start at t=30_000, the window's own midpoint -- the first ~23 of the 48
+        // fixed slots (everything before that point) have no real sample in them at all and are
+        // omitted entirely rather than plotted as a 0f miss, leaving 25 real points.
+        assertEquals(25, points.size)
+        assertTrue(points.none { it.x < 0.48f })
         assertTrue(points.none { it.y == 0f })
         assertTrue(points.all { it.y == 1f })
     }
@@ -768,17 +872,19 @@ class ProbeHistoryTest {
     }
 
     @Test
-    fun `a short session collapses to one honest point instead of fabricating empty buckets`() {
-        var history = ProbeHistory(windowMs = 60_000)
+    fun `a short session collapses to a couple of honest points instead of fabricating empty buckets`() {
+        var history = ProbeHistory(windowMs = 60_000) // maxBuckets=6 -> 10_000ms fixed slots.
         repeat(8) { index -> history = history.recordSuccess(index * 100L, latencyMs = 10) }
 
         val points = history.successSparkline(maxBuckets = 6)
 
-        // 700ms of real data inside a 60-second window: barely any of the window has actually
-        // elapsed, so resolution stays at a single honest point rather than being split into
-        // six buckets where five would just be gaps for time that hasn't happened yet.
-        assertEquals(1, points.size)
-        assertNotNull(points.single().y)
+        // 700ms of real data inside a 60-second window (t=0..700, entirely inside the first
+        // 10_000ms slot except the single t=0 sample, which lands on that slot's own left edge
+        // and so belongs to the slot just before it -- see successBucketSlot's doc): far fewer
+        // than the full 6 requested buckets, not six buckets where five would just be gaps for
+        // time that hasn't happened yet.
+        assertTrue(points.size < 3)
+        assertTrue(points.all { it.y == 1f })
     }
 
     @Test
