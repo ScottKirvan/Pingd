@@ -380,6 +380,41 @@ data class ProbeHistory(
      * pacing intervals, and non-round window/bucket-count combinations produced zero value
      * changes in any interior, already-closed bucket).
      *
+     * ### Bucket position is time-based, not index-based — this is what lets the two graphs scroll together
+     * Each displayed bucket's [SparklinePoint.x] is [windowFraction] applied to *that bucket's own
+     * real timestamp* ([bucketRightEdgeMs] — see its own doc for exactly which instant represents a
+     * bucket and why), the same continuous, window-anchored real-time scale [latencySparkline] and
+     * [markerFractions] already plot every point against — **not** `index / (displayedCount - 1)`,
+     * which an earlier version of this method used instead. That earlier scheme only coincidentally
+     * matched the latency graph's axis when `displayedCount` happened to equal the nominal
+     * `ceil(windowMs / bucketWidthMs)` bucket count almost exactly — which it does not always do:
+     * the session warm-up ladder's narrower sub-buckets, and the `minOf`-based full-coverage
+     * correction (both described above and in this method's own "session warm-up" section below),
+     * legitimately push `displayedCount` *above* the nominal count without adjusting the index-to-x
+     * mapping to compensate, so a given array index no longer corresponded to the same real-time
+     * fraction the latency graph would place that same moment at. Confirmed by an independent
+     * simulation comparing the old index-based `x` against what [windowFraction] would compute for
+     * each bucket's own real timestamp: up to 23-25% of the graph's total width apart during a
+     * session's warm-up period, and a persistent ~4% offset even in ordinary steady state at the
+     * default window — both large enough that the two graphs visibly failed to "track together" for
+     * the same moment in time, not a rounding footnote. Deriving `x` from real time instead makes a
+     * bucket's horizontal position depend only on *when it happened*, exactly like every latency
+     * point and marker already does, so the same moment in time lands at the same horizontal
+     * position on both graphs.
+     *
+     * One correctness consequence, not a new bug: a warm-up sub-bucket, being narrower in real time
+     * than an ordinary bucket, now legitimately occupies less horizontal space than an ordinary one
+     * — spacing between plotted points is no longer uniform during warm-up the way a pure index
+     * scale always made it look, which is the *accurate* picture (those buckets really do cover
+     * less real time) rather than a regression.
+     *
+     * This does not touch *which* real samples land in which bucket at all — [bucketSlot],
+     * [warmupLevel], and [successBucketSlot] (the code deciding bucket *membership*) are completely
+     * unchanged by this; only where an already-computed bucket gets drawn changes. That distinction
+     * is what keeps every stability/coverage/no-false-dip guarantee the rest of this doc describes
+     * intact — those are all properties of bucket *membership*, which is still a permanent fact
+     * about a sample's own timestamp, never affected by how a bucket's position is later rendered.
+     *
      * ### Bucket width is a true constant — never a function of the configured window
      * [bucketWidthMs] defaults to [BUCKET_WIDTH_MS], a fixed constant anchored at
      * [NARROWEST_WINDOW_MS] / [ANCHOR_BUCKET_COUNT] — **not** `windowMs / someBucketCount`,
@@ -542,7 +577,8 @@ data class ProbeHistory(
         // [samples], not [windowed], since windowed's own first entry moves as windowMs or time
         // changes and warm-up anchoring must not (see bucketSlot's own doc).
         val anchorMs = samples.first().timestampMs
-        val newestSlot = bucketSlot(windowed.last().timestampMs, bucketWidthMs, anchorMs)
+        val newest = windowed.last().timestampMs
+        val newestSlot = bucketSlot(newest, bucketWidthMs, anchorMs)
 
         // Ceiling, not floor: guarantees bucketCount * bucketWidthMs is never shorter than
         // windowMs -- see successBucketSlot's doc for why a little slop either way is
@@ -593,15 +629,21 @@ data class ProbeHistory(
         // last instant, not ordinary's first) and why that matters. Used below to recognize an
         // *empty warm-up sub-bucket* as a second, distinct reason to leave a bucket blank rather
         // than plot it as a 0% miss (see this method's own doc for why that's not the same case
-        // the firstSampleIndex check above already covers).
+        // the firstSampleIndex check above already covers), and also to dispatch each bucket's
+        // own x position (see bucketRightEdgeMs).
         val warmupSlotBase = successBucketSlot(anchorMs + bucketWidthMs + 1, bucketWidthMs)
 
         return (0 until displayedCount).mapNotNull { index ->
-            val x = if (displayedCount == 1) 1f else index.toFloat() / (displayedCount - 1)
+            val slot = leftmostSlot + index
+            // Same axis latencySparkline plots every point against -- see windowFraction's own
+            // doc, and this method's "Bucket position is time-based" doc section for why a
+            // bucket's *slot number* (an arbitrary array index once warm-up and the minOf
+            // coverage correction can both add extra buckets) is not itself a usable x.
+            val x = windowFraction(minOf(bucketRightEdgeMs(slot, bucketWidthMs, anchorMs, warmupSlotBase), newest), newest)
             when {
                 attempts[index] > 0 -> SparklinePoint(x = x, y = successes[index].toFloat() / attempts[index])
                 index < firstSampleIndex -> null // before the first real sample -- warm-up, leave blank.
-                leftmostSlot + index < warmupSlotBase -> null // empty warm-up sub-bucket -- not enough resolution yet, leave blank.
+                slot < warmupSlotBase -> null // empty warm-up sub-bucket -- not enough resolution yet, leave blank.
                 else -> SparklinePoint(x = x, y = 0f) // ordinary grid: no attempts here, a real miss.
             }
         }
@@ -664,6 +706,52 @@ data class ProbeHistory(
     }
 
     /**
+     * The real timestamp [successSparkline] treats as [slot]'s own position for [SparklinePoint.x]
+     * (see [windowFraction], the same continuous real-time scale [latencySparkline] plots every
+     * point against) — the *right* edge of the real-time interval [slot] covers, i.e. the instant
+     * the bucket's own data becomes complete and the next one starts. Not an arbitrary pick: it's
+     * the boundary [successBucketSlot]'s own doc already establishes as *the* one that belongs to
+     * a slot (that grid is closed on the right, `(slot * w, (slot + 1) * w]`, specifically so a
+     * timestamp landing exactly on a boundary resolves to the slot ending there rather than the
+     * one starting there) — this reuses that existing, already-load-bearing convention instead of
+     * introducing a second, competing notion (e.g. a bucket's center) of what position represents
+     * a slot.
+     *
+     * Dispatches the same way [bucketSlot] itself does, by comparing [slot] against [warmupSlotBase]
+     * (the smallest ordinary slot any sample could ever reach) rather than re-deriving that split
+     * from a timestamp — the caller already computed it once for the same purpose [bucketSlot]
+     * needed it for, and slot numbers alone are enough to tell the two regimes apart here (every
+     * warm-up slot is, by construction, numbered below every ordinary one — see [bucketSlot]'s own
+     * doc):
+     * - Ordinary slots: `(slot + 1) * bucketWidthMs`, [successBucketSlot]'s own right edge.
+     * - Warm-up slots: recovers which of the [WARMUP_LEVELS] sub-buckets [slot] is (the inverse of
+     *   the offset [bucketSlot] applies when assigning it), then that level's own right edge —
+     *   [warmupLevelUpperBoundMs] for every level but the last, or [bucketWidthMs] itself for the
+     *   last (open-ended) level, the same "fold into warm-up's own last level" instant [bucketSlot]
+     *   already treats as warm-up's own right edge, not the ordinary grid's.
+     *
+     * ### Why the caller still has to clamp this against `newest`
+     * A slot's *own* right edge can sit strictly later than any real sample recorded so far — a
+     * closed bucket only fills up to whenever the last sample in it happened to land, and the
+     * *newest* displayed slot in particular almost never has a sample sitting exactly on its right
+     * edge (real probes don't arrive metronomically on bucket boundaries). Plotted un-clamped, that
+     * would push the newest bucket's `x` past `1f` — off the right edge of the axis every other
+     * point (including every [latencySparkline] point, which is always a real sample's own
+     * timestamp, never later than `newest` by construction) is drawn within. [successSparkline]
+     * clamps every call's result against `newest` for exactly this reason; every *other* displayed
+     * slot's right edge is provably `< newest` already (each one sits at least one whole slot width
+     * before the slot containing `newest`), so that clamp is a no-op everywhere except the one
+     * bucket where it matters.
+     */
+    private fun bucketRightEdgeMs(slot: Long, bucketWidthMs: Long, anchorMs: Long, warmupSlotBase: Long): Long =
+        if (slot >= warmupSlotBase) {
+            (slot + 1) * bucketWidthMs
+        } else {
+            val level = (slot - warmupSlotBase + WARMUP_LEVELS).toInt()
+            anchorMs + if (level >= WARMUP_LEVELS - 1) bucketWidthMs else warmupLevelUpperBoundMs(level, bucketWidthMs)
+        }
+
+    /**
      * Which of [WARMUP_LEVELS] progressively wider sub-buckets [elapsedMs] (time since the
      * session's warm-up anchor) falls into. The contract is `elapsedMs` in `[0, bucketWidthMs]` —
      * note the *inclusive* upper bound: [bucketSlot] folds the single instant `elapsedMs ==
@@ -685,12 +773,27 @@ data class ProbeHistory(
      * in hand (see [bucketSlot]'s own doc for the full permanence argument).
      */
     private fun warmupLevel(elapsedMs: Long, bucketWidthMs: Long): Int {
-        val unit = (bucketWidthMs / ((1L shl WARMUP_LEVELS) - 1)).coerceAtLeast(1L)
         for (level in 0 until WARMUP_LEVELS - 1) {
-            val boundary = ((1L shl (level + 1)) - 1) * unit
-            if (elapsedMs < boundary) return level
+            if (elapsedMs < warmupLevelUpperBoundMs(level, bucketWidthMs)) return level
         }
         return WARMUP_LEVELS - 1
+    }
+
+    /**
+     * The elapsed-time-since-[anchorMs] instant [level] hands off to the next, wider level (the
+     * doubling-ladder boundary [warmupLevel]'s own doc describes) -- e.g. `[0, u)` for level 0
+     * means this returns `u`. Shared by [warmupLevel] itself (finding which level a timestamp
+     * falls into) and [bucketRightEdgeMs] (finding a level's own real-time right edge to plot a
+     * bucket's x position against -- see that function's doc), so the two can never disagree
+     * about where one level ends and the next begins.
+     *
+     * Only meaningful for `level in 0 until WARMUP_LEVELS - 1` -- the last level is open-ended
+     * (see [warmupLevel]'s own doc), so it has no upper bound of this kind; callers needing that
+     * level's own right edge use [bucketWidthMs] directly instead (see [bucketRightEdgeMs]).
+     */
+    private fun warmupLevelUpperBoundMs(level: Int, bucketWidthMs: Long): Long {
+        val unit = (bucketWidthMs / ((1L shl WARMUP_LEVELS) - 1)).coerceAtLeast(1L)
+        return ((1L shl (level + 1)) - 1) * unit
     }
 
     /**

@@ -525,6 +525,43 @@ version of this behavior) stretched however little data existed to fill
 the whole card every time, which looked exactly like the graph had just
 reset even when nothing was actually cleared.
 
+**The two graphs place a given moment in time at the same horizontal
+position, so they read as two views of one synchronized timeline.**
+Every point on both graphs is positioned on that same window-anchored
+real-time axis — the latency line always was (one point per sample, at
+that sample's own real-time position), and the success line's *buckets*
+now are too: each displayed bucket's horizontal position is derived from
+its own real timestamp (its right edge, the same closed-on-the-right
+boundary the bucket grid already uses elsewhere), not from its position
+in the array of currently-displayed buckets. An earlier version used
+that array-index position instead — `index / (bucket count - 1)` — which
+only coincidentally matched the real-time axis when the number of
+displayed buckets happened to equal the nominal `window ÷ bucket width`
+almost exactly. It routinely didn't: both the warm-up ladder's narrower
+sub-buckets and the full-coverage guarantee (which can widen the display
+by an extra bucket rather than silently drop real data — see above) push
+the actual displayed bucket count above that nominal figure without the
+index-to-position mapping compensating, so a bucket's array position no
+longer corresponded to the same real-time fraction the latency graph
+would place that same moment at. Measured directly (by comparing the old
+index-based position against the real-time position for the same
+timestamp): up to 23-25% of the graph's total width apart during a
+session's warm-up period, and a persistent ~4% offset even in ordinary
+steady state at the default window — both large enough that a moment
+plotted near the middle of the latency graph could land a quarter of the
+screen off on the success graph, which is exactly why the two graphs
+failed to visually "scroll together." Deriving bucket position from real
+time instead fixes that: a genuinely narrower warm-up sub-bucket now also
+occupies genuinely less horizontal space than an ordinary one, which is
+the *correct* consequence of a real-time axis, not a new inconsistency —
+spacing was only ever uniform under the old index-based scheme because
+it ignored how much real time each bucket actually covered. This is
+purely a *where a bucket is drawn* change — which real samples land in
+which bucket (the fixed-slot binning, bucket-width, and warm-up-ladder
+rules described above) is completely unaffected, so every stability,
+full-coverage, and no-false-dip guarantee those rules provide still
+holds exactly as described.
+
 ### Line color
 The two graphs color their lines by two genuinely different rules, not
 variations on one:
