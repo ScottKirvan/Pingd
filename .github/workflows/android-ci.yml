@@ -24,7 +24,6 @@ on:
       - 'gradlew'
       - 'gradlew.bat'
       - '.github/workflows/android-ci.yml'
-  workflow_dispatch:
 
 permissions:
   contents: read
@@ -34,11 +33,6 @@ jobs:
     name: Build and test
     runs-on: ubuntu-latest
     steps:
-      # No explicit `ref:` here — GitHub's own "Use workflow from" branch/tag
-      # picker on a manual run already sets `github.ref` to whatever was
-      # selected, and checkout defaults to that. An extra custom branch input
-      # would just duplicate that picker (and, worse, could silently override
-      # it if the two ever disagreed).
       - name: Checkout
         uses: actions/checkout@v4
 
@@ -73,15 +67,3 @@ jobs:
             app/build/reports/tests
             core/build/reports/tests
           retention-days: 7
-
-      # Debug-signed (installable via `adb install`) rather than the release
-      # variant, which has no signing config yet and can't be installed as-is.
-      # Only produced on a manual run, not on every push/PR — this is for
-      # grabbing a build to test, not something every CI run needs to keep.
-      - name: Upload debug APK
-        if: github.event_name == 'workflow_dispatch'
-        uses: actions/upload-artifact@v4
-        with:
-          name: uplinkstatus-debug-apk
-          path: app/build/outputs/apk/debug/app-debug.apk
-          retention-days: 14

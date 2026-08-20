@@ -25,47 +25,8 @@ jobs:
           config-file: .github/release-please/release-please-config.json
           manifest-file: .github/release-please/.release-please-manifest.json
 
-  build-release-artifacts:
-    needs: release-please
-    if: ${{ needs.release-please.outputs.release_created }}
-    runs-on: ubuntu-latest
-    permissions:
-      contents: write
-    steps:
-      - uses: actions/checkout@v4
-        with:
-          # release-please's release_created output fires once the release PR has
-          # merged into main, so main is the commit the new tag actually points at.
-          ref: main
-
-      - name: Set up JDK 17
-        uses: actions/setup-java@v4
-        with:
-          distribution: temurin
-          java-version: '17'
-
-      - name: Set up Android SDK
-        uses: android-actions/setup-android@v3
-
-      - name: Set up Gradle
-        uses: gradle/actions/setup-gradle@v4
-
-      # NOTE: there's no release-signing config yet (see app/build.gradle.kts), so
-      # this APK is unsigned and won't install as-is, and the AAB isn't signed with
-      # a real upload key — both are attached for archival/manual-signing purposes
-      # until a release keystore is wired in via repo secrets.
-      - name: Build release APK and AAB
-        run: ./gradlew assembleRelease bundleRelease --stacktrace
-
-      - name: Upload APK and AAB to the GitHub release
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: |
-          gh release upload "${{ needs.release-please.outputs.tag_name }}" \
-            app/build/outputs/apk/release/app-release-unsigned.apk \
-            app/build/outputs/bundle/release/app-release.aab \
-            --repo "${{ github.repository }}" \
-            --clobber
+  # Signed APK + AAB build and Play Store upload are handled by build-android.yml,
+  # triggered automatically when this workflow publishes the GitHub release.
 
   apply-staged-notes:
     needs: release-please
