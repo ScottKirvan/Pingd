@@ -147,6 +147,42 @@ class HistoryGraphsTest {
         composeTestRule.onNodeWithTag(TAG_RAW_SUCCESS_DEBUG_CARD).assertExists()
     }
 
+    @Test
+    // Robolectric's default (unqualified) virtual screen is far wider than a real phone -- wide
+    // enough that even an unbounded text column still leaves the sparkline a comfortable share,
+    // so it can't reproduce the crowding this test exists to catch. Pinned to the actual device
+    // width (a Pixel 6 Pro, ~411dp) the regression was found on instead.
+    @Config(sdk = [34], qualifiers = "w411dp-h915dp")
+    fun `the raw debug card's longer caption does not starve its sparkline of width`() {
+        // On-device regression: the debug card's caption ("debug: raw samples, no bucketing --
+        // last N seconds") is far longer than the other two cards' bare "last N seconds", but
+        // all three cards share HistoryGraphCard's layout, where only the sparkline is weighted
+        // and the text column claims "whatever its content needs." With that column left
+        // unbounded, the debug card's longer caption fit on one line by claiming nearly the
+        // entire card's width before the sparkline's own weight(1f) ever got a share -- 49 real,
+        // distinct dots collapsed into a barely-visible sliver a couple of pixels wide, confirmed
+        // in an actual screenshot, not merely suspected.
+        setContent()
+
+        seed(count = 31) // "last 30 seconds" -- the long caption that triggered the collapse
+        composeTestRule.waitForIdle()
+
+        val pingSuccessWidth = composeTestRule.onNodeWithTag(TAG_PING_SUCCESS_SPARKLINE)
+            .fetchSemanticsNode().size.width
+        val rawDebugWidth = composeTestRule.onNodeWithTag(TAG_RAW_SUCCESS_DEBUG_SPARKLINE)
+            .fetchSemanticsNode().size.width
+
+        // Not "equal" -- the debug card's column genuinely needs a bit more width for its own
+        // longer caption, so its sparkline is expected to end up somewhat narrower. The
+        // regression this guards against is a near-total collapse (a few pixels), not a modest
+        // difference, so the bound is deliberately loose.
+        assertTrue(
+            "raw debug sparkline ($rawDebugWidth px) collapsed relative to " +
+                "ping-success sparkline ($pingSuccessWidth px)",
+            rawDebugWidth >= pingSuccessWidth * 0.6,
+        )
+    }
+
     // --- Live values -------------------------------------------------------------------------
 
     @Test

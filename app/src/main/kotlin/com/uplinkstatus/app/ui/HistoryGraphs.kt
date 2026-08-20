@@ -7,6 +7,7 @@ import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.widthIn
 import androidx.compose.material3.Card
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
@@ -39,8 +40,10 @@ import kotlin.math.roundToInt
 const val TAG_HISTORY_GRAPHS = "settings_history_graphs"
 const val TAG_PING_SUCCESS_CARD = "settings_ping_success_card"
 const val TAG_PING_SUCCESS_VALUE = "settings_ping_success_value"
+const val TAG_PING_SUCCESS_SPARKLINE = "settings_ping_success_sparkline"
 const val TAG_LATENCY_CARD = "settings_latency_card"
 const val TAG_LATENCY_VALUE = "settings_latency_value"
+const val TAG_LATENCY_SPARKLINE = "settings_latency_sparkline"
 const val TAG_HISTORY_RESET_BUTTON = "settings_history_reset_button"
 
 /** Marks the temporary raw-success debug card -- see [HistoryGraphs]' own doc on why it exists
@@ -48,6 +51,7 @@ const val TAG_HISTORY_RESET_BUTTON = "settings_history_reset_button"
  * strip) independent of its exact wording. */
 const val TAG_RAW_SUCCESS_DEBUG_CARD = "settings_raw_success_debug_card"
 const val TAG_RAW_SUCCESS_DEBUG_VALUE = "settings_raw_success_debug_value"
+const val TAG_RAW_SUCCESS_DEBUG_SPARKLINE = "settings_raw_success_debug_sparkline"
 
 /** What a card's big number shows when there is genuinely nothing to show — an em dash, not a
  * zero, for the same reason [ProbeHistory.successPercent] is null rather than 0 before the
@@ -57,6 +61,18 @@ private const val NO_VALUE = "—"
 private val SPARKLINE_HEIGHT = 48.dp
 private val SPARKLINE_STROKE = 2.dp
 private val MARKER_STROKE = 1.dp
+
+/** Caps [HistoryGraphCard]'s text column so a long caption wraps onto more lines instead of
+ * claiming width the sparkline needs -- see that composable's own doc for the bug this fixes
+ * (confirmed on-device: the raw-success debug card's much longer caption, "debug: raw samples,
+ * no bucketing -- <span>" versus the other two cards' bare "<span>", was wide enough to fit on
+ * one line and, with the column otherwise unbounded, claimed nearly the entire card's width
+ * before the sparkline's `weight(1f)` ever got a share -- collapsing 49 real, distinct dots into
+ * a barely-visible sliver). Sized comfortably above what the two short-caption cards' own
+ * content (title, a 3-4-character big number, "last N seconds") ever needs on one line, so
+ * their layout is unaffected; anything longer wraps rather than growing further.
+ */
+private val TEXT_COLUMN_MAX_WIDTH = 160.dp
 
 /** [SparklineStyle.Dots]' circle radius -- the raw-success debug card's only consumer today. Sized
  * a bit larger than the [SparklineStyle.Line] single-point fallback circle (which uses the line's
@@ -242,6 +258,7 @@ fun HistoryGraphs(modifier: Modifier = Modifier) {
             gapColor = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = GAP_SHADE_ALPHA),
             cardTag = TAG_PING_SUCCESS_CARD,
             valueTag = TAG_PING_SUCCESS_VALUE,
+            sparklineTag = TAG_PING_SUCCESS_SPARKLINE,
         )
         HistoryGraphCard(
             title = "Latency",
@@ -261,6 +278,7 @@ fun HistoryGraphs(modifier: Modifier = Modifier) {
             gapColor = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = GAP_SHADE_ALPHA),
             cardTag = TAG_LATENCY_CARD,
             valueTag = TAG_LATENCY_VALUE,
+            sparklineTag = TAG_LATENCY_SPARKLINE,
         )
         // Temporary debug card -- see this function's own doc for why it's a separate card
         // rather than an overlay, and why its data path is kept independent of bucketing.
@@ -287,6 +305,7 @@ fun HistoryGraphs(modifier: Modifier = Modifier) {
             gapColor = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = GAP_SHADE_ALPHA),
             cardTag = TAG_RAW_SUCCESS_DEBUG_CARD,
             valueTag = TAG_RAW_SUCCESS_DEBUG_VALUE,
+            sparklineTag = TAG_RAW_SUCCESS_DEBUG_SPARKLINE,
         )
         Row(
             modifier = Modifier.fillMaxWidth(),
@@ -317,6 +336,7 @@ private fun HistoryGraphCard(
     gapColor: Color,
     cardTag: String,
     valueTag: String,
+    sparklineTag: String,
     // Every existing caller (ping success, latency) wants the connected-line rendering that
     // has always been the only option, so that stays the default -- only the raw-success debug
     // card below opts into SparklineStyle.Dots.
@@ -333,7 +353,9 @@ private fun HistoryGraphCard(
             // the sparkline is what's supposed to dominate the card, the same "trailing
             // sparkline" proportions the Starlink display this is modeled on uses. An equal
             // 1f/1f split left the graph confined to roughly the right half of the card.
-            Column {
+            // Capped at TEXT_COLUMN_MAX_WIDTH, though -- see that constant's own doc for why
+            // "as wide as its content needs" can't be left completely unbounded.
+            Column(modifier = Modifier.widthIn(max = TEXT_COLUMN_MAX_WIDTH)) {
                 Text(text = title, style = MaterialTheme.typography.titleSmall)
                 Text(
                     text = value,
@@ -356,7 +378,7 @@ private fun HistoryGraphCard(
                 // Fills whatever width the text column (above) didn't claim -- the only
                 // weighted child in this Row, so it gets 100% of the remainder rather than
                 // splitting it.
-                modifier = Modifier.weight(1f).height(SPARKLINE_HEIGHT),
+                modifier = Modifier.weight(1f).height(SPARKLINE_HEIGHT).testTag(sparklineTag),
             )
         }
     }
