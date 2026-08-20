@@ -65,14 +65,16 @@ class HistoryGraphsTest {
     // --- Nothing measured yet --------------------------------------------------------------
 
     @Test
-    fun `both cards are present from the start, so the feature is findable before any data`() {
+    fun `all three cards are present from the start, so the feature is findable before any data`() {
         setContent()
 
         composeTestRule.onNodeWithTag(TAG_HISTORY_GRAPHS).assertExists()
         composeTestRule.onNodeWithTag(TAG_PING_SUCCESS_CARD).assertExists()
         composeTestRule.onNodeWithTag(TAG_LATENCY_CARD).assertExists()
+        composeTestRule.onNodeWithTag(TAG_SYNTHETIC_LATENCY_DEBUG_CARD).assertExists()
         composeTestRule.onNodeWithText("Ping success").assertExists()
         composeTestRule.onNodeWithText("Latency").assertExists()
+        composeTestRule.onNodeWithText("Success as latency (debug)").assertExists()
     }
 
     @Test
@@ -83,7 +85,8 @@ class HistoryGraphsTest {
         // connection. Neither has happened -- nothing has.
         composeTestRule.onNodeWithTag(TAG_PING_SUCCESS_VALUE).assertTextEquals("—")
         composeTestRule.onNodeWithTag(TAG_LATENCY_VALUE).assertTextEquals("—")
-        composeTestRule.onAllNodesWithText("no probes yet").assertCountEquals(2)
+        composeTestRule.onNodeWithTag(TAG_SYNTHETIC_LATENCY_DEBUG_VALUE).assertTextEquals("—")
+        composeTestRule.onAllNodesWithText("no probes yet").assertCountEquals(3)
     }
 
     // --- Live values -------------------------------------------------------------------------
@@ -147,6 +150,49 @@ class HistoryGraphsTest {
         composeTestRule.onNodeWithTag(TAG_PING_SUCCESS_VALUE).assertTextEquals("50%")
     }
 
+    // --- Synthetic-latency debug card (temporary) --------------------------------------------
+    //
+    // This card exists to check whether the ping-success and latency graphs genuinely track the
+    // same timeline sample-for-sample, by reusing the latency card's own rendering unmodified --
+    // see HistoryGraphs' own doc. These tests check its big number comes from the raw attempt
+    // count (like the other debug card), not a bucketed or averaged value.
+
+    @Test
+    fun `the synthetic-latency debug card's big number is the raw attempt count`() {
+        setContent()
+
+        seed(count = 10, failures = 2)
+        composeTestRule.waitForIdle()
+
+        // Ping success card: 80% (bucketed). Debug card: 10 (raw attempt count) -- genuinely
+        // different numbers computed from genuinely different ProbeHistory members.
+        composeTestRule.onNodeWithTag(TAG_PING_SUCCESS_VALUE).assertTextEquals("80%")
+        composeTestRule.onNodeWithTag(TAG_SYNTHETIC_LATENCY_DEBUG_VALUE).assertTextEquals("10")
+    }
+
+    @Test
+    fun `the synthetic-latency debug card renders without crashing across empty, sparse, and dense histories`() {
+        // No dedicated assertion beyond "it composed" -- Canvas-drawn content isn't inspectable
+        // through Compose's semantics tree the way text is. This exists to catch a crash across
+        // the full range of shapes that data can take.
+        setContent()
+        composeTestRule.waitForIdle() // empty history
+
+        seed(count = 3)
+        composeTestRule.waitForIdle() // sparse, short session
+
+        var index = 3
+        repeat(200) {
+            UplinkProbeHistory.recordSuccess(latencyMs = 10, timestampMs = (index++) * 150L)
+        }
+        composeTestRule.waitForIdle() // dense burst, many points
+
+        UplinkProbeHistory.recordMasterToggleTransition(timestampMs = (index++) * 150L)
+        composeTestRule.waitForIdle() // alongside a marker too
+
+        composeTestRule.onNodeWithTag(TAG_SYNTHETIC_LATENCY_DEBUG_CARD).assertExists()
+    }
+
     // --- Markers: master-toggle transitions -------------------------------------------------
 
     @Test
@@ -180,7 +226,7 @@ class HistoryGraphsTest {
         assertEquals(0, UplinkProbeHistory.history.value.attemptCount)
         assertEquals(0, UplinkProbeHistory.history.value.markers.size)
         composeTestRule.onNodeWithTag(TAG_PING_SUCCESS_VALUE).assertTextEquals("—")
-        composeTestRule.onAllNodesWithText("no probes yet").assertCountEquals(2)
+        composeTestRule.onAllNodesWithText("no probes yet").assertCountEquals(3)
     }
 
     @Test
@@ -210,7 +256,7 @@ class HistoryGraphsTest {
         seed(count = 31) // 30 seconds of samples under the default 7-minute window
         composeTestRule.waitForIdle()
 
-        composeTestRule.onAllNodesWithText("last 30 seconds").assertCountEquals(2)
+        composeTestRule.onAllNodesWithText("last 30 seconds").assertCountEquals(3)
         composeTestRule.onAllNodesWithText("last 7 minutes").assertCountEquals(0)
     }
 
@@ -230,7 +276,7 @@ class HistoryGraphsTest {
         repeat(200) { index -> UplinkProbeHistory.recordSuccess(latencyMs = 10, timestampMs = index * 700L) }
         composeTestRule.waitForIdle()
 
-        composeTestRule.onAllNodesWithText("last 1 minute").assertCountEquals(2)
+        composeTestRule.onAllNodesWithText("last 1 minute").assertCountEquals(3)
         composeTestRule.onAllNodesWithText("last 59 seconds").assertCountEquals(0)
     }
 
@@ -241,17 +287,17 @@ class HistoryGraphsTest {
         UplinkProbeHistory.recordSuccess(latencyMs = 10, timestampMs = 1_000)
         composeTestRule.waitForIdle()
 
-        composeTestRule.onAllNodesWithText("just started").assertCountEquals(2)
+        composeTestRule.onAllNodesWithText("just started").assertCountEquals(3)
     }
 
     @Test
-    fun `both cards carry the same caption -- one window, one history, two views of it`() {
+    fun `all three cards carry the same caption -- one window, one history, three views of it`() {
         setContent()
 
         seed(count = 11)
         composeTestRule.waitForIdle()
 
-        composeTestRule.onAllNodesWithText("last 10 seconds").assertCountEquals(2)
+        composeTestRule.onAllNodesWithText("last 10 seconds").assertCountEquals(3)
     }
 
     // --- Caption wording, as a plain function -------------------------------------------------

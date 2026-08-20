@@ -94,6 +94,15 @@ private const val LATENCY_COLOR_GREEN_MS = 50L
 private const val LATENCY_COLOR_YELLOW_MS = 200L
 private const val LATENCY_COLOR_RED_MS = 400L
 
+/** The two values [ProbeHistory.syntheticLatencySparkline] substitutes for a real measured
+ * latency -- picked to land clearly apart on [latencyColorFraction]'s scale: comfortably below
+ * [LATENCY_COLOR_YELLOW_MS] (mostly green, near the top) for a success, and beyond
+ * [LATENCY_COLOR_RED_MS] (clamped fully red, pinned at the bottom) for a failure, so the two
+ * outcomes stay visually distinct even at a glance rather than landing close enough on the
+ * scale to blur together. */
+private const val SYNTHETIC_SUCCESS_LATENCY_MS = 60L
+private const val SYNTHETIC_FAILURE_LATENCY_MS = 900L
+
 /**
  * How far [latencyMs] sits toward "slow" on the latency graph's **absolute** green→yellow→red
  * color scale. This is also the fixed scale [ProbeHistory.latencySparkline] plots
@@ -378,6 +387,35 @@ data class ProbeHistory(
             val x = windowFraction(sample.timestampMs, newest)
             val y = sample.latencyMs?.let { latency -> 1f - latencyColorFraction(latency) }
             SparklinePoint(x = x, y = y, latencyMs = sample.latencyMs)
+        }
+    }
+
+    /**
+     * Debug aid: [latencySparkline] with every real attempt's measured latency replaced by one
+     * of two fixed synthetic values -- [SYNTHETIC_SUCCESS_LATENCY_MS] on success,
+     * [SYNTHETIC_FAILURE_LATENCY_MS] on failure -- otherwise identical (same [windowFraction] x,
+     * same `1f - latencyColorFraction(...)` y, same per-point coloring by the resulting
+     * `latencyMs`). Reuses [latencySparkline]'s own rendering pipeline verbatim rather than a
+     * second, independently-written one, so this can't silently drift out of sync with what that
+     * graph actually does, and so an attempt's position/color on this graph means exactly what
+     * the same synthetic value would mean on the real latency graph.
+     *
+     * Unlike [latencySparkline], never emits a `null` [SparklinePoint.y]: a failed probe has no
+     * *real* latency to plot, but it does have a well-defined synthetic one, so every real
+     * attempt gets a point here, matching [successSparkline]'s own "no gaps" rule rather than
+     * [latencySparkline]'s "a failure is a break in the line."
+     */
+    fun syntheticLatencySparkline(): List<SparklinePoint> {
+        val windowed = windowedSamples
+        if (windowed.isEmpty()) return emptyList()
+        val newest = windowed.last().timestampMs
+        return windowed.map { sample ->
+            val latencyMs = if (sample.succeeded) SYNTHETIC_SUCCESS_LATENCY_MS else SYNTHETIC_FAILURE_LATENCY_MS
+            SparklinePoint(
+                x = windowFraction(sample.timestampMs, newest),
+                y = 1f - latencyColorFraction(latencyMs),
+                latencyMs = latencyMs,
+            )
         }
     }
 

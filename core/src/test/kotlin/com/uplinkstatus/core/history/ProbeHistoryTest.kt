@@ -537,6 +537,72 @@ class ProbeHistoryTest {
         assertTrue(points.all { it.y == null })
     }
 
+    // --- Synthetic latency sparkline (debug aid) --------------------------------------------
+
+    @Test
+    fun `an empty history draws no synthetic latency line at all`() {
+        assertTrue(ProbeHistory(windowMs = window).syntheticLatencySparkline().isEmpty())
+    }
+
+    @Test
+    fun `unlike the real latency line, a failure is a plotted point here, never a gap`() {
+        var history = ProbeHistory(windowMs = window)
+        repeat(5) { index -> history = history.recordFailure(index * 1_000L) }
+
+        val points = history.syntheticLatencySparkline()
+
+        assertEquals(5, points.size)
+        assertTrue(points.all { it.y != null })
+    }
+
+    @Test
+    fun `a success plots at the fixed height a real 60ms sample would`() {
+        val history = ProbeHistory(windowMs = window).recordSuccess(0, latencyMs = 999)
+
+        val point = history.syntheticLatencySparkline().single()
+
+        assertEquals(1f - latencyColorFraction(60), point.y!!, 0.001f)
+        assertEquals(60L, point.latencyMs)
+    }
+
+    @Test
+    fun `a failure plots at the fixed height a real 900ms sample would`() {
+        val history = ProbeHistory(windowMs = window).recordFailure(0)
+
+        val point = history.syntheticLatencySparkline().single()
+
+        assertEquals(1f - latencyColorFraction(900), point.y!!, 0.001f)
+        assertEquals(900L, point.latencyMs)
+    }
+
+    @Test
+    fun `success and failure plot at clearly distinct heights, not close enough to blur together`() {
+        val history = ProbeHistory(windowMs = window)
+            .recordSuccess(0, latencyMs = 10)
+            .recordFailure(1_000)
+
+        val (successY, failureY) = history.syntheticLatencySparkline().map { it.y!! }
+
+        assertTrue((successY - failureY) > 0.5f)
+    }
+
+    @Test
+    fun `x positions match the real latency sparkline's exactly, for the same samples`() {
+        // The whole point of reusing latencySparkline's own mechanics rather than a second,
+        // independently-written positioning scheme: the same real attempt lands at the same x
+        // on both graphs, so they read as the same timeline.
+        var history = ProbeHistory(windowMs = window)
+        listOf(true, false, true, true, false).forEachIndexed { index, ok ->
+            val at = index * 1_000L
+            history = if (ok) history.recordSuccess(at, latencyMs = 30) else history.recordFailure(at)
+        }
+
+        val realXs = history.latencySparkline().map { it.x }
+        val syntheticXs = history.syntheticLatencySparkline().map { it.x }
+
+        assertEquals(realXs, syntheticXs)
+    }
+
     // --- Gap shading spans (sparklineGapFractions) ----------------------------------------
 
     @Test
