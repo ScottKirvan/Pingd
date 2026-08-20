@@ -27,6 +27,7 @@ import androidx.compose.ui.graphics.drawscope.DrawScope
 import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.graphics.lerp
 import androidx.compose.ui.platform.testTag
+import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import com.uplinkstatus.app.state.UplinkProbeHistory
 import com.uplinkstatus.core.history.ProbeHistory
@@ -56,6 +57,13 @@ private const val NO_VALUE = "—"
 private val SPARKLINE_HEIGHT = 48.dp
 private val SPARKLINE_STROKE = 2.dp
 private val MARKER_STROKE = 1.dp
+
+/** [SparklineStyle.Dots]' circle radius -- the raw-success debug card's only consumer today. Sized
+ * a bit larger than the [SparklineStyle.Line] single-point fallback circle (which uses the line's
+ * own [SPARKLINE_STROKE] as its radius) because here the dots aren't a fallback for a rare
+ * one-point segment, they're the entire card's content -- every real attempt has to read clearly
+ * as its own countable mark, not just be technically present. */
+private val RAW_POINT_RADIUS = 3.dp
 
 /** Opacity of the shaded "no data here" region drawn behind a sparkline gap -- subtle enough
  * not to compete with the data line itself, visible enough to read as deliberate shading
@@ -132,6 +140,27 @@ private sealed interface SparklineColoring {
 }
 
 /**
+ * How [Sparkline] connects (or doesn't) the points it's given -- an orthogonal choice from
+ * [SparklineColoring], which only ever decides *color*, never connectivity:
+ * - [Line] (ping success, latency): consecutive points within a gap-broken run are joined by
+ *   straight segments, via [drawSweepSegment]/[drawByValueSegment] -- the trend between samples is
+ *   exactly what those two cards are meant to show.
+ * - [Dots] (the raw-success debug card): every point is drawn as its own unconnected circle, via
+ *   [drawDotsSegment] -- this card's entire purpose is to make each real, individual probe attempt
+ *   countable, including when a run of neighbors happens to share the same y value (every attempt
+ *   succeeding, or every one failing, which is exactly what a healthy or a fully-down connection
+ *   produces). [Line] rendering of that same data degenerates into a single flat, featureless
+ *   stroke in that case -- visually indistinguishable from "nothing happened," even though dozens
+ *   of distinct attempts are sitting right there. That was the bug: this card originally reused
+ *   [Line] rendering (the same generic path every other card uses) and lost the per-point
+ *   distinctness its own data was supposed to carry.
+ */
+private sealed interface SparklineStyle {
+    data object Line : SparklineStyle
+    data class Dots(val radius: Dp) : SparklineStyle
+}
+
+/**
  * The settings screen's two live history graphs — ping success percentage and latency trend —
  * over the shared, user-configurable window, read straight from [UplinkProbeHistory]. (A third,
  * temporary debug card follows them -- see this doc's own "Raw-success debug card" section
@@ -172,6 +201,14 @@ private sealed interface SparklineColoring {
  * beside it already uses, so a correct rendering should visibly scroll in lockstep with the
  * latency card. This is a debugging aid for the bucketing logic, not a permanent user-facing
  * feature — safe to remove once that work is done.
+ *
+ * Drawn with [SparklineStyle.Dots], not [SparklineStyle.Line] -- this card originally reused the
+ * other two cards' connected-line rendering unmodified, which was a real regression from this
+ * feature's very first version (which drew individual `drawCircle` dots directly): on a healthy
+ * connection, every real attempt shares `y = 1f`, so a connected line rendering flattens dozens of
+ * distinct attempts into one flat, featureless stroke that reads as "nothing happened" even though
+ * the underlying data ([ProbeHistory.rawSuccessPoints]) is completely correct. [SparklineStyle.Dots]
+ * restores the original per-point-visibility property regardless of the card's current layout.
  */
 @Composable
 fun HistoryGraphs(modifier: Modifier = Modifier) {
@@ -231,8 +268,8 @@ fun HistoryGraphs(modifier: Modifier = Modifier) {
             title = "Raw ping samples",
             value = if (history.attemptCount == 0) NO_VALUE else history.attemptCount.toString(),
             // The debug label is folded into the caption text itself rather than a new caption
-            // row/parameter, so this card can reuse HistoryGraphCard/Sparkline completely
-            // unmodified from what the other two cards already use.
+            // row/parameter, so this card can reuse HistoryGraphCard/Sparkline for everything
+            // except its drawing style (see `style` below).
             caption = "debug: raw samples, no bucketing — $caption",
             points = history.rawSuccessPoints(),
             markers = markers,
@@ -242,6 +279,11 @@ fun HistoryGraphs(modifier: Modifier = Modifier) {
             coloring = SparklineColoring.ByValue { point ->
                 if (point.y == 1f) RAW_SUCCESS_COLOR else RAW_FAIL_COLOR
             },
+            // Unconnected dots, not a line -- see SparklineStyle's own doc. Every real attempt
+            // has to read as its own countable mark, including on a healthy connection where
+            // every point shares y = 1f and a connected line would flatten into one feature-
+            // less stroke indistinguishable from "nothing happened."
+            style = SparklineStyle.Dots(RAW_POINT_RADIUS),
             gapColor = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = GAP_SHADE_ALPHA),
             cardTag = TAG_RAW_SUCCESS_DEBUG_CARD,
             valueTag = TAG_RAW_SUCCESS_DEBUG_VALUE,
@@ -275,6 +317,10 @@ private fun HistoryGraphCard(
     gapColor: Color,
     cardTag: String,
     valueTag: String,
+    // Every existing caller (ping success, latency) wants the connected-line rendering that
+    // has always been the only option, so that stays the default -- only the raw-success debug
+    // card below opts into SparklineStyle.Dots.
+    style: SparklineStyle = SparklineStyle.Line,
 ) {
     Card(modifier = Modifier.fillMaxWidth().testTag(cardTag)) {
         Row(
@@ -304,6 +350,7 @@ private fun HistoryGraphCard(
                 points = points,
                 markers = markers,
                 coloring = coloring,
+                style = style,
                 markerColor = MaterialTheme.colorScheme.outline,
                 gapColor = gapColor,
                 // Fills whatever width the text column (above) didn't claim -- the only
@@ -317,8 +364,10 @@ private fun HistoryGraphCard(
 
 /** A plotted [SparklinePoint], carrying both its pixel [offset] and the source point it came
  * from -- [SparklineColoring.ByValue] needs the latter (for [SparklinePoint.latencyMs]) even
- * though [SparklineColoring.Sweep] never looks at it. */
-private data class PlottedPoint(val offset: Offset, val source: SparklinePoint)
+ * though [SparklineColoring.Sweep] never looks at it. `internal`, not `private`, solely so
+ * [planSparklineDots] can be exercised by a plain unit test from outside this file -- see that
+ * function's own doc. */
+internal data class PlottedPoint(val offset: Offset, val source: SparklinePoint)
 
 /**
  * Draws [points] as a polyline, **breaking the line at every gap** ([SparklinePoint.y] of
@@ -350,6 +399,12 @@ private data class PlottedPoint(val offset: Offset, val source: SparklinePoint)
  * otherwise reset to its own local start-to-end sweep instead of showing the middle portion of
  * the overall one.
  *
+ * [style] picks whether each segment renders as a connected line ([SparklineStyle.Line], via
+ * [drawSweepSegment]/[drawByValueSegment]) or as unconnected dots ([SparklineStyle.Dots], via
+ * [planSparklineDots]/[drawDotsSegment]) -- see [SparklineStyle]'s own doc. This is a separate
+ * axis from [coloring] entirely: [style] never changes what color a point gets, only whether its
+ * neighbors are joined to it.
+ *
  * Purely arithmetic aside from the coloring itself: every position value arrives already reduced
  * to the unit square by [ProbeHistory], so there is no scaling or aggregation decision left here
  * to disagree with the numbers above it.
@@ -359,6 +414,7 @@ private fun Sparkline(
     points: List<SparklinePoint>,
     markers: List<Float>,
     coloring: SparklineColoring,
+    style: SparklineStyle,
     markerColor: Color,
     gapColor: Color,
     modifier: Modifier = Modifier,
@@ -418,9 +474,20 @@ private fun Sparkline(
         }
 
         segments.forEach { segment ->
-            when (coloring) {
-                is SparklineColoring.Sweep -> drawSweepSegment(segment, sweepBrush!!, stroke)
-                is SparklineColoring.ByValue -> drawByValueSegment(segment, coloring.colorFor, stroke)
+            when (style) {
+                SparklineStyle.Line -> when (coloring) {
+                    is SparklineColoring.Sweep -> drawSweepSegment(segment, sweepBrush!!, stroke)
+                    is SparklineColoring.ByValue -> drawByValueSegment(segment, coloring.colorFor, stroke)
+                }
+                is SparklineStyle.Dots -> {
+                    // Dots is only ever paired with ByValue today (the raw-success debug card,
+                    // its one caller) -- there's no on-screen Sweep+Dots combination to support,
+                    // so this stays a hard requirement rather than a silent no-op that would
+                    // hide a real wiring mistake.
+                    val byValue = coloring as? SparklineColoring.ByValue
+                        ?: error("SparklineStyle.Dots requires SparklineColoring.ByValue")
+                    drawDotsSegment(planSparklineDots(segment, byValue.colorFor), style.radius.toPx())
+                }
             }
         }
     }
@@ -475,6 +542,38 @@ private fun DrawScope.drawByValueSegment(
             )
         }
     }
+}
+
+/** One circle [SparklineStyle.Dots] draws -- already resolved to a plain (position, color) pair,
+ * deliberately with no path/polyline variant possible at all, so "dots never connect" is true by
+ * construction rather than by convention that could later drift. Plain data (no `DrawScope`
+ * involved), which is what makes [planSparklineDots] unit-testable without a `Canvas` or
+ * Robolectric -- see `SparklineDotsPlanTest`. */
+internal data class SparklineDot(val center: Offset, val color: Color)
+
+/**
+ * Resolves one gap-broken [segment] of [SparklineStyle.Dots] points to the individual,
+ * unconnected dots [drawDotsSegment] draws for it -- **always exactly one [SparklineDot] per
+ * point**, regardless of how many neighbors happen to share the same color (the same y value, for
+ * the raw-success debug card this exists for). That "always one-to-one, never merged" property is
+ * the entire fix for the bug this style exists to fix -- see [SparklineStyle]'s own doc -- and
+ * `SparklineDotsPlanTest` asserts it directly: a run of same-valued points still comes back as
+ * that many separate [SparklineDot]s, never folded into fewer entries the way [drawSweepSegment]/
+ * [drawByValueSegment] would fold the same run into a single connected line.
+ *
+ * Only defined in terms of [SparklineColoring.ByValue]'s `colorFor` -- the raw-success debug
+ * card, [SparklineStyle.Dots]' only consumer today, never uses [SparklineColoring.Sweep], so
+ * there's no on-screen Sweep+Dots combination to support.
+ */
+internal fun planSparklineDots(
+    segment: List<PlottedPoint>,
+    colorFor: (SparklinePoint) -> Color,
+): List<SparklineDot> = segment.map { SparklineDot(center = it.offset, color = colorFor(it.source)) }
+
+/** [SparklineStyle.Dots]: draws every [SparklineDot] in [dots] as its own independent circle --
+ * never a path, never a line between any two of them. */
+private fun DrawScope.drawDotsSegment(dots: List<SparklineDot>, radius: Float) {
+    dots.forEach { dot -> drawCircle(color = dot.color, radius = radius, center = dot.center) }
 }
 
 /**
