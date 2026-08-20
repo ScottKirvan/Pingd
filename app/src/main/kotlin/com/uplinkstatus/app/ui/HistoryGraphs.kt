@@ -7,6 +7,7 @@ import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.width
 import androidx.compose.material3.Card
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
@@ -26,7 +27,11 @@ import androidx.compose.ui.graphics.StrokeJoin
 import androidx.compose.ui.graphics.drawscope.DrawScope
 import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.graphics.lerp
+import androidx.compose.ui.layout.SubcomposeLayout
 import androidx.compose.ui.platform.testTag
+import androidx.compose.ui.semantics.clearAndSetSemantics
+import androidx.compose.ui.unit.Constraints
+import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import com.uplinkstatus.app.state.UplinkProbeHistory
 import com.uplinkstatus.core.history.ProbeHistory
@@ -38,8 +43,10 @@ import kotlin.math.roundToInt
 const val TAG_HISTORY_GRAPHS = "settings_history_graphs"
 const val TAG_PING_SUCCESS_CARD = "settings_ping_success_card"
 const val TAG_PING_SUCCESS_VALUE = "settings_ping_success_value"
+const val TAG_PING_SUCCESS_SPARKLINE = "settings_ping_success_sparkline"
 const val TAG_LATENCY_CARD = "settings_latency_card"
 const val TAG_LATENCY_VALUE = "settings_latency_value"
+const val TAG_LATENCY_SPARKLINE = "settings_latency_sparkline"
 const val TAG_HISTORY_RESET_BUTTON = "settings_history_reset_button"
 
 /** Marks the temporary synthetic-latency debug card -- see [HistoryGraphs]' own doc on why it
@@ -47,6 +54,7 @@ const val TAG_HISTORY_RESET_BUTTON = "settings_history_reset_button"
  * wording. */
 const val TAG_SYNTHETIC_LATENCY_DEBUG_CARD = "settings_synthetic_latency_debug_card"
 const val TAG_SYNTHETIC_LATENCY_DEBUG_VALUE = "settings_synthetic_latency_debug_value"
+const val TAG_SYNTHETIC_LATENCY_DEBUG_SPARKLINE = "settings_synthetic_latency_debug_sparkline"
 
 /** What a card's big number shows when there is genuinely nothing to show — an em dash, not a
  * zero, for the same reason [ProbeHistory.successPercent] is null rather than 0 before the
@@ -166,82 +174,166 @@ fun HistoryGraphs(modifier: Modifier = Modifier) {
     // this is never mistaken for a real measured gap.
     val markers = history.markerFractions()
 
-    Column(
-        modifier = modifier.fillMaxWidth().testTag(TAG_HISTORY_GRAPHS),
-        verticalArrangement = Arrangement.spacedBy(8.dp),
-    ) {
-        HistoryGraphCard(
-            title = "Ping success",
-            value = history.successPercent?.let { "${it.roundToInt()}%" } ?: NO_VALUE,
-            caption = caption,
-            points = history.successSparkline(),
-            markers = markers,
-            // A left-to-right gradient sweep across the whole graph width, purely positional --
-            // not a data encoding. Fixed stops, not this app's theme -- see
-            // PING_SUCCESS_SWEEP_START's doc for why the theme-derived version didn't work.
-            coloring = SparklineColoring.Sweep(
-                colors = listOf(
-                    PING_SUCCESS_SWEEP_START,
-                    PING_SUCCESS_SWEEP_MID,
-                    PING_SUCCESS_SWEEP_END,
-                ),
-            ),
-            gapColor = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = GAP_SHADE_ALPHA),
-            cardTag = TAG_PING_SUCCESS_CARD,
-            valueTag = TAG_PING_SUCCESS_VALUE,
-        )
-        HistoryGraphCard(
-            title = "Latency",
-            value = history.averageLatencyMs?.let { "$it ms" } ?: NO_VALUE,
-            caption = caption,
-            points = history.latencySparkline(),
-            markers = markers,
-            // Colored by each point's own *absolute* latency (green fast, red slow) -- a
-            // different scale than the line's y-position, which stays session-relative. See
-            // SparklinePoint.latencyMs and latencyColorFraction's docs.
-            coloring = SparklineColoring.ByValue { point ->
-                // latencyMs is null only when y is null (a gap), which never reaches this
-                // lambda -- segments are built from non-null points only. The fallback exists
-                // purely so this stays total.
-                point.latencyMs?.let(::latencyColor) ?: LATENCY_COLOR_MID
-            },
-            gapColor = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = GAP_SHADE_ALPHA),
-            cardTag = TAG_LATENCY_CARD,
-            valueTag = TAG_LATENCY_VALUE,
-        )
-        // Temporary debug card -- see this function's own doc for why it exists and why it
-        // reuses the latency card's exact rendering rather than a new one.
-        HistoryGraphCard(
-            title = "Success as latency (debug)",
-            value = if (history.attemptCount == 0) NO_VALUE else history.attemptCount.toString(),
-            caption = caption,
-            points = history.syntheticLatencySparkline(),
-            markers = markers,
-            // Colored by the same fixed green/yellow/red scale as the real latency card, from
-            // the same synthetic latencyMs each point already carries -- see
-            // ProbeHistory.syntheticLatencySparkline's doc.
-            coloring = SparklineColoring.ByValue { point ->
-                point.latencyMs?.let(::latencyColor) ?: LATENCY_COLOR_MID
-            },
-            gapColor = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = GAP_SHADE_ALPHA),
-            cardTag = TAG_SYNTHETIC_LATENCY_DEBUG_CARD,
-            valueTag = TAG_SYNTHETIC_LATENCY_DEBUG_VALUE,
-        )
-        Row(
-            modifier = Modifier.fillMaxWidth(),
-            horizontalArrangement = Arrangement.End,
-        ) {
-            // Deliberately not gated on the master toggle the way the preference controls
-            // below it are: clearing accumulated samples is an action on this screen's own
-            // display, not a setting for the service to apply, and it has to work exactly when
-            // the user wants the slate clean -- including while the icon is switched off.
-            TextButton(
-                onClick = { UplinkProbeHistory.reset() },
-                modifier = Modifier.testTag(TAG_HISTORY_RESET_BUTTON),
-            ) {
-                Text("Reset history")
+    val pingSuccessValue = history.successPercent?.let { "${it.roundToInt()}%" } ?: NO_VALUE
+    val latencyValue = history.averageLatencyMs?.let { "$it ms" } ?: NO_VALUE
+    val syntheticLatencyValue = if (history.attemptCount == 0) NO_VALUE else history.attemptCount.toString()
+
+    // Every card's sparkline needs the exact same width, so the same moment in time lands at
+    // the same physical position on all three graphs, not just the same x fraction. A hardcoded
+    // dp guess can't provide that reliably -- it's calibrated against one language's strings at
+    // one font scale, and silently stops fitting the moment either changes (a longer
+    // translation, a larger accessibility text size). SubcomposeLayout measures the real text
+    // column content once, unconstrained, at whatever language/font-scale is actually active,
+    // and uses the widest result -- so the shared width is always derived from what the device
+    // is actually showing, never guessed.
+    SubcomposeLayout(modifier = modifier.fillMaxWidth().testTag(TAG_HISTORY_GRAPHS)) { incoming ->
+        // Pass 1 (measurement only, never placed): stack all three cards' text columns inside
+        // one Column with no width constraint of its own. A Column's width is the max of its
+        // children's, and each child here is itself a Column sized to its own widest line, so
+        // the outer Column's resolved width is exactly "the widest single line, across every
+        // title/value/caption on every card" -- the one number this whole layout needs.
+        val textColumnWidth = subcompose(HistoryGraphsSlot.Measurement) {
+            // Never placed, but SubcomposeLayout still keeps an unplaced slot's nodes in the
+            // tree -- clearAndSetSemantics keeps this measurement-only copy of every card's
+            // title/value/caption from also showing up in the semantics tree (and, via it,
+            // screen readers and this file's own onNodeWithText/onNodeWithTag lookups) as a
+            // second, invisible node with the exact same text as the real one below.
+            Column(modifier = Modifier.clearAndSetSemantics {}) {
+                HistoryCardTextColumn(title = "Ping success", value = pingSuccessValue, caption = caption)
+                HistoryCardTextColumn(title = "Latency", value = latencyValue, caption = caption)
+                HistoryCardTextColumn(
+                    title = "Synthetic latency",
+                    value = syntheticLatencyValue,
+                    caption = caption,
+                )
             }
+        }.first().measure(Constraints()).width.toDp()
+
+        // Pass 2: the real content, every card's text column pinned to that shared measured
+        // width -- laid out under the layout's actual incoming constraints, so weight(1f) on
+        // each card's Sparkline (unsupported during intrinsic/measurement-only passes) works
+        // normally here.
+        val content = subcompose(HistoryGraphsSlot.Content) {
+            Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                HistoryGraphCard(
+                    title = "Ping success",
+                    value = pingSuccessValue,
+                    caption = caption,
+                    points = history.successSparkline(),
+                    markers = markers,
+                    // A left-to-right gradient sweep across the whole graph width, purely
+                    // positional -- not a data encoding. Fixed stops, not this app's theme --
+                    // see PING_SUCCESS_SWEEP_START's doc for why the theme-derived version
+                    // didn't work.
+                    coloring = SparklineColoring.Sweep(
+                        colors = listOf(
+                            PING_SUCCESS_SWEEP_START,
+                            PING_SUCCESS_SWEEP_MID,
+                            PING_SUCCESS_SWEEP_END,
+                        ),
+                    ),
+                    gapColor = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = GAP_SHADE_ALPHA),
+                    cardTag = TAG_PING_SUCCESS_CARD,
+                    valueTag = TAG_PING_SUCCESS_VALUE,
+                    sparklineTag = TAG_PING_SUCCESS_SPARKLINE,
+                    textColumnWidth = textColumnWidth,
+                )
+                HistoryGraphCard(
+                    title = "Latency",
+                    value = latencyValue,
+                    caption = caption,
+                    points = history.latencySparkline(),
+                    markers = markers,
+                    // Colored by each point's own *absolute* latency (green fast, red slow) --
+                    // a different scale than the line's y-position, which stays session-
+                    // relative. See SparklinePoint.latencyMs and latencyColorFraction's docs.
+                    coloring = SparklineColoring.ByValue { point ->
+                        // latencyMs is null only when y is null (a gap), which never reaches
+                        // this lambda -- segments are built from non-null points only. The
+                        // fallback exists purely so this stays total.
+                        point.latencyMs?.let(::latencyColor) ?: LATENCY_COLOR_MID
+                    },
+                    gapColor = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = GAP_SHADE_ALPHA),
+                    cardTag = TAG_LATENCY_CARD,
+                    valueTag = TAG_LATENCY_VALUE,
+                    sparklineTag = TAG_LATENCY_SPARKLINE,
+                    textColumnWidth = textColumnWidth,
+                )
+                // Temporary debug card -- see HistoryGraphs' own doc for why it exists and why
+                // it reuses the latency card's exact rendering rather than a new one.
+                HistoryGraphCard(
+                    title = "Synthetic latency",
+                    value = syntheticLatencyValue,
+                    caption = caption,
+                    points = history.syntheticLatencySparkline(),
+                    markers = markers,
+                    // Colored by the same fixed green/yellow/red scale as the real latency
+                    // card, from the same synthetic latencyMs each point already carries --
+                    // see ProbeHistory.syntheticLatencySparkline's doc.
+                    coloring = SparklineColoring.ByValue { point ->
+                        point.latencyMs?.let(::latencyColor) ?: LATENCY_COLOR_MID
+                    },
+                    gapColor = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = GAP_SHADE_ALPHA),
+                    cardTag = TAG_SYNTHETIC_LATENCY_DEBUG_CARD,
+                    valueTag = TAG_SYNTHETIC_LATENCY_DEBUG_VALUE,
+                    sparklineTag = TAG_SYNTHETIC_LATENCY_DEBUG_SPARKLINE,
+                    textColumnWidth = textColumnWidth,
+                )
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.End,
+                ) {
+                    // Deliberately not gated on the master toggle the way the preference
+                    // controls below it are: clearing accumulated samples is an action on this
+                    // screen's own display, not a setting for the service to apply, and it has
+                    // to work exactly when the user wants the slate clean -- including while
+                    // the icon is switched off.
+                    TextButton(
+                        onClick = { UplinkProbeHistory.reset() },
+                        modifier = Modifier.testTag(TAG_HISTORY_RESET_BUTTON),
+                    ) {
+                        Text("Reset history")
+                    }
+                }
+            }
+        }.first().measure(incoming)
+
+        layout(content.width, content.height) {
+            content.placeRelative(0, 0)
         }
+    }
+}
+
+/** Distinguishes [SubcomposeLayout]'s two subcomposition passes in [HistoryGraphs] -- see that
+ * function's own doc for what each measures and why. */
+private enum class HistoryGraphsSlot { Measurement, Content }
+
+/** The title/big-number/caption stack every [HistoryGraphCard] shows to the left of its
+ * sparkline. Factored out so [HistoryGraphs]' measurement-only pass can render the exact same
+ * content (same strings, same styles) it's about to display for real, rather than a second,
+ * separately-maintained approximation that could silently drift from what actually gets shown.
+ * [valueTag] is `null` in that measurement pass -- the content there is never placed, so tagging
+ * it for tests would be meaningless (and would collide with the real card's own tag). */
+@Composable
+private fun HistoryCardTextColumn(
+    title: String,
+    value: String,
+    caption: String,
+    modifier: Modifier = Modifier,
+    valueTag: String? = null,
+) {
+    Column(modifier = modifier) {
+        Text(text = title, style = MaterialTheme.typography.titleSmall)
+        Text(
+            text = value,
+            style = MaterialTheme.typography.headlineMedium,
+            modifier = valueTag?.let { Modifier.testTag(it) } ?: Modifier,
+        )
+        Text(
+            text = caption,
+            style = MaterialTheme.typography.bodySmall,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+        )
     }
 }
 
@@ -256,6 +348,8 @@ private fun HistoryGraphCard(
     gapColor: Color,
     cardTag: String,
     valueTag: String,
+    sparklineTag: String,
+    textColumnWidth: Dp,
 ) {
     Card(modifier = Modifier.fillMaxWidth().testTag(cardTag)) {
         Row(
@@ -263,24 +357,18 @@ private fun HistoryGraphCard(
             verticalAlignment = Alignment.CenterVertically,
             horizontalArrangement = Arrangement.spacedBy(16.dp),
         ) {
-            // No weight here, deliberately: this column should take exactly the width its
-            // own content (title/big number/caption) needs, not an even half of the row --
-            // the sparkline is what's supposed to dominate the card, the same "trailing
-            // sparkline" proportions the Starlink display this is modeled on uses. An equal
-            // 1f/1f split left the graph confined to roughly the right half of the card.
-            Column {
-                Text(text = title, style = MaterialTheme.typography.titleSmall)
-                Text(
-                    text = value,
-                    style = MaterialTheme.typography.headlineMedium,
-                    modifier = Modifier.testTag(valueTag),
-                )
-                Text(
-                    text = caption,
-                    style = MaterialTheme.typography.bodySmall,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                )
-            }
+            // textColumnWidth comes from HistoryGraphs' own measurement pass -- see its doc.
+            // The sparkline is still what's supposed to dominate the card, the same "trailing
+            // sparkline" proportions the Starlink display this is modeled on uses -- an equal
+            // 1f/1f weight split left the graph confined to roughly the right half of the card,
+            // which the measured width is comfortably clear of for this screen's actual content.
+            HistoryCardTextColumn(
+                title = title,
+                value = value,
+                caption = caption,
+                valueTag = valueTag,
+                modifier = Modifier.width(textColumnWidth),
+            )
             Sparkline(
                 points = points,
                 markers = markers,
@@ -289,8 +377,9 @@ private fun HistoryGraphCard(
                 gapColor = gapColor,
                 // Fills whatever width the text column (above) didn't claim -- the only
                 // weighted child in this Row, so it gets 100% of the remainder rather than
-                // splitting it.
-                modifier = Modifier.weight(1f).height(SPARKLINE_HEIGHT),
+                // splitting it. That remainder is now identical across every card, since the
+                // text column's own width is the same measured value on every card.
+                modifier = Modifier.weight(1f).height(SPARKLINE_HEIGHT).testTag(sparklineTag),
             )
         }
     }
