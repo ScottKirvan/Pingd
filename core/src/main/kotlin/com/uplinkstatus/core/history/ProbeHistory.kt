@@ -241,12 +241,45 @@ data class ProbeHistory(
     val latestLatencyMs: Long? get() = windowedSamples.lastOrNull { it.succeeded }?.latencyMs
 
     /** How much time the displayed samples actually cover: at most [windowMs], `0` while there
-     * are fewer than two of them (a single sample spans no time at all). */
+     * are fewer than two of them (a single sample spans no time at all).
+     *
+     * This can be, and for real discretely-sampled data almost always is, strictly *less* than
+     * [windowMs] even once the window is genuinely, thoroughly full — see [isWindowFull]'s doc
+     * for why that gap is expected rather than a sign the window "isn't full yet." Comparing this
+     * property against [windowMs] is *not* a reliable way to detect fullness; [isWindowFull] is
+     * the signal for that. */
     val spanMs: Long
         get() {
             val windowed = windowedSamples
             return if (windowed.size < 2) 0L else windowed.last().timestampMs - windowed.first().timestampMs
         }
+
+    /**
+     * Whether the configured [windowMs] is genuinely, thoroughly full of real data: `true` only
+     * when real retained history ([samples]) actually extends *past* what [windowedSamples] is
+     * currently showing — i.e. the display filter is excluding older real attempts specifically
+     * because they've aged out of [windowMs], not merely because no older data exists yet. That's
+     * a factual, discrete yes/no fact about the data (did the filter actually cut something off?)
+     * rather than a numeric coincidence, computed as `samples.size > windowedSamples.size`: any
+     * exclusion at all means real retained history reaches back further than what's displayed,
+     * which is exactly what "the window is full" means.
+     *
+     * This exists because the tempting alternative — comparing [spanMs] to [windowMs] for
+     * near-equality — is fundamentally unsound for real, discretely-sampled data. [spanMs] is *at
+     * most* [windowMs] by construction (it's derived from the same window-filtered slice), and
+     * reaches it *exactly* only when a real sample happens to land precisely on the display
+     * cutoff instant. Probes arrive at discrete intervals (paced by the step-delay setting,
+     * jittered by real network timing), so landing exactly on that instant essentially never
+     * happens in practice — a `spanMs >= windowMs` check stayed false forever even once the
+     * window had been thoroughly full for a long time. That was confirmed as the root cause of an
+     * on-device report where `historySpanCaption` (`:app`) never credited the configured window
+     * duration at all: a 1-minute window reported "last 59 seconds," a 4-minute window reported
+     * "last 3 mins," in both cases falling back to the true-but-truncated [spanMs] forever,
+     * because the nearest surviving sample above the cutoff almost never sits *exactly* on it.
+     * Whether the filter actually excluded something has no such coincidence dependency, which is
+     * what makes it the correct signal to use instead.
+     */
+    val isWindowFull: Boolean get() = samples.size > windowedSamples.size
 
     /** Records a real probe that answered in [latencyMs]. [timestampMs] is expected to be no
      * earlier than the newest existing sample — the cycle feeds these in the order they happen.

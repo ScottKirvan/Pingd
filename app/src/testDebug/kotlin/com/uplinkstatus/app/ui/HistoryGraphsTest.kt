@@ -12,6 +12,7 @@ import com.uplinkstatus.app.state.UplinkProbeHistory
 import com.uplinkstatus.core.history.ProbeHistory
 import org.junit.After
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertTrue
 import org.junit.Before
 import org.junit.Rule
 import org.junit.Test
@@ -213,16 +214,24 @@ class HistoryGraphsTest {
         composeTestRule.onAllNodesWithText("last 7 minutes").assertCountEquals(0)
     }
 
+    /**
+     * Regression test for the on-device report: a 1-minute configured window reported "last 59
+     * seconds" indefinitely, even once genuinely, thoroughly full of real data -- root cause was
+     * `historySpanCaption` comparing `spanMs >= windowMs`, which real, discretely-paced samples
+     * essentially never satisfy exactly. Spaced 700ms apart (not a divisor of 60_000ms) so the
+     * display cutoff can't land exactly on a sample boundary, reproducing the real failure mode
+     * rather than a contrived exact-alignment case.
+     */
     @Test
-    fun `the caption names the window once the samples genuinely fill it`() {
+    fun `the caption names the full window once real data has genuinely aged out of the display, even off a round boundary`() {
         UplinkProbeHistory.setWindowMs(60_000L)
         setContent()
 
-        UplinkProbeHistory.recordSuccess(latencyMs = 10, timestampMs = 0)
-        UplinkProbeHistory.recordSuccess(latencyMs = 10, timestampMs = 60_000)
+        repeat(200) { index -> UplinkProbeHistory.recordSuccess(latencyMs = 10, timestampMs = index * 700L) }
         composeTestRule.waitForIdle()
 
         composeTestRule.onAllNodesWithText("last 1 minute").assertCountEquals(2)
+        composeTestRule.onAllNodesWithText("last 59 seconds").assertCountEquals(0)
     }
 
     @Test
@@ -282,5 +291,22 @@ class HistoryGraphsTest {
                 ProbeHistory(windowMs = window).recordSuccess(0, 10).recordSuccess(60_000, 10),
             ),
         )
+    }
+
+    /**
+     * Regression test, at the caption-function level, for the on-device "last 59 seconds" report:
+     * once real data has genuinely aged out of the display window, the caption must credit the
+     * full configured window even though [ProbeHistory.spanMs] falls just short of it -- the
+     * exact shape real, discretely-paced probes produce (see [ProbeHistory.isWindowFull]'s doc).
+     * 700ms spacing does not evenly divide the 60s window, so the display cutoff can't land
+     * exactly on a sample and mask the bug the way an evenly-dividing spacing would.
+     */
+    @Test
+    fun `the caption function credits the full window once data has genuinely aged out, even when spanMs falls short`() {
+        var history = ProbeHistory(windowMs = 60_000)
+        repeat(200) { index -> history = history.recordSuccess(index * 700L, 10) }
+
+        assertTrue("expected spanMs short of windowMs, was ${history.spanMs}", history.spanMs < 60_000L)
+        assertEquals("last 1 minute", historySpanCaption(history))
     }
 }
