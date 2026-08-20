@@ -1073,19 +1073,67 @@ class ProbeHistoryTest {
      * or it's at/after both the earliest windowed sample's slot and the first slot warm-up could
      * ever hand off to the ordinary grid.
      */
-    private fun expectedDisplayedBucketCount(history: ProbeHistory, windowMs: Long, bucketWidthMs: Long): Int {
+    private fun expectedDisplayedBucketCount(history: ProbeHistory, windowMs: Long, bucketWidthMs: Long): Int =
+        expectedDisplayedSlots(history, windowMs, bucketWidthMs).size
+
+    /**
+     * The ordered slot numbers [ProbeHistory.successSparkline] *should* display for [history] at
+     * [windowMs]/[bucketWidthMs], mirroring the same logic [expectedDisplayedBucketCount] already
+     * verified against the real implementation (this only returns the slot list behind that count,
+     * rather than just its size) -- ascending, the same order [successSparkline]'s own returned
+     * [SparklinePoint] list is in, so `expectedDisplayedSlots(...).zip(points)` pairs each real
+     * displayed point with the slot it represents. Used by the alignment tests below to locate
+     * which returned point a given real sample's own timestamp landed in, without assuming a
+     * point's position in the list equals `slot - leftmostSlot` -- that identity only holds when
+     * nothing was omitted, which the leading-blank and empty-warm-up-sub-bucket rules routinely
+     * violate (see [ProbeHistory.successSparkline]'s own doc).
+     */
+    /**
+     * The `(leftmostSlot, newestSlot)` pair [ProbeHistory.successSparkline] itself computes
+     * internally -- mirrored here the same way [testBucketSlot] et al. mirror the production
+     * bucketing functions -- *before* any blank/empty-warm-up-sub-bucket entries are filtered out
+     * of the returned list. This is the pre-filter slot range the old, reverted index-based x
+     * formula (`index / (displayedCount - 1)`) was computed against: `index` there was always a
+     * position in *this* range, never a position in the shorter, already-filtered output list --
+     * see [expectedDisplayedSlots]'s own doc for why that distinction matters.
+     */
+    private fun nominalLeftmostAndNewestSlot(history: ProbeHistory, windowMs: Long, bucketWidthMs: Long): Pair<Long, Long> {
         val anchorMs = history.samples.first().timestampMs
         val newest = history.samples.last().timestampMs
-        // Mirrors windowedSamples' own documented cutoff rule exactly -- see its doc.
-        val cutoff = newest - windowMs
-        val windowed = history.samples.filter { it.timestampMs >= cutoff }
-        val earliestWindowedSlot = testBucketSlot(windowed.first().timestampMs, bucketWidthMs, anchorMs)
+        val cutoff = newest - windowMs // mirrors windowedSamples' own documented cutoff rule.
+        val earliestWindowedSlot = testBucketSlot(
+            history.samples.first { it.timestampMs >= cutoff }.timestampMs,
+            bucketWidthMs,
+            anchorMs,
+        )
         val newestSlot = testBucketSlot(newest, bucketWidthMs, anchorMs)
         val naiveBucketCount = ((windowMs + bucketWidthMs - 1) / bucketWidthMs).coerceAtLeast(1L)
         val leftmostSlot = minOf(newestSlot - naiveBucketCount + 1, earliestWindowedSlot)
+        return leftmostSlot to newestSlot
+    }
+
+    /**
+     * The ordered slot numbers [ProbeHistory.successSparkline] *should* display for [history] at
+     * [windowMs]/[bucketWidthMs] -- ascending, the same order [successSparkline]'s own returned
+     * [SparklinePoint] list is in, so `expectedDisplayedSlots(...).zip(points)` pairs each real
+     * displayed point with the slot it represents. Used by the alignment tests below to locate
+     * which returned point a given real sample's own timestamp landed in, without assuming a
+     * point's position in the *returned* list equals `slot - leftmostSlot` -- that identity only
+     * holds when nothing was omitted, which the leading-blank and empty-warm-up-sub-bucket rules
+     * routinely violate (see [ProbeHistory.successSparkline]'s own doc): the returned list can be
+     * -- and, especially during warm-up, usually is -- shorter than the full
+     * `newestSlot - leftmostSlot + 1` range [nominalLeftmostAndNewestSlot] describes.
+     */
+    private fun expectedDisplayedSlots(history: ProbeHistory, windowMs: Long, bucketWidthMs: Long): List<Long> {
+        val anchorMs = history.samples.first().timestampMs
+        val newest = history.samples.last().timestampMs
+        val cutoff = newest - windowMs
+        val windowed = history.samples.filter { it.timestampMs >= cutoff }
+        val earliestWindowedSlot = testBucketSlot(windowed.first().timestampMs, bucketWidthMs, anchorMs)
+        val (leftmostSlot, newestSlot) = nominalLeftmostAndNewestSlot(history, windowMs, bucketWidthMs)
         val warmupSlotBase = testSuccessBucketSlot(anchorMs + bucketWidthMs + 1, bucketWidthMs)
         val occupiedSlots = windowed.map { testBucketSlot(it.timestampMs, bucketWidthMs, anchorMs) }.toSet()
-        return (leftmostSlot..newestSlot).count { slot ->
+        return (leftmostSlot..newestSlot).filter { slot ->
             slot in occupiedSlots || (slot >= earliestWindowedSlot && slot >= warmupSlotBase)
         }
     }
@@ -1129,6 +1177,179 @@ class ProbeHistoryTest {
                         expectedSize,
                         actualSize,
                     )
+                }
+            }
+        }
+    }
+
+    // --- Cross-graph alignment: success buckets sit at the same x as the latency graph would put ---
+    // --- that same moment in time (the "do the two graphs visually track together" property) ------
+    //
+    // Regression tests for a structural bug an independent reviewer found (not on-device):
+    // successSparkline() positioned each displayed bucket via `index / (displayedCount - 1)` -- a
+    // linear array-index scale with no direct relationship to real elapsed time -- while
+    // latencySparkline() (and markerFractions()) position every point via windowFraction, a
+    // continuous real-time scale anchored to the configured window. The two scales only coincided
+    // when displayedCount happened to equal the nominal ceil(windowMs / bucketWidthMs) bucket count
+    // almost exactly, which is not guaranteed: the warm-up ladder's narrower sub-buckets, and the
+    // minOf-based full-coverage correction (both covered by their own dedicated test groups above),
+    // both legitimately push displayedCount above the nominal count without the index-to-x mapping
+    // compensating. Confirmed independently before the fix (see this branch's own investigation) by
+    // porting the exact bucketSlot/successSparkline logic into a standalone simulation and comparing
+    // the old index-based x against windowFraction for the same real timestamp: up to 23-25% of the
+    // graph's total width apart during warm-up, and a persistent ~4% offset even in ordinary
+    // steady state at the default window -- both large enough that a moment placed near the middle
+    // of the latency graph could land a quarter of the screen off on the success graph, which is
+    // exactly why the two graphs did not read as "the same timeline."
+    //
+    // The fix (see ProbeHistory.successSparkline's own "Bucket position is time-based" doc section)
+    // derives each bucket's x from windowFraction applied to that bucket's own real timestamp (its
+    // right edge -- see ProbeHistory.bucketRightEdgeMs's own doc for why that boundary specifically)
+    // instead of its array index. Bucket *membership* -- which real samples land in which bucket --
+    // is completely untouched; only where an already-computed bucket is drawn changes.
+
+    /**
+     * The tolerance used by every test in this group: [ProbeHistory.BUCKET_WIDTH_MS] / `windowMs`
+     * -- the worst-case discretization error any displayed bucket can carry on the window-anchored
+     * axis. A bucket's x represents its own *right* edge (see [ProbeHistory.bucketRightEdgeMs]'s
+     * doc), so a real sample sitting anywhere earlier inside that same bucket is at most one
+     * bucket-width away from that edge in real time -- and session warm-up's sub-buckets are always
+     * *narrower* than [ProbeHistory.BUCKET_WIDTH_MS] by construction (see
+     * [ProbeHistory.warmupLevel]'s own doc, referenced via this file's own mirrored
+     * `testWarmupLevel`), so this bound conservatively covers warm-up buckets too, not just the
+     * ordinary grid's. This is deliberately not "exact" -- bucket aggregation inherently discretizes
+     * real time, an unavoidable property of any bucketed graph, not a bug -- but it is small enough,
+     * relative to the configured window, that "the two graphs visually track together" is genuinely
+     * true rather than merely closer than the pre-fix ~23-25%/~4% gaps above: at the production
+     * bucket width, this tolerance ranges from 5% of the graph's width at the narrowest configurable
+     * window down to well under 1% at the default and wider windows.
+     */
+    private fun alignmentToleranceFor(windowMs: Long, bucketWidthMs: Long): Float = bucketWidthMs.toFloat() / windowMs
+
+    /**
+     * Direct proof the misalignment was real, using the exact pre-fix formula, so this test would
+     * fail (for the right reason) if the fix in [ProbeHistory.successSparkline] were ever reverted:
+     * temporarily reverting the fix and re-running this file confirmed this specific assertion is
+     * what catches it (see this branch's own commit history for that red/green evidence). Builds a
+     * scenario known from the investigation above to produce a large, easily-checked gap (the
+     * narrowest configurable window, well into warm-up) and asserts the *old* formula's x would have
+     * missed the *new* one's by well more than this group's own tolerance -- i.e. that the fix
+     * changed something real, not just refactored the same numbers into a different shape.
+     */
+    @Test
+    fun `the old index-based x formula would have missed windowFraction by far more than the fix's own tolerance`() {
+        val bucketWidthMs = ProbeHistory.BUCKET_WIDTH_MS
+        val windowMs = ProbeHistory.NARROWEST_WINDOW_MS
+        var history = ProbeHistory(windowMs = windowMs)
+        listOf(0L, 100L, 200L, 400L, 1_000L, 2_000L, 5_000L, 9_000L).forEach { t ->
+            history = history.recordSuccess(t, latencyMs = 10)
+        }
+
+        val points = history.successSparkline(bucketWidthMs)
+        val slots = expectedDisplayedSlots(history, windowMs, bucketWidthMs)
+        assertEquals(slots.size, points.size) // sanity: this test's own setup must be full-coverage.
+
+        // The old formula's `index` was always a position in the *pre-filter* leftmostSlot..
+        // newestSlot range (nominalDisplayedCount below) -- never a position in the shorter,
+        // already-filtered list `points`/`slots` are (see expectedDisplayedSlots's own doc). This
+        // is exactly what my own first attempt at this test got wrong (mirroring `points.size`
+        // instead), so it's captured explicitly here rather than left implicit.
+        val (leftmostSlot, newestSlot) = nominalLeftmostAndNewestSlot(history, windowMs, bucketWidthMs)
+        val nominalDisplayedCount = (newestSlot - leftmostSlot + 1).toInt()
+        fun oldFormulaX(slot: Long): Float {
+            val originalIndex = (slot - leftmostSlot).toInt()
+            return if (nominalDisplayedCount == 1) 1f else originalIndex.toFloat() / (nominalDisplayedCount - 1)
+        }
+
+        val tolerance = alignmentToleranceFor(windowMs, bucketWidthMs)
+
+        // The worst-offending point, whichever index that turns out to be, rather than a single
+        // hand-picked one -- both formulas necessarily agree at the newest point (both pin it at
+        // x = 1 by construction), so the real divergence has to be found among the rest. In this
+        // scenario it is the earliest real point (t=0, session's very first sample, deep in
+        // warm-up): the old formula placed it at a position derived from the *nominal* (pre-blank-
+        // filtering) bucket count, far from where 8 real, unevenly-spaced-in-time samples actually
+        // sit on the real elapsed-time axis.
+        val (worstIndex, worstDiff) = points.indices
+            .map { i -> i to kotlin.math.abs(oldFormulaX(slots[i]) - points[i].x) }
+            .maxBy { it.second }
+        assertTrue(
+            "expected the old index-based formula to diverge from the fixed windowFraction-based x " +
+                "by more than the tolerance ($tolerance) somewhere in this history -- worst was at " +
+                "index=$worstIndex old=${oldFormulaX(slots[worstIndex])} new=${points[worstIndex].x} " +
+                "diff=$worstDiff -- otherwise this scenario doesn't actually demonstrate the bug " +
+                "this fix addresses",
+            worstDiff > tolerance,
+        )
+    }
+
+    /**
+     * The property this task exists to establish: for a real sample's own timestamp, the
+     * success-bucket it lands in must sit at (approximately) the same x windowFraction would place
+     * that same timestamp at on the latency graph -- i.e. the two graphs place the same moment in
+     * time at the same horizontal position, so they read as two views of one synchronized timeline.
+     * Swept across the full configurable window range and a range of pacing intervals from fast
+     * (50ms) through slow (2_000ms, past the app's own realistic pacing ceiling), checked at
+     * multiple points across each run -- early ticks still inside session warm-up specifically, not
+     * only after the display has settled into steady state, since the two mechanisms this fix
+     * corrects for (warm-up's narrower sub-buckets, and the minOf full-coverage correction) both
+     * bite hardest during and shortly after warm-up.
+     */
+    @Test
+    fun `a real sample's success-bucket x tracks windowFraction for that same timestamp, within one bucket-width`() {
+        val bucketWidthMs = ProbeHistory.BUCKET_WIDTH_MS
+        val windowSizesMs = listOf(ProbeHistory.NARROWEST_WINDOW_MS, 120_000L, 420_000L, 900_000L, 30 * 60_000L)
+        val intervalsMs = listOf(50L, 200L, 500L, 1_000L, 2_000L)
+        // Checkpoints span deep into warm-up (i=1..20, well within the ~3s warm-up era at every
+        // pacing tested), the transition out of it, and long-running steady state.
+        val checkpoints = setOf(1, 2, 5, 10, 20, 50, 100, 199)
+
+        windowSizesMs.forEach { windowMs ->
+            intervalsMs.forEach { intervalMs ->
+                var history = ProbeHistory(windowMs = windowMs)
+                val tolerance = alignmentToleranceFor(windowMs, bucketWidthMs)
+                var t = 0L
+
+                repeat(200) { i ->
+                    if (i > 0) t += intervalMs
+                    history = if (i % 5 != 0) {
+                        history.recordSuccess(t, latencyMs = 10)
+                    } else {
+                        history.recordFailure(t)
+                    }
+
+                    if (i !in checkpoints) return@repeat
+
+                    val points = history.successSparkline(bucketWidthMs)
+                    val slots = expectedDisplayedSlots(history, windowMs, bucketWidthMs)
+                    assertEquals(
+                        "windowMs=$windowMs intervalMs=$intervalMs tick=$i: slot count must match " +
+                            "point count for this alignment check to be meaningful",
+                        slots.size,
+                        points.size,
+                    )
+                    val xBySlot = slots.zip(points.map { it.x }).toMap()
+
+                    val anchorMs = history.samples.first().timestampMs
+                    val newest = history.samples.last().timestampMs
+                    val cutoff = newest - windowMs
+                    history.samples.filter { it.timestampMs >= cutoff }.forEach { sample ->
+                        val slot = testBucketSlot(sample.timestampMs, bucketWidthMs, anchorMs)
+                        val actualX = xBySlot[slot]
+                            ?: error(
+                                "windowMs=$windowMs intervalMs=$intervalMs tick=$i: no displayed " +
+                                    "bucket for real sample at t=${sample.timestampMs} (slot=$slot) " +
+                                    "-- a full-coverage violation, not an alignment one",
+                            )
+                        val expectedX = 1f - (newest - sample.timestampMs).toFloat() / windowMs
+                        val diff = kotlin.math.abs(actualX - expectedX)
+                        assertTrue(
+                            "windowMs=$windowMs intervalMs=$intervalMs tick=$i sampleT=" +
+                                "${sample.timestampMs}: bucket x=$actualX vs windowFraction=" +
+                                "$expectedX, diff=$diff exceeds tolerance $tolerance",
+                            diff <= tolerance,
+                        )
+                    }
                 }
             }
         }
@@ -1513,6 +1734,12 @@ class ProbeHistoryTest {
         // fixed slots (everything before that point) have no real sample in them at all and are
         // omitted entirely rather than plotted as a 0f miss, leaving 25 real points.
         assertEquals(25, points.size)
+        // The first real point's x is windowFraction of its own bucket's right edge (t=30_000,
+        // exactly where the first real slot ends -- see ProbeHistory.bucketRightEdgeMs's doc),
+        // which is exactly the window's own midpoint: 1 - (60_000 - 30_000) / 60_000 = 0.5. Bucket
+        // *position* is real-time-based now, not an index fraction, so this is an exact value, not
+        // a loose margin -- see successSparkline's "Bucket position is time-based" doc section.
+        assertEquals(0.5f, points.first().x, 0.001f)
         assertTrue(points.none { it.x < 0.48f })
         assertTrue(points.none { it.y == 0f })
         assertTrue(points.all { it.y == 1f })
