@@ -42,11 +42,10 @@ const val TAG_LATENCY_CARD = "settings_latency_card"
 const val TAG_LATENCY_VALUE = "settings_latency_value"
 const val TAG_HISTORY_RESET_BUTTON = "settings_history_reset_button"
 
-/** Marks the temporary raw-success debug card -- see [HistoryGraphs]' own doc on why it exists
- * separately from the ping-success card. A dedicated tag so it's trivial to find (and, later,
+/** Marks the ping-success card's debug caption -- see [HistoryGraphs]' own doc on the raw-sample
+ * / bucket-boundary overlay this labels. A dedicated tag so it's trivial to find (and, later,
  * strip) independent of its exact wording. */
-const val TAG_RAW_SUCCESS_DEBUG_CARD = "settings_raw_success_debug_card"
-const val TAG_RAW_SUCCESS_DEBUG_VALUE = "settings_raw_success_debug_value"
+const val TAG_PING_SUCCESS_DEBUG_CAPTION = "settings_ping_success_debug_caption"
 
 /** What a card's big number shows when there is genuinely nothing to show — an em dash, not a
  * zero, for the same reason [ProbeHistory.successPercent] is null rather than 0 before the
@@ -56,6 +55,14 @@ private const val NO_VALUE = "—"
 private val SPARKLINE_HEIGHT = 48.dp
 private val SPARKLINE_STROKE = 2.dp
 private val MARKER_STROKE = 1.dp
+
+/** Debug overlay only (see [rawPoints]/[bucketBoundaries] on [Sparkline]) -- the ping-success
+ * card's raw per-sample dot size and the bucket-boundary tick's size/stroke. Small and muted
+ * on purpose: this is meant to sit *behind* the reading a user actually cares about (the
+ * bucketed line and the big number), visible on close inspection without competing with either. */
+private val RAW_POINT_RADIUS = 1.5.dp
+private val BUCKET_TICK_HEIGHT = 8.dp
+private val BUCKET_TICK_STROKE = 1.dp
 
 /** Opacity of the shaded "no data here" region drawn behind a sparkline gap -- subtle enough
  * not to compete with the data line itself, visible enough to read as deliberate shading
@@ -91,17 +98,6 @@ private val PING_SUCCESS_SWEEP_START = Color(0xFF3B82F6) // blue
 private val PING_SUCCESS_SWEEP_MID = Color(0xFF8B5CF6) // violet
 private val PING_SUCCESS_SWEEP_END = Color(0xFFEC4899) // pink
 
-/**
- * Colors for the temporary raw-success debug card's per-point coloring (see
- * [HistoryGraphs]' own doc on that card) -- reusing [SparklineColoring.ByValue] so every raw
- * 1/0 dot is colored by its own actual outcome rather than by position, which is the point of a
- * debug view meant to show ground truth. Deliberately the same green/red pair as
- * [LATENCY_COLOR_FAST]/[LATENCY_COLOR_SLOW] (good/bad reads the same way on both graphs) rather
- * than a second, independently-chosen palette.
- */
-private val RAW_SUCCESS_COLOR = LATENCY_COLOR_FAST
-private val RAW_FAIL_COLOR = LATENCY_COLOR_SLOW
-
 /** Turns a raw latency into a point on the [LATENCY_COLOR_FAST]→[LATENCY_COLOR_MID]→
  * [LATENCY_COLOR_SLOW] scale, via [latencyColorFraction]'s pure threshold math -- the only place
  * an actual `Color` gets involved, since [latencyColorFraction] itself has no notion of one. */
@@ -133,9 +129,7 @@ private sealed interface SparklineColoring {
 
 /**
  * The settings screen's two live history graphs — ping success percentage and latency trend —
- * over the shared, user-configurable window, read straight from [UplinkProbeHistory]. (A third,
- * temporary debug card follows them -- see this doc's own "Raw-success debug card" section
- * below.)
+ * over the shared, user-configurable window, read straight from [UplinkProbeHistory].
  *
  * Both are built from **real probe attempts only**: the automatic ("fake") ack of the
  * ping/ping/fake cycle never becomes a sample in the first place (see
@@ -158,20 +152,16 @@ private sealed interface SparklineColoring {
  * not a notification. What changes is what they *say* — "no probes yet" and an em dash, never
  * a placeholder number.
  *
- * ### Raw-success debug card (temporary)
- * A third, separate card follows the two above, for debugging [ProbeHistory.successSparkline]'s
- * bucketing directly against the real, per-sample data it summarizes: one dot per real attempt in
- * the window, at [ProbeHistory.rawSuccessPoints] (raw 1/0, not the bucketed rate). It is
- * deliberately a **separate card**, not an overlay drawn on top of the ping-success card's own
- * `Canvas` — an earlier version of this tried the overlay and it made the debug data an
- * unreliable ground truth, since anything sharing a canvas with the bucketed line risked
- * inheriting that line's bucket-width-dependent layout by accident. This card's data and
- * positioning ([ProbeHistory.rawSuccessPoints]) have **no dependency on bucket width, bucket
- * count, or [ProbeHistory.successSparkline] in any way** -- same window, same per-sample
- * [ProbeHistory.windowFraction] positioning, same update-on-every-sample cadence the latency card
- * beside it already uses, so a correct rendering should visibly scroll in lockstep with the
- * latency card. This is a debugging aid for the bucketing logic, not a permanent user-facing
- * feature — safe to remove once that work is done.
+ * ### Ping-success debug overlay (temporary)
+ * The ping-success card additionally overlays two things not otherwise visible anywhere in the
+ * UI, for debugging [ProbeHistory.successSparkline]'s bucketing directly against the real,
+ * per-sample data it summarizes: a small muted dot for every real attempt in the window, at
+ * [ProbeHistory.rawSuccessPoints] (raw 1/0, not the bucketed rate), and a short tick at every
+ * [ProbeHistory.successBucketBoundaryFractions] (where the bucket grid itself falls). Both are
+ * drawn deliberately subtly — small dots, short bottom-edge ticks, muted alpha — specifically so
+ * they read as a layer *behind* the actual line and number rather than competing with them; see
+ * [TAG_PING_SUCCESS_DEBUG_CAPTION]'s caption for what they mean. This is a debugging aid for the
+ * bucketing logic, not a permanent user-facing feature — safe to remove once that work is done.
  */
 @Composable
 fun HistoryGraphs(modifier: Modifier = Modifier) {
@@ -205,6 +195,13 @@ fun HistoryGraphs(modifier: Modifier = Modifier) {
             gapColor = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = GAP_SHADE_ALPHA),
             cardTag = TAG_PING_SUCCESS_CARD,
             valueTag = TAG_PING_SUCCESS_VALUE,
+            // Debug overlay -- see this function's own doc. Only the ping-success card gets
+            // these; the latency card below is passed nothing, so it draws exactly as before.
+            rawPoints = history.rawSuccessPoints(),
+            rawPointColor = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.55f),
+            bucketBoundaries = history.successBucketBoundaryFractions(),
+            bucketBoundaryColor = MaterialTheme.colorScheme.outline.copy(alpha = 0.4f),
+            debugCaption = "debug: dots = raw samples, ticks = bucket edges",
         )
         HistoryGraphCard(
             title = "Latency",
@@ -224,27 +221,6 @@ fun HistoryGraphs(modifier: Modifier = Modifier) {
             gapColor = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = GAP_SHADE_ALPHA),
             cardTag = TAG_LATENCY_CARD,
             valueTag = TAG_LATENCY_VALUE,
-        )
-        // Temporary debug card -- see this function's own doc for why it's a separate card
-        // rather than an overlay, and why its data path is kept independent of bucketing.
-        HistoryGraphCard(
-            title = "Raw ping samples",
-            value = if (history.attemptCount == 0) NO_VALUE else history.attemptCount.toString(),
-            // The debug label is folded into the caption text itself rather than a new caption
-            // row/parameter, so this card can reuse HistoryGraphCard/Sparkline completely
-            // unmodified from what the other two cards already use.
-            caption = "debug: raw samples, no bucketing — $caption",
-            points = history.rawSuccessPoints(),
-            markers = markers,
-            // Colored by each raw point's own actual outcome (green success, red fail) rather
-            // than the ping-success card's positional sweep -- ground truth should read as
-            // ground truth, not echo that card's decorative treatment.
-            coloring = SparklineColoring.ByValue { point ->
-                if (point.y == 1f) RAW_SUCCESS_COLOR else RAW_FAIL_COLOR
-            },
-            gapColor = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = GAP_SHADE_ALPHA),
-            cardTag = TAG_RAW_SUCCESS_DEBUG_CARD,
-            valueTag = TAG_RAW_SUCCESS_DEBUG_VALUE,
         )
         Row(
             modifier = Modifier.fillMaxWidth(),
@@ -275,6 +251,13 @@ private fun HistoryGraphCard(
     gapColor: Color,
     cardTag: String,
     valueTag: String,
+    // Debug overlay (see HistoryGraphs' own doc) -- empty/null by default, so a caller that
+    // doesn't pass these (the latency card) renders exactly as it did before this existed.
+    rawPoints: List<SparklinePoint> = emptyList(),
+    rawPointColor: Color = Color.Unspecified,
+    bucketBoundaries: List<Float> = emptyList(),
+    bucketBoundaryColor: Color = Color.Unspecified,
+    debugCaption: String? = null,
 ) {
     Card(modifier = Modifier.fillMaxWidth().testTag(cardTag)) {
         Row(
@@ -299,6 +282,14 @@ private fun HistoryGraphCard(
                     style = MaterialTheme.typography.bodySmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                 )
+                if (debugCaption != null) {
+                    Text(
+                        text = debugCaption,
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.7f),
+                        modifier = Modifier.testTag(TAG_PING_SUCCESS_DEBUG_CAPTION),
+                    )
+                }
             }
             Sparkline(
                 points = points,
@@ -306,6 +297,10 @@ private fun HistoryGraphCard(
                 coloring = coloring,
                 markerColor = MaterialTheme.colorScheme.outline,
                 gapColor = gapColor,
+                rawPoints = rawPoints,
+                rawPointColor = rawPointColor,
+                bucketBoundaries = bucketBoundaries,
+                bucketBoundaryColor = bucketBoundaryColor,
                 // Fills whatever width the text column (above) didn't claim -- the only
                 // weighted child in this Row, so it gets 100% of the remainder rather than
                 // splitting it.
@@ -353,6 +348,15 @@ private data class PlottedPoint(val offset: Offset, val source: SparklinePoint)
  * Purely arithmetic aside from the coloring itself: every position value arrives already reduced
  * to the unit square by [ProbeHistory], so there is no scaling or aggregation decision left here
  * to disagree with the numbers above it.
+ *
+ * [rawPoints] and [bucketBoundaries] are a temporary debug overlay, used today only by the
+ * ping-success card (see [HistoryGraphs]' own doc) -- both default to empty, in which case
+ * neither draws anything and this behaves exactly as it did before they existed. [rawPoints] is
+ * plotted as small dots (never connected, never colored/gapped by [coloring]) directly over the
+ * bucketed line, so the raw per-sample data and the average it produced sit at the same x
+ * position for direct comparison. [bucketBoundaries] draws as short ticks along the bottom edge,
+ * a visually distinct token from [markers]' full-height lines so the two are never confused --
+ * a marker means "the app was off here," a boundary tick means "a new bucket starts here."
  */
 @Composable
 private fun Sparkline(
@@ -362,6 +366,10 @@ private fun Sparkline(
     markerColor: Color,
     gapColor: Color,
     modifier: Modifier = Modifier,
+    rawPoints: List<SparklinePoint> = emptyList(),
+    rawPointColor: Color = Color.Unspecified,
+    bucketBoundaries: List<Float> = emptyList(),
+    bucketBoundaryColor: Color = Color.Unspecified,
 ) {
     Canvas(modifier = modifier) {
         if (points.isEmpty()) return@Canvas
@@ -378,6 +386,18 @@ private fun Sparkline(
                 color = gapColor,
                 topLeft = Offset(gap.start * size.width, 0f),
                 size = Size(width = (gap.endInclusive - gap.start) * size.width, height = size.height),
+            )
+        }
+
+        // Debug overlay, drawn early (behind the markers and the data line) so the grid reads
+        // as background structure, not as data of its own -- see this function's own doc.
+        bucketBoundaries.forEach { fraction ->
+            val x = fraction * size.width
+            drawLine(
+                color = bucketBoundaryColor,
+                start = Offset(x, size.height - BUCKET_TICK_HEIGHT.toPx()),
+                end = Offset(x, size.height),
+                strokeWidth = BUCKET_TICK_STROKE.toPx(),
             )
         }
 
@@ -422,6 +442,21 @@ private fun Sparkline(
                 is SparklineColoring.Sweep -> drawSweepSegment(segment, sweepBrush!!, stroke)
                 is SparklineColoring.ByValue -> drawByValueSegment(segment, coloring.colorFor, stroke)
             }
+        }
+
+        // Debug overlay, drawn last (on top of the bucketed line) -- these are the raw samples
+        // the line above is a summary of, so they need to stay visible over it rather than
+        // being buried underneath. Never connected -- a scatter of independent attempts, not a
+        // second line -- and never gapped/colored by [coloring], which is the bucketed line's
+        // own concern.
+        val rawPointRadius = RAW_POINT_RADIUS.toPx()
+        rawPoints.forEach { point ->
+            val y = point.y ?: return@forEach
+            drawCircle(
+                color = rawPointColor,
+                radius = rawPointRadius,
+                center = Offset(x = point.x * size.width, y = inset + (1f - y) * usableHeight),
+            )
         }
     }
 }
