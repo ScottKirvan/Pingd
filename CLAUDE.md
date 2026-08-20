@@ -89,6 +89,22 @@ until both halves are shown.
   callback-threading reasoning in
   `ConnectivityManagerNetworkSnapshotProvider.kt`, verified against AOSP
   source directly rather than assumed.)
+- Keep data and view genuinely separated across the `:core`/`:app`
+  boundary — watch for presentation decisions (how a value maps to a
+  screen position, a color, a scale) leaking into `:core`, which should
+  only ever hold domain data and data-processing decisions (aggregation,
+  windowing, retention). This is a standing concern, not a one-off: it's
+  the kind of architectural oversight that creates bugs and
+  unmaintainable/unfixable code, so watch for it proactively rather than
+  only when it's pointed out. (Concrete instance found in this project:
+  `ProbeHistory`'s sparkline functions return points pre-scaled into the
+  0..1 unit square — `windowFraction()` for x, `latencyColorFraction()`
+  for y — baking a specific linear presentation scale into `:core`
+  instead of exposing domain values and letting `:app` own the
+  value-to-position transform. Flagged when a request for a log/sqrt
+  time-axis scale surfaced that this coupling would force a `:core`
+  change for what's fundamentally a view decision; fix planned as its
+  own refactor.)
 
 ## No Shortcuts
 

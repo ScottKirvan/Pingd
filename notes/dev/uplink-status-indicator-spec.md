@@ -323,26 +323,26 @@ started checking yet" as "actively failing," which is a worse,
 more misleading result than the shaded-gap flicker this simplification
 replaces.
 
-The success line divides the configured window into up to 48 buckets,
-each a **fixed, absolute slot of wall-clock time** — not a fraction of
-distance from "now." A real sample's bucket is a permanent fact about
-that sample's own timestamp, unaffected by when the line happens to be
-redrawn. This replaced an earlier version that instead measured each
-sample's position as a fraction of distance from the newest retained
-sample and multiplied that fraction by the bucket count to get an
-index — boundaries defined that way are, in effect, anchored to "now,"
-which advances on every single new sample, so a sample sitting near a
-boundary could flip to a neighboring bucket on almost any tick purely
-because time passed, with nothing about the connection actually
-changing. Since a bucket's displayed value is a discrete average over a
-handful of real samples, one sample migrating in or out could swing
-that bucket's percentage sharply and instantly — reported on-device as
-the whole line "reshaping" every tick instead of scrolling, worse at
-narrow windows and slow ping-pacing settings where each bucket has
-fewer samples behind it, and confirmed by porting the exact old
-algorithm into a standalone simulation: single-tick swings of tens of
-percentage points in a bucket with nothing real going on, up to 100
-points at narrow-window/slow-pacing settings. Binning by a fixed
+The success line divides the configured window into a number of
+buckets, each a **fixed, absolute slot of wall-clock time** — not a
+fraction of distance from "now." A real sample's bucket is a permanent
+fact about that sample's own timestamp, unaffected by when the line
+happens to be redrawn. This replaced an earlier version that instead
+measured each sample's position as a fraction of distance from the
+newest retained sample and multiplied that fraction by the bucket count
+to get an index — boundaries defined that way are, in effect, anchored
+to "now," which advances on every single new sample, so a sample
+sitting near a boundary could flip to a neighboring bucket on almost
+any tick purely because time passed, with nothing about the connection
+actually changing. Since a bucket's displayed value is a discrete
+average over a handful of real samples, one sample migrating in or out
+could swing that bucket's percentage sharply and instantly — reported
+on-device as the whole line "reshaping" every tick instead of
+scrolling, worse at narrow windows and slow ping-pacing settings where
+each bucket has fewer samples behind it, and confirmed by porting the
+exact old algorithm into a standalone simulation: single-tick swings of
+tens of percentage points in a bucket with nothing real going on, up to
+100 points at narrow-window/slow-pacing settings. Binning by a fixed
 absolute slot instead means a bucket's membership is a pure function of
 *which real samples exist* — a bucket safely in the interior of the
 display (not the live bucket still accumulating samples, and not within
@@ -351,20 +351,167 @@ provably frozen once no more samples can land in it, confirmed by a
 swept simulation of window sizes and ping-pacing settings producing
 zero value changes in any such bucket.
 
-The success line's bucket *count* no longer varies at all — it's always
-the full 48, and how many of those fixed slots actually have real
-attempts behind them is a separate question the no-gaps/pre-first-sample
-rules above already answer. An earlier version instead grew the bucket
-count itself with how much of the window real elapsed time had covered,
-specifically to avoid scattering a handful of early-session samples
-across mostly-empty buckets — that growing-resolution behavior is now a
-side effect of the pre-first-sample rule alone: early in a session, most
-of the 48 fixed slots simply sit before the first real sample and are
-omitted, so only the few slots with real data behind them get drawn, with
-no separate mechanism needed to shrink the bucket count itself. Whatever
-that leaves visible, a zero-attempt bucket (other than the
-pre-first-sample exception) is always a miss, never a decision about
-whether the silence behind it was "genuine."
+**Bucket *width* is a fixed constant, never a function of the
+configured window.** An earlier version computed it as `windowMs /
+48` — so every edit to the "History window" slider changed every
+bucket's width, which reassigns *every* retained sample to a different
+bucket: a full rebin, not a rescale, silently undoing the fixed-slot
+value-stability the paragraph above describes, just triggered by a
+settings change instead of the passage of time. The width is now a
+true constant instead, so a sample's bucket depends only on its own
+timestamp and the session's own start (see "session warm-up" below),
+never on the currently configured window. This is the specific
+behavior the success and latency graphs now "share": neither one ever
+reassigns a real sample to a different bucket just because the window
+slider moved. (The latency graph never had this problem in the first
+place — it plots one point per sample with no binning at all, so there
+was nothing for it to rebin.)
+
+**What that constant should actually be took two rounds to get right.**
+The first version anchored it at the *default* 7-minute window and its
+old default bucket count (48) — about 8.75 seconds. That rendered the
+default view identically to the fixed-48-bucket grid it replaced, but
+left the *narrowest* configurable window (1 minute) starved of
+resolution: at that width, a 1-minute window holds only ~7 total
+buckets, all of which (warm-up included) resolve within roughly 9-15
+real seconds — so the display raced to its final shape in about a
+quarter of the window it was supposedly covering, and thereafter only
+scrolled once every ~8.75 seconds, a visibly chunkier cadence than the
+latency line's continuous per-sample motion right next to it. Both
+were reported from the same on-device session at the 1-minute window
+setting specifically, and both trace to the same root cause: a single
+global width constant can only be "enough resolution" for the window it
+was sized against, and the default-anchored version was sized against
+the wrong end of the configurable range. (This exact risk was flagged
+as an open question before the default-anchored version was first
+built — "the 1-minute end of the slider gives a coarser ~7 bins... I'd
+want whoever implements this to weigh in" — but shipped anchored at the
+default anyway for lack of on-device evidence that the narrow end was a
+real problem. This report is that evidence.)
+
+The fix re-anchors the constant at the *narrowest* configurable window
+(1 minute) instead — the end of the range where responsiveness matters
+most, since a bucket-width-sized wait there is the largest fraction of
+the whole window. But the anchor's own bucket-count target could not
+simply be turned up for more resolution: [successSparkline]'s ordinary,
+post-warm-up grid treats an empty bucket as an unconditional 0% miss
+(see below), which is only honest if the bucket is wide enough that
+ordinary pacing could never leave it empty on a healthy connection. A
+single real gap between two consecutive successful probes that reaches
+or exceeds the bucket width can straddle an entire bucket and leave it
+empty even though nothing failed — the exact false-positive-outage
+problem the warm-up ladder below has its own dedicated fix for, just
+relocated to the *permanent* grid, where no such exception is allowed.
+This was not hypothetical: a first attempt at the narrow-window fix
+(48 buckets at the 1-minute window, ~1.25-second buckets) reproduced
+this exact failure directly in testing, at realistic slower pacing
+(1.5-2 second step delays) — a reliable, not rare, false dip on an
+all-success stream. The app's own worst-case realistic gap between two
+real probes is 2 seconds (twice the step-delay slider's own 1-second
+ceiling — see the "ping, ping, fake" cycle above: two real probes per
+automatic ack, so the gap from an automatic ack back to the next real
+probe is two step-delay waits, the largest the cycle ever produces).
+The shipped fix instead targets 20 buckets at the 1-minute window —
+3-second-wide buckets — clearing that 2-second floor with a deliberate
+~50% safety margin for real-world pacing jitter, while still cutting
+the old cadence (~8.75 seconds) by roughly two-thirds.
+
+Bucket *count*, in consequence, is no longer pinned at any single
+number — with width fixed, it's simply how many of those fixed-width
+slots fit in the configured window: 20 at the narrowest configurable
+1-minute window (by construction), 140 at the default 7-minute window
+(itself a one-time step up in the default view's own resolution from
+the 48 it rendered under the first, default-anchored version — more
+buckets is never a worse graph, only a finer one), and 600 at the
+widest configurable 30-minute one. This is a *different* kind of
+bucket-count variation than the attempt-count-driven one described and
+rejected two paragraphs below: count still never depends on attempt
+count, or on when the line happens to be redrawn — only on the
+configured window, which is exactly as stable a basis as a pinned
+count used to be. None of this is a performance concern: this is
+small-array arithmetic on the main/UI thread from Compose state, not a
+hot path at any of these sizes, confirmed rather than assumed for the
+now-larger widest-window count by this fix's own test coverage.
+
+Whatever that count comes out to, the display is guaranteed to reach
+back far enough to cover every real sample the window is currently
+showing — every retained sample the "Ping success (%)" big number and
+`attemptCount` already count toward the percentage is also represented
+in exactly one displayed bucket, unconditionally. (An interim version
+of this guarantee tried to special-case only the session-warm-up part
+of this problem, by comparing raw slot numbers to decide whether a
+correction was needed — a comparison that was a false negative exactly
+at the boundary it existed to detect, and repeatedly dropped real
+warm-up-era data from the line for a substantial stretch of ticks in
+ordinary use, confirmed by an independent simulation sweeping window
+sizes and pacing intervals. The fix that shipped instead is
+unconditional: the display's left edge is always at least as far back
+as the earliest currently-windowed sample's own bucket, full stop, with
+no threshold to get wrong.)
+
+How many of a display's fixed slots actually have real attempts behind
+them is a separate question the no-gaps/pre-first-sample rules above
+already answer. An earlier version grew the bucket count itself with
+how much of the window real elapsed time had covered, specifically to
+avoid scattering a handful of early-session samples across mostly-empty
+buckets — for the steady-state (post-warm-up) part of a session, that
+growing-resolution behavior is a side effect of the pre-first-sample
+rule alone: most fixed slots simply sit before the first real sample
+and are omitted, so only the slots with real data behind them get
+drawn. Whatever that leaves visible, a zero-attempt bucket in the
+**ordinary, post-warm-up grid** is always a miss, never a decision
+about whether the silence behind it was "genuine" — with one further
+exception, specific to warm-up itself, described next.
+
+**Session warm-up: resolution starts fine and coarsens into the fixed
+grid.** A fresh session's very first fixed-width bucket can span the
+*entire* bucket width — several seconds at the default width — before
+a second ordinary bucket ever opens, which without more shows one
+flatlined point pinned at the right edge for that whole stretch
+instead of the steadily "filling in" look the rest of this section
+describes. Rather than wait a full bucket-width of real time for a
+second point to appear, that first bucket is subdivided into six
+progressively wider sub-buckets — an exponential/doubling ladder
+anchored to the timestamp of the very first real sample ever recorded
+in the session, starting near 47ms (fine enough to give distinct
+points to typical probe pacing) and doubling five times up to the full
+3-second bucket width, at which point every later sample uses the
+ordinary fixed grid with no subdivision at all, permanently, for the
+rest of the session. Each sample's warm-up sub-bucket, like every
+other bucket assignment on this graph, is a permanent fact decided
+once from its own timestamp — never recomputed from how many samples
+currently exist, which is exactly the property that would reintroduce
+the reshaping bug the fixed-slot design above exists to prevent, just
+scoped to session start instead of scoped to every tick.
+
+**An empty warm-up sub-bucket is left blank, not plotted as a 0% miss
+— the one place on this graph the ordinary no-gaps rule doesn't
+apply.** The warm-up ladder's finest levels (as narrow as ~47ms at
+the production bucket width) are routinely narrower than any realistic
+real-world probe pacing (the app's configurable step delay, roughly
+doubled by the tracer's own cycle structure, runs from a few hundred
+milliseconds to a few seconds between attempts), so it is *ordinary*,
+not rare, for two genuinely consecutive real attempts to land in
+non-adjacent warm-up levels, leaving one or more levels between them
+with no attempt in it — confirmed by simulating an all-success session
+at every configurable pacing setting: at anything slower than the
+fastest setting, 2-3 fabricated failure dips appeared scattered
+through the first several seconds of an otherwise perfectly healthy
+connection's graph, consistently, not as a rare coincidence. This is
+*not* the adaptive, per-gap "does this silence look real" judgment
+call the ordinary grid's own history already tried and explicitly
+rejected (see the no-gaps rule above) — it's a fixed, permanent,
+unconditional fact about which slots even *exist* during warm-up,
+decided the same way every other bucket boundary on this graph is
+decided (from timestamps alone, never from how many attempts did or
+didn't arrive). It's also never a way to hide a real outage: every
+attempt the tracer makes is recorded, success or failure, at a bounded
+pace even during a sustained outage (see "Recording continues through
+DISABLED" below and the retry-floor discussion under "Core
+Mechanism"), so an empty warm-up sub-bucket can only mean "no attempt
+has landed in this narrow a slice yet" — never "an outage happened
+here and nothing was recorded," a distinction the ordinary grid's much
+wider buckets cannot make the same guarantee about.
 
 Both sparklines' time axis is anchored to the *configured window*, not
 stretched to fill from whatever span of samples happens to be displayed
@@ -377,6 +524,43 @@ oscilloscope trace has. Scaling to the displayed span instead (an earlier
 version of this behavior) stretched however little data existed to fill
 the whole card every time, which looked exactly like the graph had just
 reset even when nothing was actually cleared.
+
+**The two graphs place a given moment in time at the same horizontal
+position, so they read as two views of one synchronized timeline.**
+Every point on both graphs is positioned on that same window-anchored
+real-time axis — the latency line always was (one point per sample, at
+that sample's own real-time position), and the success line's *buckets*
+now are too: each displayed bucket's horizontal position is derived from
+its own real timestamp (its right edge, the same closed-on-the-right
+boundary the bucket grid already uses elsewhere), not from its position
+in the array of currently-displayed buckets. An earlier version used
+that array-index position instead — `index / (bucket count - 1)` — which
+only coincidentally matched the real-time axis when the number of
+displayed buckets happened to equal the nominal `window ÷ bucket width`
+almost exactly. It routinely didn't: both the warm-up ladder's narrower
+sub-buckets and the full-coverage guarantee (which can widen the display
+by an extra bucket rather than silently drop real data — see above) push
+the actual displayed bucket count above that nominal figure without the
+index-to-position mapping compensating, so a bucket's array position no
+longer corresponded to the same real-time fraction the latency graph
+would place that same moment at. Measured directly (by comparing the old
+index-based position against the real-time position for the same
+timestamp): up to 23-25% of the graph's total width apart during a
+session's warm-up period, and a persistent ~4% offset even in ordinary
+steady state at the default window — both large enough that a moment
+plotted near the middle of the latency graph could land a quarter of the
+screen off on the success graph, which is exactly why the two graphs
+failed to visually "scroll together." Deriving bucket position from real
+time instead fixes that: a genuinely narrower warm-up sub-bucket now also
+occupies genuinely less horizontal space than an ordinary one, which is
+the *correct* consequence of a real-time axis, not a new inconsistency —
+spacing was only ever uniform under the old index-based scheme because
+it ignored how much real time each bucket actually covered. This is
+purely a *where a bucket is drawn* change — which real samples land in
+which bucket (the fixed-slot binning, bucket-width, and warm-up-ladder
+rules described above) is completely unaffected, so every stability,
+full-coverage, and no-false-dip guarantee those rules provide still
+holds exactly as described.
 
 ### Line color
 The two graphs color their lines by two genuinely different rules, not
