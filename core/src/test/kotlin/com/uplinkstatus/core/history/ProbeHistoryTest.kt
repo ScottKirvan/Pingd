@@ -793,38 +793,57 @@ class ProbeHistoryTest {
 
     /**
      * The test that should have caught the original bug and didn't. Setup: one real sample per
-     * second in a window whose default bucket width is also exactly one second (`windowMs` =
-     * `maxBuckets` * 1000ms), so every fixed slot ends up with exactly one real attempt -- no
-     * averaging needed to reason about expected values -- following a known, deterministic
-     * pass/fail pattern (fails every 5th attempt). Once the window is fully packed, a specific
-     * real sample's point is identified purely by its distance from the *right* edge (the newest
-     * point): since exactly one new sample lands and exactly one new fixed slot opens on every
-     * tick, that distance increases by exactly one index per tick as long as nothing is
-     * migrating between buckets. Under steady, unchanging conditions (no real outage, no setting
-     * change), that tracked point must report the pattern's own known outcome on every single
-     * later tick -- and therefore must never change from one tick to the next, checked directly
-     * too -- for as long as it is neither the live point nor within one slot-width of aging off
-     * the window's trailing edge.
+     * fixed slot (`windowMs` = `bucketCount` * `bucketWidthMs`), so every slot ends up with
+     * exactly one real attempt -- no averaging needed to reason about expected values --
+     * following a known, deterministic pass/fail pattern (fails every 5th attempt). Once the
+     * window is fully packed, a specific real sample's point is identified purely by its distance
+     * from the *right* edge (the newest point): since exactly one new sample lands and exactly
+     * one new fixed slot opens on every tick, that distance increases by exactly one index per
+     * tick as long as nothing is migrating between buckets. Under steady, unchanging conditions
+     * (no real outage, no setting change), that tracked point must report the pattern's own known
+     * outcome on every single later tick -- and therefore must never change from one tick to the
+     * next, checked directly too -- for as long as it is neither the live point nor within one
+     * slot-width of aging off the window's trailing edge.
+     *
+     * Swept across bucket widths spanning fast pacing (200ms) through the production default
+     * ([ProbeHistory.BUCKET_WIDTH_MS], ~8.75s -- the width a real 7-minute-default session
+     * actually uses) up to a 60s width paired with a 30-minute window, the widest the settings
+     * screen's slider allows (see `UplinkPreferences.HISTORY_WINDOW_RANGE_MS`). This property
+     * predates this branch (from the earlier "fixed absolute time slots" PR) but is exercised
+     * again by this branch's own bucket-width/warm-up changes, so its coverage is widened here
+     * alongside the other two properties in this file.
      */
     @Test
     fun `an interior bucket's value never changes on a later tick under steady, unchanging conditions`() {
-        val stableWindowMs = 48_000L // 48 buckets -> exactly 1_000ms fixed slots.
-        val bucketWidthMs = 1_000L
-        val bucketCount = 48
+        assertInteriorBucketStable(bucketWidthMs = 200L, bucketCount = 48) // fast pacing.
+        assertInteriorBucketStable(bucketWidthMs = 1_000L, bucketCount = 48) // the original test's own config.
+        assertInteriorBucketStable(bucketWidthMs = ProbeHistory.BUCKET_WIDTH_MS, bucketCount = 48) // production default width (~7min window).
+        assertInteriorBucketStable(bucketWidthMs = 60_000L, bucketCount = 30) // 30-minute window, the widest configurable.
+    }
+
+    /**
+     * One parameterization of the test above: builds a fully-packed, [bucketCount]-bucket-wide
+     * history at [bucketWidthMs] (one real sample per fixed slot, deterministic fail-every-5th
+     * pattern), then advances 30 further ticks checking that an interior, already-closed bucket's
+     * value never changes and always reports its own known outcome. See the `@Test` above for the
+     * full reasoning; this only parameterizes the width/count so it can be swept.
+     */
+    private fun assertInteriorBucketStable(bucketWidthMs: Long, bucketCount: Int) {
+        val stableWindowMs = bucketWidthMs * bucketCount
         fun succeededAt(i: Int) = i % 5 != 0 // deterministic, steady failure rate -- no real outage.
 
         // bucketCount + 1 samples, one full extra tick past a bare minimum warm-up, so the
         // retained span is exactly windowMs (not one pacing interval short of it) regardless of
         // how a given implementation decides "how full is full." steadyStateHistory here matters:
-        // without it, the very first sample recorded (i=1, t=1000) *is* this history's own
-        // warm-up anchor, so its own elapsed-since-anchor is trivially 0 forever -- it never
-        // "ages out" of warm-up no matter how much later real time passes elsewhere in the
-        // session, and stays in the display (and forces extra warm-up-width buckets into view)
-        // for as long as the configured window is wide enough to still include it. That's not
-        // what this test is about; steadyStateHistory keeps it purely a steady-state check.
+        // without it, the very first sample recorded (i=1) *is* this history's own warm-up
+        // anchor, so its own elapsed-since-anchor is trivially 0 forever -- it never "ages out"
+        // of warm-up no matter how much later real time passes elsewhere in the session, and
+        // stays in the display (and forces extra warm-up-width buckets into view) for as long as
+        // the configured window is wide enough to still include it. That's not what this test is
+        // about; steadyStateHistory keeps it purely a steady-state check.
         var history = steadyStateHistory(windowMs = stableWindowMs, bucketWidthMs = bucketWidthMs)
         for (i in 1..(bucketCount + 1)) {
-            val t = i * 1_000L
+            val t = i * bucketWidthMs
             history = if (succeededAt(i)) history.recordSuccess(t, latencyMs = 10) else history.recordFailure(t)
         }
         // The window is now fully packed: one real sample per fixed slot, plus one extra bucket
@@ -835,16 +854,17 @@ class ProbeHistoryTest {
         // bucket is a constant, uniform offset every tick (not a source of instability) -- the
         // tracked-index math below only cares about position *from the right edge*, which this
         // doesn't change.
-        assertEquals(bucketCount + 1, history.successSparkline(bucketWidthMs).size)
+        val label = "bucketWidthMs=$bucketWidthMs bucketCount=$bucketCount"
+        assertEquals(label, bucketCount + 1, history.successSparkline(bucketWidthMs).size)
 
         // Track the sample recorded at i = trackedI. At k ticks later it must sit exactly k
         // positions in from the right edge, still carrying its own known outcome.
-        val trackedI = 20
+        val trackedI = bucketCount / 2
         val trackedExpected = if (succeededAt(trackedI)) 1f else 0f
         var previousValue: Float? = null
 
         for (i in (bucketCount + 2)..(bucketCount + 31)) {
-            val t = i * 1_000L
+            val t = i * bucketWidthMs
             history = if (succeededAt(i)) history.recordSuccess(t, latencyMs = 10) else history.recordFailure(t)
 
             val k = i - trackedI // ticks since the tracked sample was recorded
@@ -857,14 +877,14 @@ class ProbeHistoryTest {
 
             val value = points[index].y!!
             assertEquals(
-                "tracked sample (i=$trackedI) must still report its own known outcome at tick i=$i",
+                "$label: tracked sample (i=$trackedI) must still report its own known outcome at tick i=$i",
                 trackedExpected,
                 value,
                 0.001f,
             )
             previousValue?.let { previous ->
                 assertEquals(
-                    "an interior, already-closed bucket's value must not change from one tick to the next",
+                    "$label: an interior, already-closed bucket's value must not change from one tick to the next",
                     previous,
                     value,
                     0.001f,
@@ -875,7 +895,7 @@ class ProbeHistoryTest {
 
         // The stability check above must have actually exercised multiple ticks, not vacuously
         // passed because the loop's range never satisfied its own guards.
-        assertNotNull(previousValue)
+        assertNotNull(label, previousValue)
     }
 
     // --- Full-coverage invariant: every windowed sample lands in exactly one displayed bucket ---
@@ -938,15 +958,49 @@ class ProbeHistoryTest {
         return warmupSlotBase - warmupLevels + testWarmupLevel(timestampMs - anchorMs, bucketWidthMs)
     }
 
+    /**
+     * The number of buckets [ProbeHistory.successSparkline] *should* display for [history] at
+     * [windowMs]/[bucketWidthMs], computed independently from the outside via the same slot
+     * arithmetic mirrored above -- the shared ground truth both the full-coverage test and the
+     * no-false-dips test below check their actual output against. Accounts for both reasons a
+     * slot can legitimately be missing from the displayed range: it sits entirely before the
+     * earliest windowed sample (ordinary leading-blank / narrower-window truncation), or it's an
+     * empty warm-up sub-bucket (see [ProbeHistory.successSparkline]'s own doc for why that's a
+     * second, distinct omission). A slot is expected to be displayed iff it holds a real sample
+     * or it's at/after both the earliest windowed sample's slot and the first slot warm-up could
+     * ever hand off to the ordinary grid.
+     */
+    private fun expectedDisplayedBucketCount(history: ProbeHistory, windowMs: Long, bucketWidthMs: Long): Int {
+        val anchorMs = history.samples.first().timestampMs
+        val newest = history.samples.last().timestampMs
+        // Mirrors windowedSamples' own documented cutoff rule exactly -- see its doc.
+        val cutoff = newest - windowMs
+        val windowed = history.samples.filter { it.timestampMs >= cutoff }
+        val earliestWindowedSlot = testBucketSlot(windowed.first().timestampMs, bucketWidthMs, anchorMs)
+        val newestSlot = testBucketSlot(newest, bucketWidthMs, anchorMs)
+        val naiveBucketCount = ((windowMs + bucketWidthMs - 1) / bucketWidthMs).coerceAtLeast(1L)
+        val leftmostSlot = minOf(newestSlot - naiveBucketCount + 1, earliestWindowedSlot)
+        val warmupSlotBase = testSuccessBucketSlot(anchorMs + bucketWidthMs + 1, bucketWidthMs)
+        val occupiedSlots = windowed.map { testBucketSlot(it.timestampMs, bucketWidthMs, anchorMs) }.toSet()
+        return (leftmostSlot..newestSlot).count { slot ->
+            slot in occupiedSlots || (slot >= earliestWindowedSlot && slot >= warmupSlotBase)
+        }
+    }
+
     @Test
     fun `every windowed sample lands in exactly one displayed bucket, at every tick of a running session`() {
-        // A sweep of window sizes and pacing intervals -- the same dimensions the independent
-        // Python port swept to find this bug, including two of the exact intervals it reported
-        // triggering on (60_000/200, 60_000/50); the slower intervals it also found triggering on
-        // (500/1_000/2_000) are exercised by the "no false dips" test group below instead, along
-        // with an equivalent full-coverage check that accounts for empty-warm-up-bucket omission.
-        val windowSizesMs = listOf(60_000L, 120_000L, 420_000L)
-        val intervalsMs = listOf(50L, 200L)
+        // A sweep of window sizes (from the narrowest up through 30 minutes -- the widest the
+        // settings screen's slider actually allows, UplinkPreferences.HISTORY_WINDOW_RANGE_MS)
+        // and pacing intervals from a fast 50ms up through a slow 1s, well past the app's own
+        // realistic pacing ceiling (UplinkPreferences.STEP_DELAY_RANGE_MS is 0-1000ms). This
+        // covers the same dimensions the independent Python port swept to find this bug,
+        // including two of the exact intervals it reported triggering on (60_000/200,
+        // 60_000/50), broadened with the reviewer's own wider ad hoc sweep (window sizes up to
+        // 30 minutes) in mind. [expectedDisplayedBucketCount] accounts for empty-warm-up-bucket
+        // omission too, so slower pacing (where a warm-up sub-bucket can legitimately be empty)
+        // no longer needs its own separate test group to stay correct here.
+        val windowSizesMs = listOf(60_000L, 120_000L, 420_000L, 900_000L, 30 * 60_000L)
+        val intervalsMs = listOf(50L, 200L, 1_000L)
 
         windowSizesMs.forEach { windowMs ->
             intervalsMs.forEach { intervalMs ->
@@ -963,21 +1017,12 @@ class ProbeHistoryTest {
                         history.recordFailure(t)
                     }
 
-                    val anchorMs = history.samples.first().timestampMs
-                    val newest = history.samples.last().timestampMs
-                    // Mirrors windowedSamples' own documented cutoff rule exactly -- see its doc.
-                    val cutoff = newest - windowMs
-                    val earliestWindowed = history.samples.first { it.timestampMs >= cutoff }.timestampMs
-
-                    val newestSlot = testBucketSlot(newest, bucketWidthMs, anchorMs)
-                    val earliestWindowedSlot = testBucketSlot(earliestWindowed, bucketWidthMs, anchorMs)
-                    val expectedSize = (newestSlot - earliestWindowedSlot + 1).toInt()
-
+                    val expectedSize = expectedDisplayedBucketCount(history, windowMs, bucketWidthMs)
                     val actualSize = history.successSparkline().size
                     assertEquals(
                         "windowMs=$windowMs intervalMs=$intervalMs tick=$i: successSparkline() returned " +
-                            "$actualSize points but the earliest windowed sample (t=$earliestWindowed) needs " +
-                            "$expectedSize to be fully covered -- real data would be silently dropped from the line",
+                            "$actualSize points but $expectedSize are needed for full coverage -- real data " +
+                            "would be silently dropped from the line",
                         expectedSize,
                         actualSize,
                     )
@@ -1020,10 +1065,13 @@ class ProbeHistoryTest {
         // inter-probe spacing runs roughly double that per the tracer's own ping/ping/fake cycle
         // structure, so this covers the app's full realistic pacing range, plus a fast interval
         // fine enough that no false dip should appear at all (a sanity check on the simulation
-        // itself, matching the independent reviewer's own "200ms: no false dips" finding).
-        val nominalIntervalsMs = listOf(200L, 500L, 1_000L, 2_000L)
+        // itself, matching the independent reviewer's own "200ms: no false dips" finding). The
+        // exact interval set mirrors the reviewer's own broader ad hoc sweep (200/400/500/750/
+        // 1000/1500/2000ms x 6 jitter seeds = 42 configs) that stress-tested this property before
+        // approving the fix, now captured here as permanent, repo-tracked coverage.
+        val nominalIntervalsMs = listOf(200L, 400L, 500L, 750L, 1_000L, 1_500L, 2_000L)
         val jitterFraction = 0.15
-        val seeds = 0..4
+        val seeds = 0..5
         val windowMs = 60_000L
 
         nominalIntervalsMs.forEach { intervalMs ->
@@ -1050,23 +1098,10 @@ class ProbeHistoryTest {
 
                     // The fix for the false dips must not reopen the full-coverage guarantee from
                     // the previous test group -- every windowed sample still has to land in
-                    // exactly one displayed bucket. Unlike that test group, an empty warm-up
-                    // sub-bucket is now *also* legitimately omitted (not just the leading run), so
-                    // the expected size below accounts for occupied slots directly rather than
-                    // assuming every slot in range is visible.
-                    val anchorMs = history.samples.first().timestampMs
-                    val newest = history.samples.last().timestampMs
-                    val cutoff = newest - windowMs
-                    val windowed = history.samples.filter { it.timestampMs >= cutoff }
-                    val earliestWindowedSlot = testBucketSlot(windowed.first().timestampMs, bucketWidthMs, anchorMs)
-                    val newestSlot = testBucketSlot(newest, bucketWidthMs, anchorMs)
-                    val naiveBucketCount = ((windowMs + bucketWidthMs - 1) / bucketWidthMs).coerceAtLeast(1L)
-                    val leftmostSlot = minOf(newestSlot - naiveBucketCount + 1, earliestWindowedSlot)
-                    val warmupSlotBase = testSuccessBucketSlot(anchorMs + bucketWidthMs + 1, bucketWidthMs)
-                    val occupiedSlots = windowed.map { testBucketSlot(it.timestampMs, bucketWidthMs, anchorMs) }.toSet()
-                    val expectedSize = (leftmostSlot..newestSlot).count { slot ->
-                        slot in occupiedSlots || (slot >= earliestWindowedSlot && slot >= warmupSlotBase)
-                    }
+                    // exactly one displayed bucket. Unlike that test group's own naive count, an
+                    // empty warm-up sub-bucket is now *also* legitimately omitted (not just the
+                    // leading run), which [expectedDisplayedBucketCount] accounts for directly.
+                    val expectedSize = expectedDisplayedBucketCount(history, windowMs, bucketWidthMs)
 
                     assertEquals(
                         "intervalMs=$intervalMs seed=$seed tick=$i (t=$t): full coverage must hold even " +
