@@ -458,9 +458,15 @@ data class ProbeHistory(
         val windowed = windowedSamples
         if (windowed.isEmpty()) return emptyList()
 
-        val layout = successBucketLayout(windowed.last().timestampMs, maxBuckets)
-        val bucketWidthMs = layout.bucketWidthMs
-        val leftmostSlot = layout.leftmostSlot
+        // Ceiling, not floor: guarantees maxBuckets * bucketWidthMs is never shorter than
+        // windowMs, so the displayed slots comfortably cover the same span windowedSamples
+        // already selected -- see successBucketSlot's doc for why a little slop either way is
+        // unavoidable regardless of rounding direction, and why ceiling is the safer one to bias
+        // toward (occasionally a hair more trailing history shown, never real recent-enough data
+        // silently missing from the line).
+        val bucketWidthMs = ((windowMs + maxBuckets - 1) / maxBuckets).coerceAtLeast(1L)
+        val newestSlot = successBucketSlot(windowed.last().timestampMs, bucketWidthMs)
+        val leftmostSlot = newestSlot - maxBuckets + 1
 
         val attempts = IntArray(maxBuckets)
         val successes = IntArray(maxBuckets)
@@ -527,76 +533,6 @@ data class ProbeHistory(
      */
     private fun successBucketSlot(timestampMs: Long, bucketWidthMs: Long): Long =
         Math.floorDiv(timestampMs - 1, bucketWidthMs)
-
-    /** The bucket width and displayed slot range [successSparkline] computes for a given
-     * [maxBuckets] and newest-displayed-sample timestamp -- factored out purely so every other
-     * function that needs the *same* bucket grid (today only [successBucketBoundaryFractions],
-     * a debug aid) reads it from this one place rather than re-deriving it, which would risk
-     * silently drifting out of sync with whatever [successSparkline] itself does. See
-     * [successSparkline]'s own doc for what each field means and why the width is rounded up. */
-    private data class SuccessBucketLayout(val bucketWidthMs: Long, val leftmostSlot: Long)
-
-    private fun successBucketLayout(newestTimestampMs: Long, maxBuckets: Int): SuccessBucketLayout {
-        val bucketWidthMs = ((windowMs + maxBuckets - 1) / maxBuckets).coerceAtLeast(1L)
-        val newestSlot = successBucketSlot(newestTimestampMs, bucketWidthMs)
-        return SuccessBucketLayout(bucketWidthMs = bucketWidthMs, leftmostSlot = newestSlot - maxBuckets + 1)
-    }
-
-    /**
-     * Debug aid: the raw, non-averaged outcome of every *displayed* real probe attempt (see
-     * [windowedSamples]) -- one point per sample, `y = 1f` on success and `y = 0f` on failure,
-     * `x` positioned by [windowFraction] exactly the way [latencySparkline] positions its own
-     * points. This exists purely so the per-sample data behind [successSparkline]'s bucketed
-     * average line can be seen directly, next to it, instead of trusted on code review and
-     * offline simulation alone -- see the git history around this function's introduction.
-     *
-     * Deliberately *not* built from [successSparkline]'s bucketed output, and deliberately the
-     * same per-sample cardinality and x-axis convention [latencySparkline] already uses, so the
-     * two are directly, visually comparable: same window, same horizontal scale, one raw dot per
-     * real attempt.
-     *
-     * Never emits a `null` [SparklinePoint.y] -- unlike [latencySparkline], every real attempt
-     * (success *or* failure) has a well-defined raw outcome to plot, so there is no gap concept
-     * here at all, matching [successSparkline]'s own "no gaps" rule.
-     */
-    fun rawSuccessPoints(): List<SparklinePoint> {
-        val windowed = windowedSamples
-        if (windowed.isEmpty()) return emptyList()
-        val newest = windowed.last().timestampMs
-        return windowed.map { sample ->
-            SparklinePoint(x = windowFraction(sample.timestampMs, newest), y = if (sample.succeeded) 1f else 0f)
-        }
-    }
-
-    /**
-     * Debug aid: the x-fraction (same window-anchored 0..1 axis [windowFraction] produces, and
-     * therefore directly comparable to [rawSuccessPoints]' own `x` values) of every boundary
-     * between adjacent buckets [successSparkline] currently uses for [maxBuckets] -- so the UI
-     * can draw the bucket grid itself as a set of tick marks, making bucket membership visible
-     * rather than only inferable from the bucketed line's shape.
-     *
-     * Derived from the exact same [successBucketLayout] (bucket width, slot range)
-     * [successSparkline] itself computes for the same [maxBuckets] and newest displayed sample --
-     * never a second, independently-maintained copy of that arithmetic, so this can't silently
-     * drift out of sync with what the bucketed line actually did if that logic changes.
-     *
-     * Includes every edge of every displayed bucket ([maxBuckets] + 1 boundaries, including the
-     * grid's own left and right edges), filtered to the visible `0f..1f` range the same way
-     * [markerFractions] filters its own out-of-window entries -- the ceiling-rounded bucket width
-     * (see [successBucketSlot]'s doc on the resulting slop) means the outermost edges can fall
-     * just outside the canvas, which is expected and simply omitted rather than clamped.
-     */
-    fun successBucketBoundaryFractions(maxBuckets: Int = DEFAULT_MAX_BUCKETS): List<Float> {
-        require(maxBuckets > 0) { "maxBuckets must be positive, was $maxBuckets" }
-        val windowed = windowedSamples
-        if (windowed.isEmpty()) return emptyList()
-        val newest = windowed.last().timestampMs
-        val layout = successBucketLayout(newest, maxBuckets)
-        return (0..maxBuckets).mapNotNull { i ->
-            val boundaryTimeMs = (layout.leftmostSlot + i) * layout.bucketWidthMs
-            windowFraction(boundaryTimeMs, newest).takeIf { it in 0f..1f }
-        }
-    }
 
     private fun appended(sample: ProbeSample): ProbeHistory = copy(samples = cappedSamples(samples + sample))
 
