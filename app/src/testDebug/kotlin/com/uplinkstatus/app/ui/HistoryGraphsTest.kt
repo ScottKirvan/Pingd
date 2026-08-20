@@ -65,14 +65,16 @@ class HistoryGraphsTest {
     // --- Nothing measured yet --------------------------------------------------------------
 
     @Test
-    fun `both cards are present from the start, so the feature is findable before any data`() {
+    fun `all three cards are present from the start, so the feature is findable before any data`() {
         setContent()
 
         composeTestRule.onNodeWithTag(TAG_HISTORY_GRAPHS).assertExists()
         composeTestRule.onNodeWithTag(TAG_PING_SUCCESS_CARD).assertExists()
         composeTestRule.onNodeWithTag(TAG_LATENCY_CARD).assertExists()
+        composeTestRule.onNodeWithTag(TAG_RAW_SUCCESS_DEBUG_CARD).assertExists()
         composeTestRule.onNodeWithText("Ping success").assertExists()
         composeTestRule.onNodeWithText("Latency").assertExists()
+        composeTestRule.onNodeWithText("Raw ping samples").assertExists()
     }
 
     @Test
@@ -83,26 +85,49 @@ class HistoryGraphsTest {
         // connection. Neither has happened -- nothing has.
         composeTestRule.onNodeWithTag(TAG_PING_SUCCESS_VALUE).assertTextEquals("—")
         composeTestRule.onNodeWithTag(TAG_LATENCY_VALUE).assertTextEquals("—")
+        composeTestRule.onNodeWithTag(TAG_RAW_SUCCESS_DEBUG_VALUE).assertTextEquals("—")
         composeTestRule.onAllNodesWithText("no probes yet").assertCountEquals(2)
     }
 
-    // --- Ping-success debug overlay (raw samples + bucket boundaries) ----------------------
+    // --- Raw-success debug card (temporary) -------------------------------------------------
+    //
+    // This card exists specifically because an earlier overlay-on-the-same-canvas version risked
+    // its debug data silently inheriting the ping-success card's bucket-width-dependent layout.
+    // These tests check the replacement genuinely avoids that: it is a separate card, and its
+    // big number/points come from ProbeHistory.rawSuccessPoints()/attemptCount, never from
+    // anything successSparkline() computes.
 
     @Test
-    fun `the ping-success card carries a debug caption -- the latency card does not`() {
+    fun `the raw debug card's caption names itself as a debug aid, distinct from the other two cards' caption`() {
         setContent()
 
-        // Exactly one instance -- this labels the ping-success card's raw-sample/bucket-boundary
-        // overlay specifically (see HistoryGraphs' own doc), not something both cards share.
-        composeTestRule.onNodeWithTag(TAG_PING_SUCCESS_DEBUG_CAPTION).assertExists()
+        seed(count = 31) // "last 30 seconds", same span both other cards show
+        composeTestRule.waitForIdle()
+
+        // Exactly two cards show the plain span text -- the debug card's own caption wraps it
+        // with a "debug:" prefix instead of repeating it verbatim.
+        composeTestRule.onAllNodesWithText("last 30 seconds").assertCountEquals(2)
+        composeTestRule.onNodeWithText("debug: raw samples, no bucketing — last 30 seconds").assertExists()
     }
 
     @Test
-    fun `the debug overlay renders without crashing across empty, sparse, and dense histories`() {
-        // No dedicated assertion beyond "it composed" -- Canvas-drawn content (the raw dots and
-        // bucket ticks) isn't inspectable through Compose's semantics tree the way text is. This
-        // exists to catch a crash from, e.g., an out-of-range fraction or a mismatched point
-        // count between rawSuccessPoints() and the bucketed line, across the full range of shapes
+    fun `the raw debug card's big number is the raw attempt count, not the bucketed success percentage`() {
+        setContent()
+
+        seed(count = 10, failures = 2)
+        composeTestRule.waitForIdle()
+
+        // Ping success card: 80% (bucketed). Debug card: 10 (raw attempt count) -- genuinely
+        // different numbers computed from genuinely different ProbeHistory members.
+        composeTestRule.onNodeWithTag(TAG_PING_SUCCESS_VALUE).assertTextEquals("80%")
+        composeTestRule.onNodeWithTag(TAG_RAW_SUCCESS_DEBUG_VALUE).assertTextEquals("10")
+    }
+
+    @Test
+    fun `the raw debug card renders without crashing across empty, sparse, and dense histories`() {
+        // No dedicated assertion beyond "it composed" -- Canvas-drawn content (the raw dots)
+        // isn't inspectable through Compose's semantics tree the way text is. This exists to
+        // catch a crash from, e.g., an out-of-range fraction, across the full range of shapes
         // that data can take.
         setContent()
         composeTestRule.waitForIdle() // empty history
@@ -114,12 +139,12 @@ class HistoryGraphsTest {
         repeat(200) {
             UplinkProbeHistory.recordSuccess(latencyMs = 10, timestampMs = (index++) * 150L)
         }
-        composeTestRule.waitForIdle() // dense burst, many raw points per bucket
+        composeTestRule.waitForIdle() // dense burst, many raw points
 
         UplinkProbeHistory.recordMasterToggleTransition(timestampMs = (index++) * 150L)
         composeTestRule.waitForIdle() // alongside a marker too
 
-        composeTestRule.onNodeWithTag(TAG_PING_SUCCESS_CARD).assertExists()
+        composeTestRule.onNodeWithTag(TAG_RAW_SUCCESS_DEBUG_CARD).assertExists()
     }
 
     // --- Live values -------------------------------------------------------------------------
