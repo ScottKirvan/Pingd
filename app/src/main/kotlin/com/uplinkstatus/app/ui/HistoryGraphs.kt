@@ -49,13 +49,6 @@ const val TAG_LATENCY_VALUE = "settings_latency_value"
 const val TAG_LATENCY_SPARKLINE = "settings_latency_sparkline"
 const val TAG_HISTORY_RESET_BUTTON = "settings_history_reset_button"
 
-/** Marks the temporary synthetic-latency debug card -- see [HistoryGraphs]' own doc on why it
- * exists. A dedicated tag so it's trivial to find (and, later, strip) independent of its exact
- * wording. */
-const val TAG_SYNTHETIC_LATENCY_DEBUG_CARD = "settings_synthetic_latency_debug_card"
-const val TAG_SYNTHETIC_LATENCY_DEBUG_VALUE = "settings_synthetic_latency_debug_value"
-const val TAG_SYNTHETIC_LATENCY_DEBUG_SPARKLINE = "settings_synthetic_latency_debug_sparkline"
-
 /** What a card's big number shows when there is genuinely nothing to show — an em dash, not a
  * zero, for the same reason [ProbeHistory.successPercent] is null rather than 0 before the
  * first probe. */
@@ -99,12 +92,12 @@ private val PING_SUCCESS_SWEEP_START = Color(0xFF3B82F6) // blue
 private val PING_SUCCESS_SWEEP_MID = Color(0xFF8B5CF6) // violet
 private val PING_SUCCESS_SWEEP_END = Color(0xFFEC4899) // pink
 
-/** The synthetic-latency debug line's color where it's drawn overlaid on the ping-success
- * card's own canvas (see [Sparkline]'s `overlayPoints` doc) -- white, so it reads as a distinct
- * layer against the ping-success line's own blue/violet/pink sweep regardless of where on that
- * sweep it crosses, and at a low alpha so the overlay stays visually secondary to the card's own
- * data rather than competing with it. */
-private val SYNTHETIC_LATENCY_OVERLAY_COLOR = Color.White.copy(alpha = 0.3f)
+/** The raw-ping debug line's color where it's drawn overlaid on the ping-success card's own
+ * canvas (see [Sparkline]'s `overlayPoints` doc) -- white, so it reads as a distinct layer
+ * against the ping-success line's own blue/violet/pink sweep regardless of where on that sweep
+ * it crosses, and at a low alpha so the overlay stays visually secondary to the card's own data
+ * rather than competing with it. */
+private val RAW_PING_OVERLAY_COLOR = Color.White.copy(alpha = 0.3f)
 
 /** Turns a raw latency into a point on the [LATENCY_COLOR_FAST]→[LATENCY_COLOR_MID]→
  * [LATENCY_COLOR_SLOW] scale, via [latencyColorFraction]'s pure threshold math -- the only place
@@ -160,17 +153,15 @@ private sealed interface SparklineColoring {
  * not a notification. What changes is what they *say* — "no probes yet" and an em dash, never
  * a placeholder number.
  *
- * ### Synthetic-latency debug card (temporary)
- * A third, separate card follows the two above, for debugging whether the ping-success and
- * latency graphs genuinely track the same timeline sample-for-sample: it reuses the latency
- * card's own rendering exactly (see [ProbeHistory.syntheticLatencySparkline]'s doc for why),
- * substituting a fixed synthetic latency for every real attempt's actual measurement -- fast
- * (60ms) on success, slow (900ms) on failure -- rather than a second, independently-written
- * rendering path prone to drifting out of sync with the real latency graph. Deliberately reuses
- * that exact rendering path unmodified, so a correct rendering visibly scrolls in lockstep with
- * the real latency card beside it, at exactly the same x-axis positions
- * [ProbeHistory.latencySparkline] already places its own points at. This is a debugging aid, not
- * a permanent user-facing feature -- safe to remove once that work is done.
+ * ### Raw-ping overlay (temporary)
+ * The ping-success card's own canvas also carries a second, translucent line -- see
+ * [Sparkline]'s `overlayPoints` doc and [ProbeHistory.rawPingSparkline]'s doc for what it plots
+ * and why. It exists to make the ping-success line's own nature visible: that line is a rolling
+ * *average*, and without something to contrast it against, a glance can misread a partial dip as
+ * "some fraction of pings are getting through" rather than "the recent success rate dipped." The
+ * raw per-attempt overlay -- sharp jumps between two fixed heights, one per real attempt --
+ * makes the smoothing visible by contrast. This is a debugging/clarity aid, not a permanent
+ * user-facing feature -- safe to remove once it's no longer needed.
  */
 @Composable
 fun HistoryGraphs(modifier: Modifier = Modifier) {
@@ -183,10 +174,9 @@ fun HistoryGraphs(modifier: Modifier = Modifier) {
 
     val pingSuccessValue = history.successPercent?.let { "${it.roundToInt()}%" } ?: NO_VALUE
     val latencyValue = history.averageLatencyMs?.let { "$it ms" } ?: NO_VALUE
-    val syntheticLatencyValue = if (history.attemptCount == 0) NO_VALUE else history.attemptCount.toString()
 
-    // Every card's sparkline needs the exact same width, so the same moment in time lands at
-    // the same physical position on all three graphs, not just the same x fraction. A hardcoded
+    // Both cards' sparklines need the exact same width, so the same moment in time lands at
+    // the same physical position on both graphs, not just the same x fraction. A hardcoded
     // dp guess can't provide that reliably -- it's calibrated against one language's strings at
     // one font scale, and silently stops fitting the moment either changes (a longer
     // translation, a larger accessibility text size). SubcomposeLayout measures the real text
@@ -194,8 +184,8 @@ fun HistoryGraphs(modifier: Modifier = Modifier) {
     // and uses the widest result -- so the shared width is always derived from what the device
     // is actually showing, never guessed.
     SubcomposeLayout(modifier = modifier.fillMaxWidth().testTag(TAG_HISTORY_GRAPHS)) { incoming ->
-        // Pass 1 (measurement only, never placed): stack all three cards' text columns inside
-        // one Column with no width constraint of its own. A Column's width is the max of its
+        // Pass 1 (measurement only, never placed): stack both cards' text columns inside one
+        // Column with no width constraint of its own. A Column's width is the max of its
         // children's, and each child here is itself a Column sized to its own widest line, so
         // the outer Column's resolved width is exactly "the widest single line, across every
         // title/value/caption on every card" -- the one number this whole layout needs.
@@ -208,11 +198,6 @@ fun HistoryGraphs(modifier: Modifier = Modifier) {
             Column(modifier = Modifier.clearAndSetSemantics {}) {
                 HistoryCardTextColumn(title = "Ping success", value = pingSuccessValue, caption = caption)
                 HistoryCardTextColumn(title = "Latency", value = latencyValue, caption = caption)
-                HistoryCardTextColumn(
-                    title = "Synthetic latency",
-                    value = syntheticLatencyValue,
-                    caption = caption,
-                )
             }
         }.first().measure(Constraints()).width.toDp()
 
@@ -244,10 +229,9 @@ fun HistoryGraphs(modifier: Modifier = Modifier) {
                     valueTag = TAG_PING_SUCCESS_VALUE,
                     sparklineTag = TAG_PING_SUCCESS_SPARKLINE,
                     textColumnWidth = textColumnWidth,
-                    // Temporary: the synthetic-latency debug line, overlaid directly on this
-                    // card's own canvas -- see Sparkline's `overlayPoints` doc. Still drawn on
-                    // the separate "Synthetic latency" card below too; this doesn't replace it.
-                    overlayPoints = history.syntheticLatencySparkline(),
+                    // Temporary: the raw-ping debug line, overlaid directly on this card's own
+                    // canvas -- see HistoryGraphs' and Sparkline's own docs.
+                    overlayPoints = history.rawPingSparkline(),
                 )
                 HistoryGraphCard(
                     title = "Latency",
@@ -268,26 +252,6 @@ fun HistoryGraphs(modifier: Modifier = Modifier) {
                     cardTag = TAG_LATENCY_CARD,
                     valueTag = TAG_LATENCY_VALUE,
                     sparklineTag = TAG_LATENCY_SPARKLINE,
-                    textColumnWidth = textColumnWidth,
-                )
-                // Temporary debug card -- see HistoryGraphs' own doc for why it exists and why
-                // it reuses the latency card's exact rendering rather than a new one.
-                HistoryGraphCard(
-                    title = "Synthetic latency",
-                    value = syntheticLatencyValue,
-                    caption = caption,
-                    points = history.syntheticLatencySparkline(),
-                    markers = markers,
-                    // Colored by the same fixed green/yellow/red scale as the real latency
-                    // card, from the same synthetic latencyMs each point already carries --
-                    // see ProbeHistory.syntheticLatencySparkline's doc.
-                    coloring = SparklineColoring.ByValue { point ->
-                        point.latencyMs?.let(::latencyColor) ?: LATENCY_COLOR_MID
-                    },
-                    gapColor = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = GAP_SHADE_ALPHA),
-                    cardTag = TAG_SYNTHETIC_LATENCY_DEBUG_CARD,
-                    valueTag = TAG_SYNTHETIC_LATENCY_DEBUG_VALUE,
-                    sparklineTag = TAG_SYNTHETIC_LATENCY_DEBUG_SPARKLINE,
                     textColumnWidth = textColumnWidth,
                 )
                 Row(
@@ -361,9 +325,9 @@ private fun HistoryGraphCard(
     valueTag: String,
     sparklineTag: String,
     textColumnWidth: Dp,
-    // Empty for every card except ping-success, whose canvas the synthetic-latency debug line
-    // is drawn onto -- see Sparkline's own doc for why this stays a translucent overlay on the
-    // existing canvas rather than a second Canvas stacked on top.
+    // Empty for every card except ping-success, whose canvas the raw-ping debug line is drawn
+    // onto -- see Sparkline's own doc for why this stays a translucent overlay on the existing
+    // canvas rather than a second Canvas stacked on top.
     overlayPoints: List<SparklinePoint> = emptyList(),
 ) {
     Card(modifier = Modifier.fillMaxWidth().testTag(cardTag)) {
@@ -441,7 +405,7 @@ private data class PlottedPoint(val offset: Offset, val source: SparklinePoint)
  * to disagree with the numbers above it.
  *
  * [overlayPoints], when non-empty, draws a second line on this same `Canvas`, on top of
- * everything above -- a translucent, fixed-color ([SYNTHETIC_LATENCY_OVERLAY_COLOR]) connected
+ * everything above -- a translucent, fixed-color ([RAW_PING_OVERLAY_COLOR]) connected
  * line, positioned by the exact same `x`/`y` -> pixel mapping [points] itself uses, since both
  * already share the same 0..1 unit-square convention [ProbeHistory] produces (see that class's
  * own doc). No separate scaling step, and no second `Canvas`: a genuinely separate `Canvas`
@@ -509,7 +473,7 @@ private fun Sparkline(
         // Drawn last, on top of everything above -- see this function's own doc.
         if (overlayPoints.isNotEmpty()) {
             plottedSegments(overlayPoints, size, inset, usableHeight).forEach { segment ->
-                drawFlatColorSegment(segment, SYNTHETIC_LATENCY_OVERLAY_COLOR, stroke)
+                drawFlatColorSegment(segment, RAW_PING_OVERLAY_COLOR, stroke)
             }
         }
     }
