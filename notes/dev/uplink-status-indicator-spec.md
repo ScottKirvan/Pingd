@@ -323,14 +323,48 @@ started checking yet" as "actively failing," which is a worse,
 more misleading result than the shaded-gap flicker this simplification
 replaces.
 
-The success line's bucket *count* grows with how much of the configured
-window real elapsed time has covered, up to a fixed ceiling (48
-buckets) — a pure function of elapsed time, deliberately blind to how
-many real attempts back any given bucket. This resolution question is
-independent of the no-gaps rule above: whatever the bucket count, a
-zero-attempt bucket (other than the pre-first-sample exception) is
-always a miss now, never a decision about whether the silence behind it
-was "genuine."
+The success line divides the configured window into up to 48 buckets,
+each a **fixed, absolute slot of wall-clock time** — not a fraction of
+distance from "now." A real sample's bucket is a permanent fact about
+that sample's own timestamp, unaffected by when the line happens to be
+redrawn. This replaced an earlier version that instead measured each
+sample's position as a fraction of distance from the newest retained
+sample and multiplied that fraction by the bucket count to get an
+index — boundaries defined that way are, in effect, anchored to "now,"
+which advances on every single new sample, so a sample sitting near a
+boundary could flip to a neighboring bucket on almost any tick purely
+because time passed, with nothing about the connection actually
+changing. Since a bucket's displayed value is a discrete average over a
+handful of real samples, one sample migrating in or out could swing
+that bucket's percentage sharply and instantly — reported on-device as
+the whole line "reshaping" every tick instead of scrolling, worse at
+narrow windows and slow ping-pacing settings where each bucket has
+fewer samples behind it, and confirmed by porting the exact old
+algorithm into a standalone simulation: single-tick swings of tens of
+percentage points in a bucket with nothing real going on, up to 100
+points at narrow-window/slow-pacing settings. Binning by a fixed
+absolute slot instead means a bucket's membership is a pure function of
+*which real samples exist* — a bucket safely in the interior of the
+display (not the live bucket still accumulating samples, and not within
+one bucket-width of aging off the window's trailing edge) is therefore
+provably frozen once no more samples can land in it, confirmed by a
+swept simulation of window sizes and ping-pacing settings producing
+zero value changes in any such bucket.
+
+The success line's bucket *count* no longer varies at all — it's always
+the full 48, and how many of those fixed slots actually have real
+attempts behind them is a separate question the no-gaps/pre-first-sample
+rules above already answer. An earlier version instead grew the bucket
+count itself with how much of the window real elapsed time had covered,
+specifically to avoid scattering a handful of early-session samples
+across mostly-empty buckets — that growing-resolution behavior is now a
+side effect of the pre-first-sample rule alone: early in a session, most
+of the 48 fixed slots simply sit before the first real sample and are
+omitted, so only the few slots with real data behind them get drawn, with
+no separate mechanism needed to shrink the bucket count itself. Whatever
+that leaves visible, a zero-attempt bucket (other than the
+pre-first-sample exception) is always a miss, never a decision about
+whether the silence behind it was "genuine."
 
 Both sparklines' time axis is anchored to the *configured window*, not
 stretched to fill from whatever span of samples happens to be displayed

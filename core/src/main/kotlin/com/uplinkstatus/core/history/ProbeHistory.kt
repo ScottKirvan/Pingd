@@ -350,25 +350,58 @@ data class ProbeHistory(
 
     /**
      * The success-rate trend: the *configured window* — not just the currently retained span,
-     * see [windowFraction] — cut into equal time buckets, each carrying the fraction of that
-     * bucket's attempts that succeeded (0..1 — an absolute scale, not autoscaled, since a
-     * percentage means something on its own).
+     * see [windowFraction] — cut into up to [maxBuckets] equal-width time buckets, each carrying
+     * the fraction of that bucket's attempts that succeeded (0..1 — an absolute scale, not
+     * autoscaled, since a percentage means something on its own).
      *
      * Bucketed rather than one point per sample because a per-sample success line can only
      * ever be 0 or 1 — a square wave that says nothing about the *rate*, which is the whole
-     * point of this graph. Bucket *resolution* — how many points the line is drawn from — is
-     * governed by [bucketCount] and grows with real elapsed time only (see its own doc).
+     * point of this graph.
+     *
+     * ### Buckets are fixed, absolute slots of wall-clock time — not fractions of "now"
+     * A sample's bucket is a plain integer slot number in absolute time, permanently fixed for
+     * that sample's timestamp (see [successBucketSlot]). This replaced an earlier version that
+     * instead measured each sample's position as a *fraction of distance from `newest`*
+     * ([windowFraction]) and multiplied that fraction by the bucket count to get an index. That
+     * scheme's boundaries were, in effect, anchored to `newest` — which advances on every single
+     * new sample — so a sample sitting near a boundary could flip from one bucket to its
+     * neighbor on almost any tick purely because "now" moved forward slightly, with nothing
+     * about the connection actually changing. Since each bucket's displayed value is a discrete
+     * average over a handful of real samples, one sample migrating in or out could swing that
+     * bucket's percentage sharply and instantly — on-device this showed up as the whole line
+     * "reshaping" on every tick instead of scrolling, worse at narrow windows and slow
+     * ping-pacing settings (fewer samples per bucket, so migration hits harder) and confirmed by
+     * porting the exact old algorithm into a standalone simulation: single-tick swings of tens
+     * of percentage points in a bucket that had nothing real change about it, up to 100 points
+     * at narrow-window/slow-pacing settings. Binning by an absolute slot number instead means a
+     * bucket's membership is a pure function of *which real samples exist*, never of when the
+     * line happens to be redrawn — a closed bucket's value is provably frozen once no more
+     * samples can land in it (also confirmed by simulation: a swept range of window sizes,
+     * pacing intervals, and non-round window/bucket-count combinations produced zero value
+     * changes in any interior, already-closed bucket).
+     *
+     * The *displayed* range is the [maxBuckets] slots ending at the slot containing [windowed]'s
+     * newest sample — the same "anchored to newest, not stretched to fill the displayed span"
+     * axis convention [windowFraction] already documents, just applied to fixed slot numbers.
+     * Only the **live** slot (still receiving new samples every tick) and the trailing slot (as
+     * it loses individual samples aging past [windowMs], or drops out of the displayed range
+     * entirely once a newer slot pushes it out) legitimately change from one call to the next —
+     * that is ordinary scrolling, not the bug this replaced.
+     *
+     * A fixed grid can't always land exactly on an arbitrary, continuously-advancing `newest`:
+     * up to one bucket-width of the true trailing edge can occasionally fall just outside the
+     * displayed slots (see [successBucketSlot]'s doc for why, and why that's an unavoidable
+     * property of *any* fixed grid, not a bug specific to this one). That's a one-time, bounded
+     * boundary artifact — never a source of the value drift this design exists to eliminate.
      *
      * A bucket with zero real attempts in it is treated exactly like a bucket whose attempts
      * all failed: `y = 0f`, plotted as a dip and connected normally to its neighbors. There is
-     * deliberately no shaded/broken "gap" concept on this graph any more — a period with no
-     * real attempts is, from the user's point of view, indistinguishable from a period that was
-     * actively failing, and this graph now says so plainly instead of drawing a visual
-     * distinction between the two. (An earlier version of this method tried to tell a "genuine
-     * gap" apart from a bucket-grid "quantization artifact" and shade only the former; that
-     * distinction is gone. [sparklineGapFractions] still legitimately shades gaps on the
-     * separate latency graph, which is unaffected by this and still produces real per-sample
-     * `null` points for a failed probe.)
+     * deliberately no shaded/broken "gap" concept on this graph — a period with no real attempts
+     * is, from the user's point of view, indistinguishable from a period that was actively
+     * failing, and this graph says so plainly instead of drawing a visual distinction between
+     * the two. ([sparklineGapFractions] still legitimately shades gaps on the separate latency
+     * graph, which is unaffected by any of this and still produces real per-sample `null` points
+     * for a failed probe.)
      *
      * The one exception is the **leading** run of buckets before the very first real sample
      * recorded anywhere in the displayed window — those are omitted from the returned list
@@ -379,70 +412,94 @@ data class ProbeHistory(
      * failing," a worse, more misleading result than treating a real mid-session silence as a
      * miss. Concretely: a fresh app install would otherwise show a 0%-flatline stretching
      * across nearly the entire configured window with only a sliver of real data at the right
-     * edge, which is both false and ugly.
+     * edge, which is both false and ugly. This same rule is also what gives the line its
+     * "resolution grows with real elapsed time" appearance early in a session, now without any
+     * separate bucket-count-growing logic: early on, most of the [maxBuckets] fixed slots simply
+     * fall before the first real sample and are omitted, so only the few slots that do have real
+     * data get drawn — an earlier version grew the bucket count itself for the same visual
+     * effect, which is no longer needed once bucket boundaries are fixed rather than recomputed
+     * every call (see git history for that removed `bucketCount` method).
      */
     fun successSparkline(maxBuckets: Int = DEFAULT_MAX_BUCKETS): List<SparklinePoint> {
         require(maxBuckets > 0) { "maxBuckets must be positive, was $maxBuckets" }
         val windowed = windowedSamples
         if (windowed.isEmpty()) return emptyList()
 
-        val buckets = bucketCount(maxBuckets)
-        val attempts = IntArray(buckets)
-        val successes = IntArray(buckets)
-        val newest = windowed.last().timestampMs
+        // Ceiling, not floor: guarantees maxBuckets * bucketWidthMs is never shorter than
+        // windowMs, so the displayed slots comfortably cover the same span windowedSamples
+        // already selected -- see successBucketSlot's doc for why a little slop either way is
+        // unavoidable regardless of rounding direction, and why ceiling is the safer one to bias
+        // toward (occasionally a hair more trailing history shown, never real recent-enough data
+        // silently missing from the line).
+        val bucketWidthMs = ((windowMs + maxBuckets - 1) / maxBuckets).coerceAtLeast(1L)
+        val newestSlot = successBucketSlot(windowed.last().timestampMs, bucketWidthMs)
+        val leftmostSlot = newestSlot - maxBuckets + 1
 
-        // coerceIn also covers buckets == 1: every fraction lands in the only bucket, index 0.
-        // windowFraction never divides by zero (windowMs is always positive).
-        fun bucketIndex(timestampMs: Long) =
-            (windowFraction(timestampMs, newest) * buckets).toInt().coerceIn(0, buckets - 1)
-
+        val attempts = IntArray(maxBuckets)
+        val successes = IntArray(maxBuckets)
         windowed.forEach { sample ->
-            val index = bucketIndex(sample.timestampMs)
-            attempts[index]++
-            if (sample.succeeded) successes[index]++
+            val index = (successBucketSlot(sample.timestampMs, bucketWidthMs) - leftmostSlot).toInt()
+            if (index in 0 until maxBuckets) {
+                attempts[index]++
+                if (sample.succeeded) successes[index]++
+            }
         }
 
         // Samples are appended in timestamp order, so the first one is the earliest real
-        // attempt anywhere in the displayed window -- everything in an earlier bucket is
-        // session warm-up, not a miss.
-        val firstSampleBucket = bucketIndex(windowed.first().timestampMs)
+        // attempt anywhere in the displayed window -- everything in an earlier slot is session
+        // warm-up, not a miss. Clamped into range for the same reason the per-sample index above
+        // is dropped when out of range: a first sample can, in the fixed-grid boundary case
+        // successBucketSlot's doc describes, resolve to a slot just left of the displayed range.
+        val firstSampleIndex = (successBucketSlot(windowed.first().timestampMs, bucketWidthMs) - leftmostSlot)
+            .toInt().coerceIn(0, maxBuckets - 1)
 
-        return (0 until buckets).mapNotNull { index ->
-            val x = if (buckets == 1) 1f else index.toFloat() / (buckets - 1)
+        return (0 until maxBuckets).mapNotNull { index ->
+            val x = if (maxBuckets == 1) 1f else index.toFloat() / (maxBuckets - 1)
             when {
                 attempts[index] > 0 -> SparklinePoint(x = x, y = successes[index].toFloat() / attempts[index])
-                index < firstSampleBucket -> null // before the first real sample -- warm-up, leave blank.
+                index < firstSampleIndex -> null // before the first real sample -- warm-up, leave blank.
                 else -> SparklinePoint(x = x, y = 0f) // no attempts here: treated exactly like a miss.
             }
         }
     }
 
     /**
-     * How many time buckets [successSparkline] divides the window into: grows with how much of
-     * the window real elapsed time has actually covered ([spanMs] relative to [windowMs]), not
-     * with how many attempts have been recorded.
+     * Which fixed, absolute-time bucket [successSparkline] assigns [timestampMs] to, given a
+     * bucket width of [bucketWidthMs]: an integer slot number for the half-open-on-the-left,
+     * closed-on-the-right interval `(slot * bucketWidthMs, (slot + 1) * bucketWidthMs]`. A given
+     * `(timestampMs, bucketWidthMs)` pair always produces the same slot, forever — that
+     * stability is the entire point (see [successSparkline]'s doc for why).
      *
-     * The earlier version of this scaled with `samples.size` instead — tying it to attempt
-     * *count* rather than *elapsed time* meant the bucket count (and therefore every bucket's
-     * boundaries) changed on essentially every single recorded sample, since retained count
-     * fluctuates with pacing and failure-retry bursts even when almost no real time has passed.
-     * A bucket already drawn on screen would silently get recomputed from a different slice of
-     * samples a moment later — visible on-device as the newest end of the line "bouncing" and
-     * already-plotted dips readjusting with each new sample. Elapsed time only moves forward
-     * (and, once the window is genuinely full, stops changing this at all — see [spanMs]), so
-     * boundaries here are stable between any two samples taken close together, exactly the cases
-     * that used to reshuffle. A later revision briefly *also* capped this by real sample count,
-     * as a way to keep resolution from outrunning sample density — that was reverted: capping by
-     * a count that itself grows by one on almost every sample reintroduces a milder version of
-     * the exact same reshuffling this elapsed-time-only formula exists to avoid. This stays a
-     * pure function of elapsed time, deliberately blind to how much real data backs any given
-     * bucket — [successSparkline] itself is what now decides what an empty bucket means (a
-     * miss, or session warm-up), not this method.
+     * The interval is closed on the *right*, not the left, specifically so [successSparkline]
+     * can run `newest` itself through this same function to find which slot anchors the
+     * displayed range, with no separate case for it: if `newest` ever lands exactly on a
+     * multiple of [bucketWidthMs], it must resolve to the slot that already covers the instant
+     * before it (the slot the rest of "right now" belongs to), not a fresh slot of its own that
+     * no earlier sample could ever have landed in. Getting this backwards (closed on the left)
+     * was tried first and failed a constructed test where `newest` fell exactly on a bucket
+     * boundary: the newest slot ended up one further right than intended, which pushed the
+     * displayed range's left edge past the start of an otherwise fully in-window real data
+     * cluster and dropped it from the line entirely, even though [windowedSamples] still counted
+     * it in [attemptCount]/[successPercent].
+     *
+     * That fix narrows, but can't fully close, a gap inherent to *any* fixed grid: because
+     * [windowMs] need not be a multiple of [bucketWidthMs], and because `newest` can fall
+     * anywhere within its own slot's interval rather than always at a convenient edge, the
+     * displayed slots can cover very slightly more or less than exactly [windowMs] of trailing
+     * history, and in the worst case up to just under one
+     * [bucketWidthMs] of the true trailing edge can fall outside every displayed slot and get
+     * silently dropped by the `index in 0 until maxBuckets` guards in [successSparkline]. This
+     * is a one-time, bounded boundary artifact — not the value-drift bug fixed-slot binning
+     * exists to eliminate, which was about already-plotted *interior* buckets changing on every
+     * tick. No fixed grid can eliminate it outright without reintroducing that drift (boundaries
+     * would have to move with `newest` to always fit exactly, which is exactly what caused the
+     * original bug) — [successSparkline] rounds [bucketWidthMs] up (never down) specifically to
+     * keep this gap as small as it can be while still choosing the safer failure direction: an
+     * occasional sliver of extra old history shown, never real recent-enough data quietly
+     * missing from the line.
      */
-    private fun bucketCount(maxBuckets: Int): Int {
-        val coveredFraction = (spanMs.toFloat() / windowMs).coerceIn(0f, 1f)
-        return (coveredFraction * maxBuckets).toInt().coerceIn(1, maxBuckets)
-    }
+    private fun successBucketSlot(timestampMs: Long, bucketWidthMs: Long): Long =
+        Math.floorDiv(timestampMs - 1, bucketWidthMs)
 
     private fun appended(sample: ProbeSample): ProbeHistory = copy(samples = cappedSamples(samples + sample))
 
