@@ -380,6 +380,22 @@ as stable a basis as a pinned 48 used to be. None of this is a
 performance concern: this is small-array arithmetic on the main/UI
 thread from Compose state, not a hot path at any of these sizes.
 
+Whatever that count comes out to, the display is guaranteed to reach
+back far enough to cover every real sample the window is currently
+showing — every retained sample the "Ping success (%)" big number and
+`attemptCount` already count toward the percentage is also represented
+in exactly one displayed bucket, unconditionally. (An interim version
+of this guarantee tried to special-case only the session-warm-up part
+of this problem, by comparing raw slot numbers to decide whether a
+correction was needed — a comparison that was a false negative exactly
+at the boundary it existed to detect, and repeatedly dropped real
+warm-up-era data from the line for a substantial stretch of ticks in
+ordinary use, confirmed by an independent simulation sweeping window
+sizes and pacing intervals. The fix that shipped instead is
+unconditional: the display's left edge is always at least as far back
+as the earliest currently-windowed sample's own bucket, full stop, with
+no threshold to get wrong.)
+
 How many of a display's fixed slots actually have real attempts behind
 them is a separate question the no-gaps/pre-first-sample rules above
 already answer. An earlier version grew the bucket count itself with

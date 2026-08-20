@@ -427,13 +427,19 @@ data class ProbeHistory(
      * + 1`) implicitly assumes every slot is exactly [bucketWidthMs] wide, which is only true
      * once warm-up has ended. Left unchanged, that arithmetic would under-cover real elapsed
      * time whenever the displayed range dips into the narrower warm-up slots — silently dropping
-     * real, in-window data recorded during warm-up from the line entirely. This is detected by
-     * checking whether the naive left edge would reach warm-up territory at all; only then is it
-     * replaced with the left edge computed directly from the configured window's own real-time
-     * cutoff (clamped so it never reaches earlier than the session's true first sample), which
-     * correctly accounts for the narrower slots. Everywhere else — the entire steady-state case
-     * this class's own bucket-stability tests already cover — that check is false and the
-     * original slot-count arithmetic runs completely unchanged.
+     * real, in-window data recorded during warm-up from the line entirely, even though
+     * [windowedSamples] still counts it in [attemptCount]/[successPercent]. The fix is not a
+     * check for "are we near warm-up" (an earlier version compared raw slot *numbers* across the
+     * warm-up/ordinary boundary for that, which is unreliable exactly at the boundary itself and
+     * repeatedly under-counted on a real running session, not just in a rare corner case) — it's
+     * the actual invariant this display must satisfy regardless of warm-up: every sample in
+     * [windowed] has to land in some displayed bucket. Because [bucketSlot] is monotonic in
+     * timestamp, [windowed]'s own earliest retained sample always has the smallest slot number of
+     * anything in [windowed], so the left edge is simply clamped to never sit later (a larger
+     * slot number) than that sample's own slot — see the `minOf` below. Everywhere outside
+     * warm-up that clamp is a no-op (the naive slot-count edge is already at or before it, the
+     * steady-state case this class's own bucket-stability tests cover), so nothing about ordinary
+     * ticks changes.
      *
      * The *displayed* range is these buckets ending at the slot containing [windowed]'s newest
      * sample — the same "anchored to newest, not stretched to fill the displayed span" axis
@@ -443,11 +449,14 @@ data class ProbeHistory(
      * entirely once a newer slot pushes it out) legitimately change from one call to the next —
      * that is ordinary scrolling, not the bug this replaced.
      *
-     * A fixed grid can't always land exactly on an arbitrary, continuously-advancing `newest` —
-     * up to one bucket-width of the true trailing edge can occasionally fall just outside the
-     * displayed slots (see [successBucketSlot]'s doc for why, and why that's an unavoidable
-     * property of *any* fixed grid, not a bug specific to this one). That's a one-time, bounded
-     * boundary artifact — never a source of the value drift this design exists to eliminate.
+     * A fixed grid can't always land exactly on an arbitrary, continuously-advancing `newest`, so
+     * the naive `newestSlot - bucketCount + 1` left edge alone can't be trusted to always reach
+     * back far enough to cover every windowed sample (see [successBucketSlot]'s doc for the
+     * boundary-rounding reasons why, and the "session warm-up" section above for the other,
+     * larger reason: slot width itself isn't uniform during a session's own warm-up ladder).
+     * `minOf` against [windowed]'s own earliest retained sample's slot is what corrects both:
+     * see the code's own comment for why that's an unconditional fix rather than a heuristic
+     * guess at whether a correction is needed.
      *
      * A bucket with zero real attempts in it is treated exactly like a bucket whose attempts
      * all failed: `y = 0f`, plotted as a dip and connected normally to its neighbors. There is
@@ -480,21 +489,28 @@ data class ProbeHistory(
 
         // Ceiling, not floor: guarantees bucketCount * bucketWidthMs is never shorter than
         // windowMs -- see successBucketSlot's doc for why a little slop either way is
-        // unavoidable regardless of rounding direction, and why ceiling is the safer bias.
+        // unavoidable regardless of rounding direction, and why ceiling is the safer bias. This
+        // naive left edge assumes every slot between it and newestSlot is exactly bucketWidthMs
+        // wide, which is only true outside the session's own warm-up ladder (see bucketSlot's
+        // doc) -- taken alone it can land *later* (a larger slot number) than the earliest
+        // sample warm-up has to offer, silently excluding real, already-counted-in-windowed
+        // data. minOf below is what corrects that; see its own comment.
         val bucketCount = ((windowMs + bucketWidthMs - 1) / bucketWidthMs).coerceAtLeast(1L)
         val naiveLeftmostSlot = newestSlot - bucketCount + 1
 
-        // The first ordinary slot any post-warm-up sample could ever reach. If the naive,
-        // constant-width left edge above reaches this far back or further, the displayed range
-        // dips into the warm-up ladder's narrower slots and needs the real-time-based left edge
-        // below instead of naive slot-count arithmetic -- see this method's own doc.
-        val warmupSlotBase = successBucketSlot(anchorMs + bucketWidthMs, bucketWidthMs)
-        val leftmostSlot = if (naiveLeftmostSlot < warmupSlotBase) {
-            val windowLeftEdgeMs = maxOf(windowed.last().timestampMs - windowMs + 1, anchorMs)
-            bucketSlot(windowLeftEdgeMs, bucketWidthMs, anchorMs)
-        } else {
-            naiveLeftmostSlot
-        }
+        // The display must include every sample in [windowed] -- full stop, not "unless it's
+        // near warm-up." Because bucketSlot is monotonic in timestamp (see its own doc),
+        // windowed's own earliest retained sample always has the smallest slot number of
+        // anything in windowed, so clamping the left edge to never sit later than that sample's
+        // own slot guarantees the invariant unconditionally, with no separate warm-up case
+        // analysis needed. (An earlier version instead compared naiveLeftmostSlot against a
+        // computed "warm-up slot base" to decide whether to make this correction at all -- a
+        // strict `<` comparison of raw slot *numbers* across a boundary where slot width isn't
+        // uniform, which is unreliable exactly at the boundary itself: on a real session, that
+        // false-negative repeatedly dropped every real warm-up-era sample from the display for a
+        // whole stretch of ticks, not just a rare corner case. minOf replaces that guess with the
+        // actual requirement.)
+        val leftmostSlot = minOf(naiveLeftmostSlot, bucketSlot(windowed.first().timestampMs, bucketWidthMs, anchorMs))
         val displayedCount = (newestSlot - leftmostSlot + 1).toInt()
 
         val attempts = IntArray(displayedCount)
@@ -613,21 +629,24 @@ data class ProbeHistory(
      * cluster and dropped it from the line entirely, even though [windowedSamples] still counted
      * it in [attemptCount]/[successPercent].
      *
-     * That fix narrows, but can't fully close, a gap inherent to *any* fixed grid: because
-     * [windowMs] need not be a multiple of [bucketWidthMs], and because `newest` can fall
-     * anywhere within its own slot's interval rather than always at a convenient edge, the
-     * displayed slots can cover very slightly more or less than exactly [windowMs] of trailing
-     * history, and in the worst case up to just under one
-     * [bucketWidthMs] of the true trailing edge can fall outside every displayed slot and get
-     * silently dropped by the `index in 0 until displayedCount` guard in [successSparkline]. This
-     * is a one-time, bounded boundary artifact — not the value-drift bug fixed-slot binning
-     * exists to eliminate, which was about already-plotted *interior* buckets changing on every
-     * tick. No fixed grid can eliminate it outright without reintroducing that drift (boundaries
-     * would have to move with `newest` to always fit exactly, which is exactly what caused the
-     * original bug) — [successSparkline] rounds its bucket count up (never down) specifically to
-     * keep this gap as small as it can be while still choosing the safer failure direction: an
-     * occasional sliver of extra old history shown, never real recent-enough data quietly
-     * missing from the line.
+     * That fix alone still leaves a gap, because [windowMs] need not be a multiple of
+     * [bucketWidthMs] and `newest` can fall anywhere within its own slot's interval rather than
+     * always at a convenient edge: the naive `newestSlot - bucketCount + 1` arithmetic
+     * [successSparkline] derives from this function can, on its own, land *later* than the slot
+     * [windowed]'s own earliest retained sample actually needs — which, left uncorrected, would
+     * silently drop real, already-in-window data from the `index in 0 until displayedCount` guard
+     * in [successSparkline] even though [windowedSamples] still counts it in
+     * [attemptCount]/[successPercent]. An earlier version tried to catch only the specific case
+     * where this gap was large (the session's own warm-up ladder, whose slots are narrower than
+     * [bucketWidthMs]) by comparing raw slot numbers with a strict `<` — which is a false negative
+     * exactly at the boundary where the two compared numbers are equal, and on a real running
+     * session repeatedly dropped real warm-up-era data for a substantial stretch of ticks, not a
+     * rare corner case (found by an independent simulation sweeping window sizes and pacing
+     * intervals). [successSparkline] now closes this unconditionally instead: it takes the `minOf`
+     * of the naive left edge and [bucketSlot] of [windowed]'s own earliest sample, guaranteeing
+     * every windowed sample lands in the displayed range regardless of whether the gap came from
+     * ordinary boundary rounding or from warm-up's narrower slots — no case analysis, no
+     * heuristic, and no remaining boundary artifact of any size, small or large.
      */
     private fun successBucketSlot(timestampMs: Long, bucketWidthMs: Long): Long =
         Math.floorDiv(timestampMs - 1, bucketWidthMs)
