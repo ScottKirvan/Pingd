@@ -801,24 +801,29 @@ class ProbeHistoryTest {
      * bursts, or simply more probes landing) changed the bucket count -- and therefore every
      * bucket's boundaries -- on almost every recorded sample. Bucket count no longer depends on
      * attempt count at all any more (it depends only on the configured window at a fixed width --
-     * see [ProbeHistory.successSparkline]'s own doc): this checks that property directly, with
-     * default `bucketWidthMs` so both histories also exercise the very-first-sample warm-up
-     * ladder identically (same first/newest timestamps in both, so the same slot arithmetic
-     * either way -- see [ProbeHistory.bucketSlot]'s doc for why that only depends on the
-     * timestamps involved, never on how many samples sit between them).
+     * see [ProbeHistory.successSparkline]'s own doc): this checks that property directly.
+     *
+     * Both histories are paced *densely* (100ms/50ms, comfortably finer than any warm-up
+     * sub-bucket) and share the exact same first/newest
+     * timestamps, deliberately to keep this test isolated from a *different*, legitimate source
+     * of size variation: an empty warm-up sub-bucket is now omitted rather than shown as a 0%
+     * miss (see the dedicated "session warm-up: no false dips" test group), so a genuinely
+     * *sparse* history and a *dense* one covering the same elapsed span can legitimately produce
+     * different sizes for that unrelated reason -- not the attempt-count-inflates-bucket-count
+     * regression this test exists to catch. Both histories here are dense enough that no warm-up
+     * sub-bucket is ever empty for either, so any size difference could only come from that
+     * regression.
      */
     @Test
     fun `visible resolution depends on elapsed time, not on how many attempts arrived in it`() {
-        val sparse = ProbeHistory(windowMs = 60_000)
-            .recordSuccess(0, latencyMs = 10)
-            .recordSuccess(29_850, latencyMs = 10)
+        var normal = ProbeHistory(windowMs = 60_000)
+        repeat(201) { index -> normal = normal.recordSuccess(index * 100L, latencyMs = 10) } // t=0..20_000.
 
-        var burst = ProbeHistory(windowMs = 60_000)
-        // The same ~30-second span as `sparse`, but a burst of 200 attempts packed into it --
-        // exactly the shape of a rapid failure-retry burst landing mid-window.
-        repeat(200) { index -> burst = burst.recordSuccess(index * 150L, latencyMs = 10) }
+        var doubled = ProbeHistory(windowMs = 60_000)
+        // Twice the attempts, packed into the exact same 0..20_000 span.
+        repeat(401) { index -> doubled = doubled.recordSuccess(index * 50L, latencyMs = 10) }
 
-        assertEquals(sparse.successSparkline().size, burst.successSparkline().size)
+        assertEquals(normal.successSparkline().size, doubled.successSparkline().size)
     }
 
     /**
@@ -999,6 +1004,15 @@ class ProbeHistoryTest {
     // and the established pattern elsewhere in this suite for algorithm-level verification) to
     // compute the identity's two slot numbers from the outside, using only [ProbeHistory]'s
     // public [samples] and [BUCKET_WIDTH_MS].
+    //
+    // Pacing here is deliberately fast enough (50ms/200ms) that no warm-up sub-bucket is ever
+    // empty, keeping this test isolated from the *separate*, legitimate "empty warm-up sub-bucket
+    // is omitted, not a miss" behavior (see the dedicated "no false dips" test group below) --
+    // that rule removes only entries this identity never counted as coverage in the first place
+    // (empty buckets, which by definition hold no real sample), so it cannot itself cause data to
+    // go missing, but *would* change this identity's expected value at slower pacing, for reasons
+    // unrelated to the coverage bug this test exists to catch. That combination is covered
+    // instead by the full-coverage assertion inside the "no false dips" test below.
 
     private fun testSuccessBucketSlot(timestampMs: Long, bucketWidthMs: Long): Long =
         Math.floorDiv(timestampMs - 1, bucketWidthMs)
@@ -1016,18 +1030,22 @@ class ProbeHistoryTest {
     private fun testBucketSlot(timestampMs: Long, bucketWidthMs: Long, anchorMs: Long): Long {
         val warmupLevels = 6
         val warmupEndMs = anchorMs + bucketWidthMs
-        if (timestampMs >= warmupEndMs) return testSuccessBucketSlot(timestampMs, bucketWidthMs)
-        val warmupSlotBase = testSuccessBucketSlot(warmupEndMs, bucketWidthMs)
+        // Strictly greater than, not >=: mirrors ProbeHistory.bucketSlot's own fix -- the ordinary
+        // slot containing warmupEndMs itself is otherwise unreachable by any other real timestamp.
+        if (timestampMs > warmupEndMs) return testSuccessBucketSlot(timestampMs, bucketWidthMs)
+        val warmupSlotBase = testSuccessBucketSlot(warmupEndMs + 1, bucketWidthMs)
         return warmupSlotBase - warmupLevels + testWarmupLevel(timestampMs - anchorMs, bucketWidthMs)
     }
 
     @Test
     fun `every windowed sample lands in exactly one displayed bucket, at every tick of a running session`() {
         // A sweep of window sizes and pacing intervals -- the same dimensions the independent
-        // Python port swept to find this bug, including the exact window/interval combinations
-        // it reported triggering on (60_000/500, 60_000/200, 60_000/50).
+        // Python port swept to find this bug, including two of the exact intervals it reported
+        // triggering on (60_000/200, 60_000/50); the slower intervals it also found triggering on
+        // (500/1_000/2_000) are exercised by the "no false dips" test group below instead, along
+        // with an equivalent full-coverage check that accounts for empty-warm-up-bucket omission.
         val windowSizesMs = listOf(60_000L, 120_000L, 420_000L)
-        val intervalsMs = listOf(50L, 200L, 500L, 1_000L, 2_000L)
+        val intervalsMs = listOf(50L, 200L)
 
         windowSizesMs.forEach { windowMs ->
             intervalsMs.forEach { intervalMs ->
@@ -1061,6 +1079,99 @@ class ProbeHistoryTest {
                             "$expectedSize to be fully covered -- real data would be silently dropped from the line",
                         expectedSize,
                         actualSize,
+                    )
+                }
+            }
+        }
+    }
+
+    // --- Session warm-up: no false dips from over-fine granularity ---
+    //
+    // Regression test for a second, separate bug an independent reviewer found while re-checking
+    // the warm-up feature's actual point *values* (the point-count/permanence tests below only
+    // ever checked count and stability, not whether an empty bucket is itself a false signal):
+    // the warm-up ladder's finest levels are narrower than any realistic real-world probe pacing
+    // -- ~139/276/552ms at the default bucket width, against an actual inter-probe spacing of
+    // roughly 400ms-4s (the app's configurable step delay, doubled per the tracer's own cycle
+    // structure -- see `UplinkPreferences.STEP_DELAY_RANGE_MS`). So it is *routine*, not rare,
+    // for two genuinely consecutive real attempts to skip over one or more of those finest
+    // levels, leaving them with zero real attempts even on a perfectly healthy, unbroken
+    // connection. Since an empty bucket used to always be a 0% miss with no exception, that
+    // showed as 2-3 fabricated failure dips scattered through the first several seconds of an
+    // all-success session at any pacing slower than the very fastest setting -- confirmed by an
+    // independent simulation with realistic jitter around each configurable pacing interval,
+    // consistently across every jitter seed tried, not a rare coincidence.
+    //
+    // The fix (see successSparkline's own doc, the no-gap rule's "two exceptions" list) is *not*
+    // an adaptive, per-gap "does this silence look real" judgment call -- that design was already
+    // tried and explicitly rejected for the ordinary grid, and reintroducing it here would be the
+    // same mistake in a new spot. It's a fixed, permanent, unconditional fact about which slots
+    // even *exist* during warm-up: because every real attempt the tracer makes is recorded at a
+    // bounded pace even during a genuine outage (see [ProbeHistory.recordFailure]'s own doc), an
+    // empty warm-up sub-bucket can only ever mean "no attempt has landed in this narrow a slice
+    // yet" -- never a real, silent outage the way an empty bucket in the ordinary grid's much
+    // wider buckets legitimately could.
+
+    @Test
+    fun `an all-success session produces no false failure dips at any realistic pacing`() {
+        val bucketWidthMs = ProbeHistory.BUCKET_WIDTH_MS
+        // The app's real configurable step-delay range is 0-1000ms (STEP_DELAY_RANGE_MS); actual
+        // inter-probe spacing runs roughly double that per the tracer's own ping/ping/fake cycle
+        // structure, so this covers the app's full realistic pacing range, plus a fast interval
+        // fine enough that no false dip should appear at all (a sanity check on the simulation
+        // itself, matching the independent reviewer's own "200ms: no false dips" finding).
+        val nominalIntervalsMs = listOf(200L, 500L, 1_000L, 2_000L)
+        val jitterFraction = 0.15
+        val seeds = 0..4
+        val windowMs = 60_000L
+
+        nominalIntervalsMs.forEach { intervalMs ->
+            seeds.forEach { seed ->
+                val random = kotlin.random.Random(seed)
+                var history = ProbeHistory(windowMs = windowMs)
+                var t = 0L
+
+                repeat(60) { i ->
+                    if (i > 0) {
+                        // +/-15% jitter around the nominal interval -- real pacing is never
+                        // perfectly metronomic.
+                        val jitter = (intervalMs * jitterFraction * (random.nextDouble() * 2 - 1)).toLong()
+                        t += (intervalMs + jitter).coerceAtLeast(1L)
+                    }
+                    history = history.recordSuccess(t, latencyMs = 10)
+
+                    val points = history.successSparkline(bucketWidthMs)
+                    assertTrue(
+                        "intervalMs=$intervalMs seed=$seed tick=$i (t=$t): an all-success session must " +
+                            "never show a 0% dip -- found one at index ${points.indexOfFirst { it.y == 0f }}",
+                        points.none { it.y == 0f },
+                    )
+
+                    // The fix for the false dips must not reopen the full-coverage guarantee from
+                    // the previous test group -- every windowed sample still has to land in
+                    // exactly one displayed bucket. Unlike that test group, an empty warm-up
+                    // sub-bucket is now *also* legitimately omitted (not just the leading run), so
+                    // the expected size below accounts for occupied slots directly rather than
+                    // assuming every slot in range is visible.
+                    val anchorMs = history.samples.first().timestampMs
+                    val newest = history.samples.last().timestampMs
+                    val cutoff = newest - windowMs
+                    val windowed = history.samples.filter { it.timestampMs >= cutoff }
+                    val earliestWindowedSlot = testBucketSlot(windowed.first().timestampMs, bucketWidthMs, anchorMs)
+                    val newestSlot = testBucketSlot(newest, bucketWidthMs, anchorMs)
+                    val naiveBucketCount = ((windowMs + bucketWidthMs - 1) / bucketWidthMs).coerceAtLeast(1L)
+                    val leftmostSlot = minOf(newestSlot - naiveBucketCount + 1, earliestWindowedSlot)
+                    val warmupSlotBase = testSuccessBucketSlot(anchorMs + bucketWidthMs + 1, bucketWidthMs)
+                    val occupiedSlots = windowed.map { testBucketSlot(it.timestampMs, bucketWidthMs, anchorMs) }.toSet()
+                    val expectedSize = (leftmostSlot..newestSlot).count { slot ->
+                        slot in occupiedSlots || (slot >= earliestWindowedSlot && slot >= warmupSlotBase)
+                    }
+
+                    assertEquals(
+                        "intervalMs=$intervalMs seed=$seed tick=$i (t=$t): full coverage must hold even " +
+                            "with empty warm-up sub-buckets omitted",
+                        expectedSize,
+                        points.size,
                     )
                 }
             }

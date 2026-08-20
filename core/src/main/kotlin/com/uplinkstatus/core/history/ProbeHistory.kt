@@ -491,23 +491,54 @@ data class ProbeHistory(
      * see the code's own comment for why that's an unconditional fix rather than a heuristic
      * guess at whether a correction is needed.
      *
-     * A bucket with zero real attempts in it is treated exactly like a bucket whose attempts
-     * all failed: `y = 0f`, plotted as a dip and connected normally to its neighbors. There is
-     * deliberately no shaded/broken "gap" concept on this graph — a period with no real attempts
-     * is, from the user's point of view, indistinguishable from a period that was actively
-     * failing, and this graph says so plainly instead of drawing a visual distinction between
-     * the two. ([sparklineGapFractions] still legitimately shades gaps on the separate latency
-     * graph, which is unaffected by any of this and still produces real per-sample `null` points
-     * for a failed probe.)
+     * A bucket with zero real attempts in the **ordinary, post-warm-up grid** is treated exactly
+     * like a bucket whose attempts all failed: `y = 0f`, plotted as a dip and connected normally
+     * to its neighbors. There is deliberately no shaded/broken "gap" concept on this graph — a
+     * period with no real attempts is, from the user's point of view, indistinguishable from a
+     * period that was actively failing, and this graph says so plainly instead of drawing a
+     * visual distinction between the two. ([sparklineGapFractions] still legitimately shades gaps
+     * on the separate latency graph, which is unaffected by any of this and still produces real
+     * per-sample `null` points for a failed probe.)
      *
-     * The one exception is the **leading** run of buckets before the very first real sample
-     * recorded anywhere in the displayed window — those are omitted from the returned list
-     * entirely (blank canvas), not plotted as a 0% dip. That first-sample boundary is the same
-     * one [successPercent] already draws between "no probes yet" (`null`) and "every probe
-     * failed" (`0`) — see its own doc — and collapsing ordinary session warm-up into a
-     * flatlined "0% loss" would misrepresent "hasn't started checking yet" as "actively
-     * failing," a worse, more misleading result than treating a real mid-session silence as a
-     * miss.
+     * There are exactly two exceptions, both omitted from the returned list entirely (blank
+     * canvas) rather than plotted as a 0% dip:
+     *
+     * - The **leading** run of buckets before the very first real sample recorded anywhere in
+     *   the displayed window. That first-sample boundary is the same one [successPercent] already
+     *   draws between "no probes yet" (`null`) and "every probe failed" (`0`) — see its own doc —
+     *   and collapsing ordinary session warm-up into a flatlined "0% loss" would misrepresent
+     *   "hasn't started checking yet" as "actively failing," a worse, more misleading result than
+     *   treating a real mid-session silence as a miss.
+     * - Any **empty warm-up sub-bucket** — one of the [WARMUP_LEVELS] narrow slots [bucketSlot]
+     *   subdivides a session's first [bucketWidthMs] into (see the "session warm-up" section
+     *   above), with zero real attempts, wherever it sits in the display (not only at the very
+     *   start). Unlike the ordinary grid's wide, multi-second-to-minutes buckets, warm-up's
+     *   finest levels (as narrow as ~139ms at the default width) are routinely narrower than any
+     *   realistic probe pacing (the app's configurable step delay plus the tracer's own cycle
+     *   overhead runs from roughly 400ms to several seconds between attempts — see
+     *   `UplinkPreferences.STEP_DELAY_RANGE_MS`), so it is *ordinary*, not rare, for two
+     *   consecutive real attempts to land in non-adjacent warm-up levels, leaving one or more
+     *   levels between them with no attempt at all. Plotting those as 0% misses would fabricate
+     *   failures that never happened — confirmed by simulating an all-success session at every
+     *   realistic pacing setting (200ms/500ms/1000ms/2000ms): at anything slower than the fastest
+     *   setting, 2-3 false `0%` dips appeared scattered through the first several seconds of an
+     *   otherwise perfectly healthy connection's graph, consistently, not as a rare coincidence.
+     *   This is *not* the adaptive, real-sample-density-based "is this silence genuine" judgment
+     *   call the class's own history already tried and explicitly rejected for the ordinary grid
+     *   (see the no-gap rule's own git history) — that rejected design asked, per gap, "does this
+     *   specific silence look real," which the user explicitly ruled out wanting any version of.
+     *   This is a fixed, permanent, unconditional fact about *which slots exist at all*: a
+     *   warm-up slot's own width is decided once, by [warmupLevel], from nothing but its
+     *   position in the ladder — never by how many real attempts did or didn't land in it — so
+     *   this check doesn't inspect attempt density or elapsed time to decide anything; it asks
+     *   only "is this slot number below the smallest ordinary slot [bucketSlot] could ever
+     *   produce," the same permanent, slot-identity fact [bucketSlot] itself is built on. It is
+     *   also never a way to hide a genuine outage: every real attempt the tracer makes is
+     *   recorded, success or failure, at a bounded pace even during a sustained outage (see
+     *   [recordFailure]'s own doc and `ProbeCycleRunner.FAILURE_RETRY_DELAY_MS`) — so an empty
+     *   warm-up bucket can only mean "no attempt has landed in this narrow a slice yet," never
+     *   "an outage happened here and nothing was recorded," a distinction the ordinary grid's
+     *   much wider buckets cannot make the same guarantee about.
      */
     fun successSparkline(bucketWidthMs: Long = BUCKET_WIDTH_MS): List<SparklinePoint> {
         require(bucketWidthMs > 0) { "bucketWidthMs must be positive, was $bucketWidthMs" }
@@ -564,12 +595,21 @@ data class ProbeHistory(
         val firstSampleIndex = (bucketSlot(windowed.first().timestampMs, bucketWidthMs, anchorMs) - leftmostSlot)
             .toInt().coerceIn(0, displayedCount - 1)
 
+        // The smallest ordinary (post-warm-up) slot any sample could ever reach -- see
+        // bucketSlot's own doc for both this formula (+1: warmupEndMs itself is warm-up's own
+        // last instant, not ordinary's first) and why that matters. Used below to recognize an
+        // *empty warm-up sub-bucket* as a second, distinct reason to leave a bucket blank rather
+        // than plot it as a 0% miss (see this method's own doc for why that's not the same case
+        // the firstSampleIndex check above already covers).
+        val warmupSlotBase = successBucketSlot(anchorMs + bucketWidthMs + 1, bucketWidthMs)
+
         return (0 until displayedCount).mapNotNull { index ->
             val x = if (displayedCount == 1) 1f else index.toFloat() / (displayedCount - 1)
             when {
                 attempts[index] > 0 -> SparklinePoint(x = x, y = successes[index].toFloat() / attempts[index])
                 index < firstSampleIndex -> null // before the first real sample -- warm-up, leave blank.
-                else -> SparklinePoint(x = x, y = 0f) // no attempts here: treated exactly like a miss.
+                leftmostSlot + index < warmupSlotBase -> null // empty warm-up sub-bucket -- not enough resolution yet, leave blank.
+                else -> SparklinePoint(x = x, y = 0f) // ordinary grid: no attempts here, a real miss.
             }
         }
     }
@@ -582,18 +622,22 @@ data class ProbeHistory(
      * non-overlapping schemes, chosen purely by how [timestampMs] compares to `anchorMs +
      * bucketWidthMs`:
      *
-     * - At or past that point, this is exactly [successBucketSlot] — the ordinary fixed grid,
+     * - Strictly past that point, this is exactly [successBucketSlot] — the ordinary fixed grid,
      *   completely unaffected by warm-up, forever.
-     * - Before it (real elapsed time since [anchorMs] less than [bucketWidthMs]), this subdivides
-     *   that one span into [WARMUP_LEVELS] sub-buckets that double in width at each level — see
-     *   [warmupLevel] for the exact ladder — numbered as the [WARMUP_LEVELS] slots immediately
-     *   below [successBucketSlot] of `anchorMs + bucketWidthMs` (the smallest ordinary slot any
+     * - At or before it (real elapsed time since [anchorMs] at most [bucketWidthMs] — note the
+     *   *inclusive* upper bound, see [warmupLevel]'s own doc for why the boundary instant itself
+     *   belongs here and not to the ordinary grid), this subdivides that one span into
+     *   [WARMUP_LEVELS] sub-buckets that double in width at each level — see [warmupLevel] for
+     *   the exact ladder — numbered as the [WARMUP_LEVELS] slots immediately below
+     *   [successBucketSlot] of `anchorMs + bucketWidthMs + 1` (the smallest ordinary slot any
      *   sample could ever reach once warm-up ends). That numbering is what makes the two schemes
-     *   compose into one consistent, ordered slot space: every warm-up slot always sorts before
-     *   every ordinary slot any sample in *this* session could receive, and the warm-up slots
-     *   sort among themselves in the same order as the levels they represent — true regardless of
-     *   how large or small the timestamps involved happen to be, so it holds equally for
-     *   production epoch milliseconds and the small values this class's own tests use.
+     *   compose into one consistent, ordered slot space with no unreachable slot at the seam:
+     *   every warm-up slot always sorts before every ordinary slot any sample in *this* session
+     *   could receive, the warm-up slots sort among themselves in the same order as the levels
+     *   they represent, and the two schemes' slot ranges meet with neither gap nor overlap —
+     *   true regardless of how large or small the timestamps involved happen to be, so it holds
+     *   equally for production epoch milliseconds and the small values this class's own tests
+     *   use.
      *
      * A given `(timestampMs, bucketWidthMs, anchorMs)` triple always produces the same slot,
      * forever — the entire point, exactly as for [successBucketSlot] alone. What makes this safe
@@ -608,19 +652,35 @@ data class ProbeHistory(
      */
     private fun bucketSlot(timestampMs: Long, bucketWidthMs: Long, anchorMs: Long): Long {
         val warmupEndMs = anchorMs + bucketWidthMs
-        if (timestampMs >= warmupEndMs) return successBucketSlot(timestampMs, bucketWidthMs)
-        val warmupSlotBase = successBucketSlot(warmupEndMs, bucketWidthMs)
+        // Strictly greater than, not >=: successBucketSlot's own ordinary grid is closed on the
+        // right (a slot covers `(slot * w, (slot + 1) * w]`), so the ordinary slot containing
+        // warmupEndMs itself is `(warmupEndMs - w, warmupEndMs]` -- which, for any timestamp
+        // strictly less than warmupEndMs, is already claimed by warm-up instead (every t in
+        // `[anchorMs, warmupEndMs)` dispatches to a warm-up level, never to the ordinary grid).
+        // That leaves that one ordinary slot able to receive, in practice, only a sample landing
+        // at the *exact* instant warmupEndMs -- vanishingly unlikely on real timestamps -- so it
+        // was a permanently empty "dead" slot sitting immediately after warm-up, present in every
+        // session, at every pacing, regardless of density: this showed up as a spurious false
+        // dip in an otherwise fully-covered display even with no warm-up sub-bucket gaps at all.
+        // Folding warmupEndMs itself into warm-up's own last level (see warmupLevel's own doc for
+        // why that's a safe, already-supported input) instead makes the two schemes meet exactly
+        // at the boundary with no unreachable slot on either side.
+        if (timestampMs > warmupEndMs) return successBucketSlot(timestampMs, bucketWidthMs)
+        val warmupSlotBase = successBucketSlot(warmupEndMs + 1, bucketWidthMs)
         return warmupSlotBase - WARMUP_LEVELS + warmupLevel(timestampMs - anchorMs, bucketWidthMs)
     }
 
     /**
      * Which of [WARMUP_LEVELS] progressively wider sub-buckets [elapsedMs] (time since the
-     * session's warm-up anchor, always in `[0, bucketWidthMs)` by [bucketSlot]'s own contract)
-     * falls into. Levels double in width at each step — level 0 covers `[0, u)`, level 1 covers
-     * `[u, 3u)`, level 2 covers `[3u, 7u)`, and so on — for a unit `u` chosen so the doubling
-     * ladder's boundaries land, up to integer-rounding slop absorbed entirely by the last,
-     * open-ended level, at exactly [bucketWidthMs]: the instant [bucketSlot] hands off to the
-     * ordinary, un-subdivided fixed grid.
+     * session's warm-up anchor) falls into. The contract is `elapsedMs` in `[0, bucketWidthMs]` —
+     * note the *inclusive* upper bound: [bucketSlot] folds the single instant `elapsedMs ==
+     * bucketWidthMs` into this last level rather than handing it to the ordinary grid, which
+     * would otherwise leave that one ordinary slot unreachable by any other real timestamp (see
+     * [bucketSlot]'s own doc for why). Levels double in width at each step — level 0 covers
+     * `[0, u)`, level 1 covers `[u, 3u)`, level 2 covers `[3u, 7u)`, and so on, up to this last,
+     * open-ended level — for a unit `u` chosen so the doubling ladder's boundaries land, up to
+     * integer-rounding slop absorbed entirely by this last level, at exactly [bucketWidthMs]: the
+     * instant [bucketSlot] hands off to the ordinary, un-subdivided fixed grid.
      *
      * This is what gives the graph its "resolution starts fine and coarsens" appearance during
      * warm-up: the first real samples of a session, typically well under a second apart, each

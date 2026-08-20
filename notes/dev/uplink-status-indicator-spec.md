@@ -405,9 +405,10 @@ buckets — for the steady-state (post-warm-up) part of a session, that
 growing-resolution behavior is a side effect of the pre-first-sample
 rule alone: most fixed slots simply sit before the first real sample
 and are omitted, so only the slots with real data behind them get
-drawn. Whatever that leaves visible, a zero-attempt bucket (other than
-the pre-first-sample exception) is always a miss, never a decision
-about whether the silence behind it was "genuine."
+drawn. Whatever that leaves visible, a zero-attempt bucket in the
+**ordinary, post-warm-up grid** is always a miss, never a decision
+about whether the silence behind it was "genuine" — with one further
+exception, specific to warm-up itself, described next.
 
 **Session warm-up: resolution starts fine and coarsens into the fixed
 grid.** A fresh session's very first fixed-width bucket can span the
@@ -429,6 +430,35 @@ once from its own timestamp — never recomputed from how many samples
 currently exist, which is exactly the property that would reintroduce
 the reshaping bug the fixed-slot design above exists to prevent, just
 scoped to session start instead of scoped to every tick.
+
+**An empty warm-up sub-bucket is left blank, not plotted as a 0% miss
+— the one place on this graph the ordinary no-gaps rule doesn't
+apply.** The warm-up ladder's finest levels (as narrow as ~139ms at
+the default bucket width) are routinely narrower than any realistic
+real-world probe pacing (the app's configurable step delay, roughly
+doubled by the tracer's own cycle structure, runs from a few hundred
+milliseconds to a few seconds between attempts), so it is *ordinary*,
+not rare, for two genuinely consecutive real attempts to land in
+non-adjacent warm-up levels, leaving one or more levels between them
+with no attempt in it — confirmed by simulating an all-success session
+at every configurable pacing setting: at anything slower than the
+fastest setting, 2-3 fabricated failure dips appeared scattered
+through the first several seconds of an otherwise perfectly healthy
+connection's graph, consistently, not as a rare coincidence. This is
+*not* the adaptive, per-gap "does this silence look real" judgment
+call the ordinary grid's own history already tried and explicitly
+rejected (see the no-gaps rule above) — it's a fixed, permanent,
+unconditional fact about which slots even *exist* during warm-up,
+decided the same way every other bucket boundary on this graph is
+decided (from timestamps alone, never from how many attempts did or
+didn't arrive). It's also never a way to hide a real outage: every
+attempt the tracer makes is recorded, success or failure, at a bounded
+pace even during a sustained outage (see "Recording continues through
+DISABLED" below and the retry-floor discussion under "Core
+Mechanism"), so an empty warm-up sub-bucket can only mean "no attempt
+has landed in this narrow a slice yet" — never "an outage happened
+here and nothing was recorded," a distinction the ordinary grid's much
+wider buckets cannot make the same guarantee about.
 
 Both sparklines' time axis is anchored to the *configured window*, not
 stretched to fill from whatever span of samples happens to be displayed
