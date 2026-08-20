@@ -428,14 +428,25 @@ private fun DrawScope.drawByValueSegment(
  *
  * A card that says "last 7 minutes" thirty seconds into a session would be describing six and
  * a half minutes of data that does not exist — the same class of untruth the status line and
- * the starting notification are both written to avoid. So the window is named only once the
- * retained samples really span it, and until then the caption names what is really there.
+ * the starting notification are both written to avoid. So the window is named only once it is
+ * genuinely full ([ProbeHistory.isWindowFull]), and until then the caption names the true span
+ * actually covered ([ProbeHistory.spanMs]) instead.
+ *
+ * This used to compare `history.spanMs >= history.windowMs` directly, on the reasoning that once
+ * the covered span caught up to the configured window, the window was "full." That numeric
+ * near-equality check turned out to essentially never fire for real, discretely-sampled data —
+ * see [ProbeHistory.isWindowFull]'s doc for the full explanation — which was confirmed as the
+ * root cause of an on-device report where this caption never credited the configured window
+ * duration at all (a 1-minute window stuck at "last 59 seconds," a 4-minute window stuck at
+ * "last 3 mins", indefinitely, even long after the window had genuinely filled). [isWindowFull]
+ * answers the actual question — has real retained data aged out of the display window yet — as a
+ * discrete fact rather than a coincidence of sample timing.
  */
 internal fun historySpanCaption(history: ProbeHistory): String = when {
     history.attemptCount == 0 -> "no probes yet"
     // One sample covers an instant, not a duration -- there is no span to name yet.
     history.attemptCount < 2 -> "just started"
-    history.spanMs >= history.windowMs -> "last ${describeDuration(history.windowMs)}"
+    history.isWindowFull -> "last ${describeDuration(history.windowMs)}"
     else -> "last ${describeDuration(history.spanMs)}"
 }
 

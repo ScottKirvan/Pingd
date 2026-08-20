@@ -1,6 +1,7 @@
 package com.uplinkstatus.core.history
 
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNotNull
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
@@ -237,6 +238,104 @@ class ProbeHistoryTest {
         assertEquals(4_000L, history.spanMs)
 
         assertTrue(history.recordSuccess(30_000, latencyMs = 10).spanMs <= 10_000L)
+    }
+
+    // --- isWindowFull: the "genuinely full" signal (regression for the caption bug) -------
+
+    @Test
+    fun `an empty history is not a full window`() {
+        assertFalse(ProbeHistory(windowMs = window).isWindowFull)
+    }
+
+    @Test
+    fun `a single sample does not make a full window`() {
+        assertFalse(ProbeHistory(windowMs = window).recordSuccess(0, 10).isWindowFull)
+    }
+
+    @Test
+    fun `a window is not full while every retained sample is still displayed -- nothing has aged out yet`() {
+        // Two samples spanning exactly windowMs -- the old, broken `spanMs >= windowMs` check
+        // would call this "full" by numeric coincidence, but no real data has actually aged out
+        // of the display: every retained sample is still shown. Per the fixed definition, this
+        // is *not* genuinely full -- there is nothing beyond it to prove the window has really
+        // been full for a while.
+        val history = ProbeHistory(windowMs = 60_000)
+            .recordSuccess(0, latencyMs = 10)
+            .recordSuccess(60_000, latencyMs = 10)
+
+        assertFalse(history.isWindowFull)
+        assertEquals(60_000L, history.spanMs) // spanMs == windowMs here, but that's not "full."
+    }
+
+    @Test
+    fun `a window is genuinely full once real retained data has aged out of what is displayed`() {
+        val history = ProbeHistory(windowMs = 10_000)
+            .recordSuccess(0, latencyMs = 10) // will age out
+            .recordSuccess(5_000, latencyMs = 10)
+            .recordSuccess(12_000, latencyMs = 10) // newest; cutoff = 2_000, excludes t=0
+
+        assertTrue(history.isWindowFull)
+        // 2 real samples still shown (t=5000, t=12000); the t=0 sample is retained but excluded.
+        assertEquals(2, history.attemptCount)
+        assertEquals(3, history.samples.size)
+    }
+
+    /**
+     * Regression test for the exact on-device report: a 1-minute (60_000ms) configured window
+     * reported "last 59 seconds" forever, never crediting the full configured duration even once
+     * the window was genuinely, thoroughly full of real data. Root cause: `historySpanCaption`
+     * compared `spanMs >= windowMs`, which only fires when a real sample happens to land exactly
+     * on the display cutoff -- essentially never true for discretely-paced real probes.
+     *
+     * Constructed with 700ms spacing specifically because 700 does not evenly divide 60_000: with
+     * an evenly-dividing spacing (e.g. 1000ms), the cutoff always lands exactly on a sample by
+     * construction, which would accidentally make the old buggy `spanMs >= windowMs` check pass
+     * too and mask the bug. This spacing guarantees the cutoff falls *between* two samples, the
+     * way real jittered network timing does, reproducing the true failure mode.
+     */
+    @Test
+    fun `isWindowFull reports true even when spanMs falls just short of windowMs -- the reported 59-second bug`() {
+        var history = ProbeHistory(windowMs = 60_000)
+        // 200 samples, 700ms apart: t = 0, 700, 1400, ..., 139_300. Comfortably exceeds the
+        // window, so real data has genuinely aged out of what's displayed.
+        repeat(200) { index -> history = history.recordSuccess(index * 700L, latencyMs = 10) }
+
+        // The nearest real sample above the display cutoff does not land exactly on it, so the
+        // displayed span is short of the full 60 seconds -- this is the actual, expected shape of
+        // real discretely-sampled data, not a sign the window isn't full.
+        assertTrue("expected spanMs short of windowMs, was ${history.spanMs}", history.spanMs < 60_000L)
+        // ...yet the window genuinely is full: real retained data (everything before the cutoff)
+        // has aged out of what's displayed.
+        assertTrue(history.isWindowFull)
+    }
+
+    /**
+     * The other required half of the same regression: a non-round window (per the on-device
+     * report's second example, a 4-minute window reporting "last 3 mins") must also be detected
+     * as full once it genuinely is, not just round 1-minute windows.
+     */
+    @Test
+    fun `isWindowFull also fires for a longer, non-trivially-aligned window -- the reported 4-minute bug`() {
+        val fourMinutes = 4 * 60_000L
+        var history = ProbeHistory(windowMs = fourMinutes)
+        // 900ms spacing: 900 does not evenly divide 240_000 (240_000 / 900 = 266.67), so the
+        // cutoff can't land exactly on a sample boundary here either.
+        repeat(400) { index -> history = history.recordSuccess(index * 900L, latencyMs = 10) }
+
+        assertTrue(history.spanMs < fourMinutes)
+        assertTrue(history.isWindowFull)
+    }
+
+    @Test
+    fun `narrowing the window can turn a not-yet-full history into a genuinely full one`() {
+        val history = ProbeHistory(windowMs = 60_000)
+            .recordSuccess(0, latencyMs = 10)
+            .recordSuccess(30_000, latencyMs = 10)
+        assertFalse(history.isWindowFull) // nothing has aged out of the 60s window yet.
+
+        val narrowed = history.withWindowMs(10_000)
+        // Narrowed to 10s: the t=0 sample (30s behind newest) is now excluded -- genuinely full.
+        assertTrue(narrowed.isWindowFull)
     }
 
     // --- Reset --------------------------------------------------------------------------
