@@ -42,6 +42,12 @@ const val TAG_LATENCY_CARD = "settings_latency_card"
 const val TAG_LATENCY_VALUE = "settings_latency_value"
 const val TAG_HISTORY_RESET_BUTTON = "settings_history_reset_button"
 
+/** Marks the temporary synthetic-latency debug card -- see [HistoryGraphs]' own doc on why it
+ * exists. A dedicated tag so it's trivial to find (and, later, strip) independent of its exact
+ * wording. */
+const val TAG_SYNTHETIC_LATENCY_DEBUG_CARD = "settings_synthetic_latency_debug_card"
+const val TAG_SYNTHETIC_LATENCY_DEBUG_VALUE = "settings_synthetic_latency_debug_value"
+
 /** What a card's big number shows when there is genuinely nothing to show — an em dash, not a
  * zero, for the same reason [ProbeHistory.successPercent] is null rather than 0 before the
  * first probe. */
@@ -138,6 +144,18 @@ private sealed interface SparklineColoring {
  * once there is data: this is a fixed part of the screen the user is meant to be able to find,
  * not a notification. What changes is what they *say* — "no probes yet" and an em dash, never
  * a placeholder number.
+ *
+ * ### Synthetic-latency debug card (temporary)
+ * A third, separate card follows the two above, for debugging whether the ping-success and
+ * latency graphs genuinely track the same timeline sample-for-sample: it reuses the latency
+ * card's own rendering exactly (see [ProbeHistory.syntheticLatencySparkline]'s doc for why),
+ * substituting a fixed synthetic latency for every real attempt's actual measurement -- fast
+ * (60ms) on success, slow (900ms) on failure -- rather than a second, independently-written
+ * rendering path prone to drifting out of sync with the real latency graph. Deliberately reuses
+ * that exact rendering path unmodified, so a correct rendering visibly scrolls in lockstep with
+ * the real latency card beside it, at exactly the same x-axis positions
+ * [ProbeHistory.latencySparkline] already places its own points at. This is a debugging aid, not
+ * a permanent user-facing feature -- safe to remove once that work is done.
  */
 @Composable
 fun HistoryGraphs(modifier: Modifier = Modifier) {
@@ -190,6 +208,24 @@ fun HistoryGraphs(modifier: Modifier = Modifier) {
             gapColor = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = GAP_SHADE_ALPHA),
             cardTag = TAG_LATENCY_CARD,
             valueTag = TAG_LATENCY_VALUE,
+        )
+        // Temporary debug card -- see this function's own doc for why it exists and why it
+        // reuses the latency card's exact rendering rather than a new one.
+        HistoryGraphCard(
+            title = "Success as latency (debug)",
+            value = if (history.attemptCount == 0) NO_VALUE else history.attemptCount.toString(),
+            caption = caption,
+            points = history.syntheticLatencySparkline(),
+            markers = markers,
+            // Colored by the same fixed green/yellow/red scale as the real latency card, from
+            // the same synthetic latencyMs each point already carries -- see
+            // ProbeHistory.syntheticLatencySparkline's doc.
+            coloring = SparklineColoring.ByValue { point ->
+                point.latencyMs?.let(::latencyColor) ?: LATENCY_COLOR_MID
+            },
+            gapColor = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = GAP_SHADE_ALPHA),
+            cardTag = TAG_SYNTHETIC_LATENCY_DEBUG_CARD,
+            valueTag = TAG_SYNTHETIC_LATENCY_DEBUG_VALUE,
         )
         Row(
             modifier = Modifier.fillMaxWidth(),
