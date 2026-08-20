@@ -74,7 +74,7 @@ class HistoryGraphsTest {
         composeTestRule.onNodeWithTag(TAG_SYNTHETIC_LATENCY_DEBUG_CARD).assertExists()
         composeTestRule.onNodeWithText("Ping success").assertExists()
         composeTestRule.onNodeWithText("Latency").assertExists()
-        composeTestRule.onNodeWithText("Success as latency (debug)").assertExists()
+        composeTestRule.onNodeWithText("Synthetic latency").assertExists()
     }
 
     @Test
@@ -191,6 +191,35 @@ class HistoryGraphsTest {
         composeTestRule.waitForIdle() // alongside a marker too
 
         composeTestRule.onNodeWithTag(TAG_SYNTHETIC_LATENCY_DEBUG_CARD).assertExists()
+    }
+
+    @Test
+    // Robolectric's default (unqualified) virtual screen is far wider than a real phone -- wide
+    // enough that even a content-sized text column still leaves every card's sparkline a
+    // comfortable, near-equal share, so it can't reproduce the inconsistency this test exists to
+    // catch. Pinned to the actual device width (a Pixel 6 Pro, ~411dp) the regression was found
+    // on instead.
+    @Config(sdk = [34], qualifiers = "w411dp-h915dp")
+    fun `all three cards' sparklines are exactly the same width, regardless of each card's own text`() {
+        // On-device regression: the synthetic-latency debug card's title ("Success as latency
+        // (debug)") was longer than "Ping success"/"Latency", and HistoryGraphCard's text column
+        // used to size itself to whatever its own content needed -- so that card's sparkline
+        // ended up visibly narrower than its siblings', breaking the assumption that the same
+        // moment in time lines up at the same physical position across all three graphs.
+        setContent()
+
+        seed(count = 11)
+        composeTestRule.waitForIdle()
+
+        val pingSuccessWidth = composeTestRule.onNodeWithTag(TAG_PING_SUCCESS_SPARKLINE)
+            .fetchSemanticsNode().size.width
+        val latencyWidth = composeTestRule.onNodeWithTag(TAG_LATENCY_SPARKLINE)
+            .fetchSemanticsNode().size.width
+        val syntheticLatencyWidth = composeTestRule.onNodeWithTag(TAG_SYNTHETIC_LATENCY_DEBUG_SPARKLINE)
+            .fetchSemanticsNode().size.width
+
+        assertEquals(pingSuccessWidth, latencyWidth)
+        assertEquals(pingSuccessWidth, syntheticLatencyWidth)
     }
 
     // --- Markers: master-toggle transitions -------------------------------------------------
