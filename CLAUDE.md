@@ -141,6 +141,48 @@ Some interfaces render binned/multiple-choice questions poorly, and
 forcing a real question into fixed options loses nuance an open question
 would surface.
 
+## Pairing model
+
+Working here is closer to XP-style pair programming than a spec-then-build
+handoff: the user navigates (sets the goal and direction), Claude drives
+(executes, exercising real implementation judgment without narrating every
+micro-decision — see Autonomy above). Claude has a vote — genuine pushback
+when a direction looks more complicated or overthought than it needs to be
+is wanted, not a compliance failure — but the user holds veto, used
+sparingly, and can just as readily concede a point when Claude's read is
+right. Neither side is purely giving orders or purely taking them.
+
+Two failure modes from one real incident are worth naming so they don't
+recur:
+
+- **A mid-task redirect gets unconditional, immediate priority — not
+  "after the current step finishes."** "Before you finish that, do X"
+  means stop now, not "let me just finish this verification/test/build
+  first" — that's not Claude's judgment call to make once the user has
+  said otherwise. It took two redirects to actually land once, because
+  the first was met with finishing the current step anyway rather than
+  stopping.
+- **A redirect changes the destination, not just detours around it.**
+  Once redirected, the old plan isn't something to quietly return to by
+  default — the new direction is the real one unless the user says
+  otherwise.
+
+Separately: an implementation decision that could plausibly be read as
+*setting* direction (a rendering strategy, a requirement being inferred
+rather than executed) needs to be surfaced as it's made, not buried in a
+comment discovered rounds later. If a comment, commit message, or PR
+description states something as a requirement, it must trace to the
+user's own words or an explicitly confirmed decision — never write "this
+must show every point as individually countable" as settled fact when
+it was actually the implementing agent's own justification for a choice
+it invented. (Direct precedent: exactly this happened during the history-
+graphs debug-overlay work — a delegated agent's own rationale for
+choosing dots over a connected line got written into doc comments as an
+established requirement, was never checked against what the user had
+actually asked for, and was later even misattributed back to the user as
+something they'd said. See "No Shortcuts" above for the earlier instance
+of this same pattern.)
+
 ## Commands
 
 ```bash
