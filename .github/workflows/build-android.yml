@@ -14,6 +14,11 @@ on:
         description: 'Release tag to build'
         required: true
         type: string
+      upload_release:
+        description: 'Upload APK/AAB to GitHub release and Play Store'
+        required: false
+        type: boolean
+        default: true
 
 permissions:
   contents: write
@@ -67,7 +72,7 @@ jobs:
 
       # On release events: attach APK + AAB to the GitHub release
       - name: Upload APK and AAB to GitHub Release
-        if: github.event_name == 'release' || github.event_name == 'workflow_call'
+        if: github.event_name == 'release' || inputs.upload_release == true
         env:
           GH_TOKEN: ${{ github.token }}
           TAG: ${{ github.event.release.tag_name || inputs.tag_name }}
@@ -89,7 +94,7 @@ jobs:
 
       # Play Store upload only on release events (not manual dispatch)
       - name: Upload AAB to Play Store (alpha)
-        if: github.event_name == 'release' || github.event_name == 'workflow_call'
+        if: github.event_name == 'release' || inputs.upload_release == true
         uses: r0adkll/upload-google-play@v1
         with:
           serviceAccountJsonPlainText: ${{ secrets.PLAY_STORE_JSON_KEY }}
