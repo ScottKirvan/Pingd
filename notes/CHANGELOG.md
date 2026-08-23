@@ -1,5 +1,28 @@
 # Changelog
 
+## [0.2.0](https://github.com/ScottKirvan/Pingd/compare/v0.1.1...v0.2.0) (2026-08-23)
+
+
+### Features
+
+* add temporary raw-sample/bucket-boundary debug overlay to ping-success graph ([57eb5f7](https://github.com/ScottKirvan/Pingd/commit/57eb5f7ddee4917e461a48adc0acd617df29d6ad))
+
+
+### Bug Fixes
+
+* add Play Store release pipeline with signed builds ([2ab0504](https://github.com/ScottKirvan/Pingd/commit/2ab05047d7d44ece60d3748764126c0f59f7474c))
+* align success-sparkline bucket position with the latency graph's real-time axis ([c7bb454](https://github.com/ScottKirvan/Pingd/commit/c7bb4549644bc7a5f076e3a504eeaf68e2a8756b))
+* anchor success-sparkline bucket width at the narrowest window ([e0820b9](https://github.com/ScottKirvan/Pingd/commit/e0820b99fcf638afa37359a0b91c46a5345733a8))
+* credit the full history window once it is genuinely full ([f3ba234](https://github.com/ScottKirvan/Pingd/commit/f3ba234661bd209451a7faf9df1213d67f92ac7c))
+* guarantee full coverage of windowed samples in success-sparkline ([040cec9](https://github.com/ScottKirvan/Pingd/commit/040cec9378fc143dca4b514f5eb8929da616b45f))
+* make every history card's sparkline exactly the same width ([01fa260](https://github.com/ScottKirvan/Pingd/commit/01fa2607c8c84e1b580ca86d2c50385ea85993d9))
+* make success-sparkline bucket width constant and add warm-up resolution ([f658fde](https://github.com/ScottKirvan/Pingd/commit/f658fdef2320b61d6be366124d6dd86877c5f80b))
+* rename product to Ping'd, set applicationId to com.bojustudio.pingd ([b02474c](https://github.com/ScottKirvan/Pingd/commit/b02474cb70db90f055742e5f69ea8edb314f039f))
+* render success-sparkline no-data buckets as misses, not gaps ([cea879b](https://github.com/ScottKirvan/Pingd/commit/cea879ba3d72eb8d7d73f6417f74e0559865c891))
+* replace ping-success debug overlay with a separate, bucket-independent card ([7eb147d](https://github.com/ScottKirvan/Pingd/commit/7eb147db04d02faa7c3d42ee5231fcf89a1557d2))
+* stop success-sparkline warm-up from fabricating failure dips ([793b418](https://github.com/ScottKirvan/Pingd/commit/793b4181ac9d34887dc0bbf61b2376efd1e506c4))
+* update ApplicationIdTest to match com.bojustudio.pingd applicationId ([ec90b44](https://github.com/ScottKirvan/Pingd/commit/ec90b449624b36535e07c919afbcfe38bb98c8ac))
+
 ## [0.1.1](https://github.com/ScottKirvan/UplinkStatus/compare/v0.1.0...v0.1.1) (2026-08-18)
 
 
