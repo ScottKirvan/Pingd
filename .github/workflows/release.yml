@@ -25,8 +25,13 @@ jobs:
           config-file: .github/release-please/release-please-config.json
           manifest-file: .github/release-please/.release-please-manifest.json
 
-  # Signed APK + AAB build and Play Store upload are handled by build-android.yml,
-  # triggered automatically when this workflow publishes the GitHub release.
+  build-android:
+    needs: release-please
+    if: ${{ needs.release-please.outputs.release_created }}
+    uses: ./.github/workflows/build-android.yml
+    with:
+      tag_name: ${{ needs.release-please.outputs.tag_name }}
+    secrets: inherit
 
   apply-staged-notes:
     needs: release-please
