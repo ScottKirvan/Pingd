@@ -7,6 +7,8 @@
 
 * use input flag instead of event_name for upload gating ([9d40019](https://github.com/ScottKirvan/Pingd/commit/9d4001970524fbd53bf2a3f4c288718d97f51f9e))
 
+Includes PRs: [#70](https://github.com/ScottKirvan/Pingd/pull/70), [#71](https://github.com/ScottKirvan/Pingd/pull/71)
+
 ## [0.2.1](https://github.com/ScottKirvan/Pingd/compare/v0.2.0...v0.2.1) (2026-08-23)
 
 
