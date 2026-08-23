@@ -76,7 +76,7 @@ jobs:
         if: github.event_name == 'workflow_dispatch'
         uses: actions/upload-artifact@v4
         with:
-          name: uplinkstatus-release-apk
+          name: pingd-release-apk
           path: app/build/outputs/apk/release/app-release.apk
           retention-days: 14
 
@@ -86,7 +86,7 @@ jobs:
         uses: r0adkll/upload-google-play@v1
         with:
           serviceAccountJsonPlainText: ${{ secrets.PLAY_STORE_JSON_KEY }}
-          packageName: com.uplinkstatus.app
+          packageName: com.bojustudio.pingd
           releaseFiles: app/build/outputs/bundle/release/app-release.aab
           tracks: alpha
           status: completed
