@@ -5,13 +5,13 @@ plugins {
 }
 
 android {
-    namespace = "com.uplinkstatus.app"
+    namespace = "com.bojustudio.pingd.app"
     compileSdk = 36
 
     defaultConfig {
         // Placeholder application id — not a real, claimed package. Revisit before
         // any Play Store submission (out of scope for this stage and this brief).
-        applicationId = "com.uplinkstatus.app"
+        applicationId = "com.bojustudio.pingd.app"
         minSdk = 34
         targetSdk = 36
         versionCode = 1

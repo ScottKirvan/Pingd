@@ -2,5 +2,5 @@
     <!-- Minimal manifest-level theme. All real in-app UI is styled by Compose's
          MaterialTheme in MainActivity; this only backs the launch window/manifest
          requirement and isn't meant to be elaborated on for this throwaway screen. -->
-    <style name="Theme.UplinkStatus" parent="android:Theme.Material.Light.NoActionBar" />
+    <style name="Theme.Pingd" parent="android:Theme.Material.Light.NoActionBar" />
 </resources>

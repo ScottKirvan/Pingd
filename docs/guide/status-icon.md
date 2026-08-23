@@ -9,7 +9,7 @@ succeeding.
 
 ## Why it moves
 
-UplinkStatus checks your internet connection by briefly trying to open
+Ping'd checks your internet connection by briefly trying to open
 a connection to a server (Cloudflare's by default — see
 [Ping target host](/guide/settings#ping-target-host) for the other
 options) and timing how long that takes, then immediately closing it
@@ -47,7 +47,7 @@ light doesn't turn off, snap back to the start, or jump to the "all
 dim" paused look — it simply **stops on whatever bar it was last on**
 and stays there.
 
-This is the normal, designed way UplinkStatus shows a failed check —
+This is the normal, designed way Ping'd shows a failed check —
 **it is not a crash or a stuck app.** The app is actively retrying in
 the background, immediately and repeatedly, with no waiting period
 between attempts. As soon as a check succeeds again, the light resumes
@@ -57,9 +57,9 @@ If you want more detail than the icon alone gives you, swipe down to
 view the notification itself — its text distinguishes two different
 kinds of failure:
 
-- **"Uplink: connection trouble, retrying…"** — the general case: the
+- **"Ping'd: connection trouble, retrying…"** — the general case: the
   attempt to reach the target server didn't succeed in time.
-- **"Uplink: can't resolve target host, retrying…"** — specifically,
+- **"Ping'd: can't resolve target host, retrying…"** — specifically,
   the app couldn't even look up the address of the target server
   (a DNS problem). This is called out separately because it usually
   points to a different cause than a plain connectivity failure — for

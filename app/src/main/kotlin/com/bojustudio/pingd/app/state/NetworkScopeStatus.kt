@@ -1,0 +1,82 @@
+package com.bojustudio.pingd.app.state
+
+import com.bojustudio.pingd.app.connectivity.NetworkSnapshotProvider
+import com.bojustudio.pingd.app.prefs.PingdPreferencesRepository
+import kotlinx.coroutines.flow.Flow
+import kotlinx.coroutines.flow.combine
+import kotlinx.coroutines.flow.distinctUntilChanged
+
+/**
+ * Stage 4's real replacement for Stage 2/3's manual `NetworkScopeStatus` stand-in object (a
+ * `MutableStateFlow<Boolean>` someone set by hand, defaulting to "in scope"). This is now an
+ * interface with a real, reactive implementation ([ConnectivityNetworkScopeStatus]) —
+ * required, not optional, because [inScopeFlow] has to react independently to *two* different
+ * sources changing (live connectivity, and the persisted network-scope/SSID-whitelist
+ * preference — see [NetworkScopeMatcher]'s doc and Stage 4's acceptance criteria), and a bare
+ * mutable object had no way to derive that from either one on its own.
+ *
+ * Kept as an interface (rather than [ConnectivityNetworkScopeStatus] being the only shape) for
+ * the same reason [PingdPreferencesRepository] is one: so
+ * [com.bojustudio.pingd.app.service.PingdStatusService]'s tests can inject a trivial
+ * [kotlinx.coroutines.flow.MutableStateFlow]-backed fake instead of standing up a real
+ * [android.net.ConnectivityManager] and DataStore file just to flip "in scope" for a test.
+ */
+interface NetworkScopeStatus {
+    /** Emits a new "is the current network in scope" value whenever either live connectivity
+     * or the persisted network-scope preference changes — never requiring the other to change
+     * in lockstep for the result to update.
+     *
+     * `null` means **"not known yet"** — the connectivity layer has not reported anything to
+     * match the preference against — and is deliberately distinct from `false` ("matched, and
+     * the current network is not in scope"). Consumers must not collapse the two; see
+     * [com.bojustudio.pingd.core.visibility.VisibilityDecider.decideOrNull] and
+     * [com.bojustudio.pingd.app.connectivity.NetworkSnapshotProvider.snapshotFlow] for the bug
+     * that conflating them caused. */
+    val inScopeFlow: Flow<Boolean?>
+}
+
+/**
+ * Combines [preferencesRepository]'s persisted [com.bojustudio.pingd.app.prefs.NetworkScope] /
+ * SSID whitelist with [snapshotProvider]'s live connectivity signal, re-running
+ * [NetworkScopeMatcher] on every emission from either source.
+ *
+ * [hasLocationPermission] is a function (not a value snapshotted once at construction) so it
+ * reflects the permission's actual state at combine-time — invoked fresh on every connectivity
+ * or preference emission, and never cached. It is deliberately *not* a third stream combined in
+ * here, because re-running the matcher is not what a permission grant actually needs: the SSID
+ * the matcher is handed comes from a capabilities object the platform redacted when it
+ * delivered it, so matching the same snapshot again with `hasLocationPermission` newly `true`
+ * would still find no readable SSID to match. The grant has to reach the layer that can ask the
+ * platform again — see
+ * [com.bojustudio.pingd.app.connectivity.ConnectivityManagerNetworkSnapshotProvider]'s
+ * `refreshSignals` — and the fresh snapshot that produces arrives here as an ordinary
+ * connectivity emission, at which point this function is called again anyway. One mechanism,
+ * one place, and a permission change and a network change reach this combine identically.
+ */
+class ConnectivityNetworkScopeStatus(
+    private val preferencesRepository: PingdPreferencesRepository,
+    private val snapshotProvider: NetworkSnapshotProvider,
+    private val hasLocationPermission: () -> Boolean,
+) : NetworkScopeStatus {
+
+    override val inScopeFlow: Flow<Boolean?> = combine(
+        preferencesRepository.preferencesFlow,
+        snapshotProvider.snapshotFlow,
+    ) { preferences, snapshot ->
+        // A null snapshot is "connectivity hasn't reported yet," which propagates as a null
+        // scope answer rather than being matched against as though it were a real network.
+        // NetworkScopeMatcher has no opinion to offer about a network nobody has described:
+        // handing it ConnectivitySnapshot.NONE here (the shape of the original bug) would make
+        // it dutifully -- and wrongly -- return false for every scope mode.
+        if (snapshot == null) {
+            null
+        } else {
+            NetworkScopeMatcher.isInScope(
+                scope = preferences.networkScope,
+                ssidWhitelist = preferences.ssidWhitelist,
+                hasLocationPermission = hasLocationPermission(),
+                snapshot = snapshot,
+            )
+        }
+    }.distinctUntilChanged()
+}

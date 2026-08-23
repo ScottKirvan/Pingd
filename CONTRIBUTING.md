@@ -1,6 +1,6 @@
-# Contributing to UplinkStatus
+# Contributing to Ping'd
 
-First off, thank you for considering contributing to UplinkStatus! It's people like you that make this project better for everyone.
+First off, thank you for considering contributing to Ping'd! It's people like you that make this project better for everyone.
 
 ## Code of Conduct
 

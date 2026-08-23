@@ -5,7 +5,7 @@ the settings screen directly — there's no separate "home" screen to
 navigate through. Every control on it is described below, in the order
 it appears.
 
-## Enable uplink status icon
+## Enable Ping'd status icon
 
 The master on/off switch for the entire feature. Turning this off
 removes the status-bar icon immediately and unconditionally — no other
@@ -33,7 +33,7 @@ toggle off always hides the icon regardless of this setting.
 
 ## Network scope
 
-Controls which networks UplinkStatus is allowed to actively monitor.
+Controls which networks Ping'd is allowed to actively monitor.
 Pick one:
 
 - **Wi-Fi only (default).** The icon is only active while connected to
@@ -63,7 +63,7 @@ take it off the list. The icon only becomes active while you're
 connected to a network whose name matches one in this list.
 
 The first time you select this option, Android will ask you to grant a
-**location permission**. This isn't a mistake and UplinkStatus isn't
+**location permission**. This isn't a mistake and Ping'd isn't
 tracking your location — see
 [Why is it asking for location permission](/guide/troubleshooting#why-is-it-asking-for-location-permission)
 for the full explanation. In short: reading the name of the Wi-Fi
@@ -75,7 +75,7 @@ the app.
 
 ## Ping target host
 
-Choose which server UplinkStatus tries to reach when it checks your
+Choose which server Ping'd tries to reach when it checks your
 connection:
 
 - **Cloudflare (`one.one.one.one`)** — the default.
@@ -86,7 +86,7 @@ connection:
   field shows an error ("Enter a valid hostname (e.g.
   probe.example.com).") and nothing is saved until it's corrected.
 
-This setting only changes what UplinkStatus itself uses internally to
+This setting only changes what Ping'd itself uses internally to
 test connectivity — it has no effect on any other app, browser, or DNS
 setting on your device.
 

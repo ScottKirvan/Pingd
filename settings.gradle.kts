@@ -14,6 +14,6 @@ dependencyResolutionManagement {
     }
 }
 
-rootProject.name = "UplinkStatus"
+rootProject.name = "Pingd"
 include(":app")
 include(":core")
