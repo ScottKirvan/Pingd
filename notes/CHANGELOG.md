@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.2.1](https://github.com/ScottKirvan/Pingd/compare/v0.2.0...v0.2.1) (2026-08-23)
+
+
+### Bug Fixes
+
+* wire build-android into release.yml via workflow_call ([1c437c0](https://github.com/ScottKirvan/Pingd/commit/1c437c0992aacfdc10301791802f867d61298bd0))
+
 ## [0.2.0](https://github.com/ScottKirvan/Pingd/compare/v0.1.1...v0.2.0) (2026-08-23)
 
 
