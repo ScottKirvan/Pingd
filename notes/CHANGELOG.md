@@ -23,6 +23,8 @@
 * stop success-sparkline warm-up from fabricating failure dips ([793b418](https://github.com/ScottKirvan/Pingd/commit/793b4181ac9d34887dc0bbf61b2376efd1e506c4))
 * update ApplicationIdTest to match com.bojustudio.pingd applicationId ([ec90b44](https://github.com/ScottKirvan/Pingd/commit/ec90b449624b36535e07c919afbcfe38bb98c8ac))
 
+Includes PRs: [#54](https://github.com/ScottKirvan/Pingd/pull/54), [#56](https://github.com/ScottKirvan/Pingd/pull/56), [#57](https://github.com/ScottKirvan/Pingd/pull/57), [#58](https://github.com/ScottKirvan/Pingd/pull/58), [#59](https://github.com/ScottKirvan/Pingd/pull/59), [#60](https://github.com/ScottKirvan/Pingd/pull/60), [#62](https://github.com/ScottKirvan/Pingd/pull/62), [#64](https://github.com/ScottKirvan/Pingd/pull/64), [#65](https://github.com/ScottKirvan/Pingd/pull/65), [#66](https://github.com/ScottKirvan/Pingd/pull/66), [#67](https://github.com/ScottKirvan/Pingd/pull/67)
+
 ## [0.1.1](https://github.com/ScottKirvan/UplinkStatus/compare/v0.1.0...v0.1.1) (2026-08-18)
 
 
