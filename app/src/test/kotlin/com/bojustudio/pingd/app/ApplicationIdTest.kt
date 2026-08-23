@@ -15,7 +15,7 @@ class ApplicationIdTest {
 
     @Test
     fun applicationIdMatchesDeclaredPlaceholderPackage() {
-        assertEquals("com.bojustudio.pingd.app", BuildConfig.APPLICATION_ID)
+        assertEquals("com.bojustudio.pingd", BuildConfig.APPLICATION_ID)
     }
 
     @Test
