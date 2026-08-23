@@ -79,10 +79,10 @@ jobs:
     uses: ScottKirvan/.github/.github/workflows/reusable-release-notes.yml@main
     with:
       tag_name: ${{ needs.release-please.outputs.tag_name }}
-      project_name: "UplinkStatus"
-      project_context: "UplinkStatus is an Android status-bar app that monitors uplink health using TCP probe-based network checks — giving users a persistent, real-time connectivity indicator in their status bar. Write changes in terms of what the status indicator shows, how accurately it reflects connectivity, or what users can configure."
+      project_name: "Ping'd"
+      project_context: "Ping'd is an Android status-bar app that monitors uplink health using TCP probe-based network checks — giving users a persistent, real-time connectivity indicator in their status bar. Write changes in terms of what the status indicator shows, how accurately it reflects connectivity, or what users can configure."
       header: |
-        ## UplinkStatus
+        ## Ping'd
 
         > Real-time uplink health indicator for your Android status bar.
 
@@ -108,7 +108,7 @@ jobs:
     uses: ScottKirvan/.github/.github/workflows/reusable-discord-notify.yml@main
     with:
       tag_name: ${{ needs.release-please.outputs.tag_name }}
-      project_name: "UplinkStatus"
+      project_name: "Ping'd"
       emoji: "📡"
       discord_blurb: ${{ needs.apply-staged-notes.outputs.discord_blurb || needs.improve-release-notes.outputs.discord_blurb }}
     secrets: inherit
