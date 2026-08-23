@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.2.2](https://github.com/ScottKirvan/Pingd/compare/v0.2.1...v0.2.2) (2026-08-23)
+
+
+### Bug Fixes
+
+* use input flag instead of event_name for upload gating ([9d40019](https://github.com/ScottKirvan/Pingd/commit/9d4001970524fbd53bf2a3f4c288718d97f51f9e))
+
 ## [0.2.1](https://github.com/ScottKirvan/Pingd/compare/v0.2.0...v0.2.1) (2026-08-23)
 
 
