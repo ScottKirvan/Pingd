@@ -1,29 +1,29 @@
-# UplinkStatus [![starline](https://raw.githubusercontent.com/ScottKirvan/UplinkStatus/refs/heads/starlines/ScottKirvan/UplinkStatus/starline.svg)](https://github.com/qoomon/starlines)
+# Ping'd [![starline](https://raw.githubusercontent.com/ScottKirvan/Pingd/refs/heads/starlines/ScottKirvan/Pingd/starline.svg)](https://github.com/qoomon/starlines)
 <div align="center">
 
   <img src="assets/media/logo.jpg" alt="logo" width="200" height="auto" />
-  <h1><a href="https://github.com/ScottKirvan/UplinkStatus">UplinkStatus</a></h1>
+  <h1><a href="https://github.com/ScottKirvan/Pingd">Ping'd</a></h1>
   <h3>A status-bar icon for your uplink health</h3>
 
 <!-- Badges -->
 <p>
-  <a href="https://github.com/ScottKirvan/UplinkStatus/graphs/contributors">
-    <img src="https://img.shields.io/github/contributors/ScottKirvan/UplinkStatus" alt="contributors" />
+  <a href="https://github.com/ScottKirvan/Pingd/graphs/contributors">
+    <img src="https://img.shields.io/github/contributors/ScottKirvan/Pingd" alt="contributors" />
   </a>
-  <a href="https://github.com/ScottKirvan/UplinkStatus/commits/main">
-    <img src="https://img.shields.io/github/last-commit/ScottKirvan/UplinkStatus" alt="last update" />
+  <a href="https://github.com/ScottKirvan/Pingd/commits/main">
+    <img src="https://img.shields.io/github/last-commit/ScottKirvan/Pingd" alt="last update" />
   </a>
-  <a href="https://github.com/ScottKirvan/UplinkStatus/network/members">
-    <img src="https://img.shields.io/github/forks/ScottKirvan/UplinkStatus" alt="forks" />
+  <a href="https://github.com/ScottKirvan/Pingd/network/members">
+    <img src="https://img.shields.io/github/forks/ScottKirvan/Pingd" alt="forks" />
   </a>
-  <a href="https://github.com/ScottKirvan/UplinkStatus/stargazers">
-    <img src="https://img.shields.io/github/stars/ScottKirvan/UplinkStatus" alt="stars" />
+  <a href="https://github.com/ScottKirvan/Pingd/stargazers">
+    <img src="https://img.shields.io/github/stars/ScottKirvan/Pingd" alt="stars" />
   </a>
-  <a href="https://github.com/ScottKirvan/UplinkStatus/issues/">
-    <img src="https://img.shields.io/github/issues/ScottKirvan/UplinkStatus" alt="open issues" />
+  <a href="https://github.com/ScottKirvan/Pingd/issues/">
+    <img src="https://img.shields.io/github/issues/ScottKirvan/Pingd" alt="open issues" />
   </a>
-  <a href="https://github.com/ScottKirvan/UplinkStatus/blob/main/LICENSE.md">
-    <img src="https://img.shields.io/github/license/ScottKirvan/UplinkStatus.svg" alt="license" />
+  <a href="https://github.com/ScottKirvan/Pingd/blob/main/LICENSE.md">
+    <img src="https://img.shields.io/github/license/ScottKirvan/Pingd.svg" alt="license" />
   </a>
   <a href="https://discord.gg/TN6XJSNK5Y">
     <img src="https://img.shields.io/badge/discord-join-5865F2?logo=discord&logoColor=white" alt="discord" />
@@ -31,15 +31,15 @@
 </p>
 
 <h4>
-    <a href="https://ScottKirvan.github.io/UplinkStatus/">Docs</a>
+    <a href="https://ScottKirvan.github.io/Pingd/">Docs</a>
   <span> · </span>
-    <a href="https://github.com/ScottKirvan/UplinkStatus/issues/new?template=bug_report.md">Report Bug</a>
+    <a href="https://github.com/ScottKirvan/Pingd/issues/new?template=bug_report.md">Report Bug</a>
   <span> · </span>
-    <a href="https://github.com/ScottKirvan/UplinkStatus/issues/new?template=feature_request.md">Request Feature</a>
+    <a href="https://github.com/ScottKirvan/Pingd/issues/new?template=feature_request.md">Request Feature</a>
   </h4>
 </div>
 
-**UplinkStatus** is a persistent Android status-bar icon that shows, at a
+**Ping'd** is a persistent Android status-bar icon that shows, at a
 glance, whether your device currently has a working internet connection.
 A small 5-bar icon sits alongside your signal and battery icons, actively
 cycling while your connection checks out — and freezing in place the
@@ -68,7 +68,7 @@ Requires **Android 14 or newer** and the notification permission granted
 on first launch — the status-bar icon is delivered as part of an ongoing
 notification, so Android won't show it without that permission.
 
-- **Prebuilt APK:** download the latest from [Releases](https://github.com/ScottKirvan/UplinkStatus/releases) (unsigned — you'll need to allow installs from unknown sources).
+- **Prebuilt APK:** download the latest from [Releases](https://github.com/ScottKirvan/Pingd/releases) (unsigned — you'll need to allow installs from unknown sources).
 - **Build from source:** see [Development](#development) below.
 
 Usage
@@ -79,7 +79,7 @@ icon appears with sensible defaults (Wi-Fi only, checking against
 the icon when out of scope — is configurable from the app's settings
 screen, reachable by reopening the app.
 
-See the [full guide](https://ScottKirvan.github.io/UplinkStatus/guide/install)
+See the [full guide](https://ScottKirvan.github.io/Pingd/guide/install)
 for what the icon's animation states mean, all available settings, and
 troubleshooting.
 
@@ -88,7 +88,7 @@ Development
 - `app/` — the Android app (Kotlin, Jetpack Compose, `minSdk` 34 / `targetSdk` 36): a `specialUse` foreground service drives a 6-frame status-bar tracer icon from TCP connect-probe results, with a Compose settings screen backed by Jetpack DataStore.
 - `core/` — the pure-Kotlin probe/tracer/visibility state machine `app/` builds on.
 
-See [`notes/dev/uplink-status-indicator-spec.md`](notes/dev/uplink-status-indicator-spec.md) for the design spec this is built to.
+See [`notes/dev/pingd-status-indicator-spec.md`](notes/dev/pingd-status-indicator-spec.md) for the design spec this is built to.
 
 ```bash
 ./gradlew build   # compiles, assembles debug + release APKs, runs unit tests, lints
@@ -106,13 +106,13 @@ that touches the Android project.
 
 Branches
 --------
-- `main` — the stable branch; the [docs site](https://ScottKirvan.github.io/UplinkStatus/) deploys from here.
+- `main` — the stable branch; the [docs site](https://ScottKirvan.github.io/Pingd/) deploys from here.
 - `dev` — ongoing development.
 
 Repo Layout
 -----------
 ```
-UplinkStatus
+Ping'd
 ├── app/                  # The Android app (Kotlin, Jetpack Compose)
 ├── core/                 # Pure-Kotlin probe/tracer/visibility logic, no Android deps
 ├── docs/                 # VitePress docs site, deployed to GitHub Pages
@@ -130,16 +130,16 @@ UplinkStatus
 
 Contributions / Contact
 -----------------------
-- Please [file an issue](https://github.com/ScottKirvan/UplinkStatus/issues/new), or [grab a fork](https://github.com/ScottKirvan/UplinkStatus/fork), hack away, and submit a [pull request](https://github.com/ScottKirvan/UplinkStatus/pulls). See [CONTRIBUTING.md](CONTRIBUTING.md).
+- Please [file an issue](https://github.com/ScottKirvan/Pingd/issues/new), or [grab a fork](https://github.com/ScottKirvan/Pingd/fork), hack away, and submit a [pull request](https://github.com/ScottKirvan/Pingd/pulls). See [CONTRIBUTING.md](CONTRIBUTING.md).
 - Contact me at [linkedin.com/in/scottkirvan/](https://www.linkedin.com/in/scottkirvan/)
 - You can also find me on [Discord](https://discord.gg/TN6XJSNK5Y), I'm cptvideo.
 
 Credits
 -------
-**UplinkStatus** © 2026 [Scott Kirvan](https://github.com/ScottKirvan), licensed under the [MIT License](LICENSE.md).
+**Ping'd** © 2026 [Scott Kirvan](https://github.com/ScottKirvan), licensed under the [MIT License](LICENSE.md).
 Bootstrapped from [ScooterGitTemplate](https://github.com/ScottKirvan/ScooterGitTemplate).
 
-Project Link: [UplinkStatus](https://github.com/ScottKirvan/UplinkStatus)
-[Docs](https://ScottKirvan.github.io/UplinkStatus/) ·
+Project Link: [Ping'd](https://github.com/ScottKirvan/Pingd)
+[Docs](https://ScottKirvan.github.io/Pingd/) ·
 [CHANGELOG](notes/CHANGELOG.md) ·
 [TODO](notes/TODO.md)

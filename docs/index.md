@@ -2,7 +2,7 @@
 layout: home
 
 hero:
-  name: "UplinkStatus"
+  name: "Ping'd"
   text: "A status-bar icon for your uplink health"
   tagline: A persistent Android status-bar icon that shows, at a glance, whether your device currently has a working internet connection.
   actions:
@@ -11,7 +11,7 @@ hero:
       link: /guide/install
     - theme: alt
       text: View on GitHub
-      link: https://github.com/ScottKirvan/UplinkStatus
+      link: https://github.com/ScottKirvan/Pingd
     - theme: alt
       text: Discord
       link: https://discord.gg/TN6XJSNK5Y

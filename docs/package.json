@@ -1,5 +1,5 @@
 {
-  "name": "scootergittemplate-docs",
+  "name": "pingd-docs",
   "private": true,
   "scripts": {
     "docs:dev": "vitepress dev",

@@ -42,7 +42,7 @@
         android:allowBackup="true"
         android:icon="@mipmap/ic_launcher"
         android:label="@string/app_name"
-        android:theme="@style/Theme.UplinkStatus"
+        android:theme="@style/Theme.Pingd"
         android:supportsRtl="true">
         <activity
             android:name=".MainActivity"
@@ -63,7 +63,7 @@
             submission time, which is out of scope for this stage).
         -->
         <service
-            android:name=".service.UplinkStatusService"
+            android:name=".service.PingdStatusService"
             android:exported="false"
             android:foregroundServiceType="specialUse">
             <property

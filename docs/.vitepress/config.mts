@@ -1,9 +1,9 @@
 import { defineConfig } from 'vitepress'
 
 export default defineConfig({
-  title: "UplinkStatus",
+  title: "Ping'd",
   description: "A persistent Android status-bar icon showing your uplink (internet) connectivity health.",
-  base: '/UplinkStatus/',
+  base: '/Pingd/',
   themeConfig: {
     nav: [
       { text: 'Home', link: '/' },
@@ -16,7 +16,7 @@ export default defineConfig({
           { text: 'Troubleshooting', link: '/guide/troubleshooting' },
         ],
       },
-      { text: 'GitHub', link: 'https://github.com/ScottKirvan/UplinkStatus' }
+      { text: 'GitHub', link: 'https://github.com/ScottKirvan/Pingd' }
     ],
     sidebar: [
       {
@@ -30,7 +30,7 @@ export default defineConfig({
       },
     ],
     socialLinks: [
-      { icon: 'github', link: 'https://github.com/ScottKirvan/UplinkStatus' },
+      { icon: 'github', link: 'https://github.com/ScottKirvan/Pingd' },
       { icon: 'discord', link: 'https://discord.gg/TN6XJSNK5Y' }
     ],
     footer: {

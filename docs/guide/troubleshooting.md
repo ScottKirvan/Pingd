@@ -10,9 +10,9 @@ don't need to check the ones after it.
 1. **Was notification permission actually granted?** Without it,
    Android won't let the app show the icon at all, no matter what any
    other setting says. If you denied it during first launch, open your
-   phone's system settings for UplinkStatus and check its notification
+   phone's system settings for Ping'd and check its notification
    permission there, then relaunch the app.
-2. **Is "Enable uplink status icon" turned on?** Open the settings
+2. **Is "Enable Ping'd status icon" turned on?** Open the settings
    screen and check the switch at the top. If it's off, the icon is
    hidden unconditionally — turn it on.
 3. **Is your current network within your chosen scope?** Check
@@ -30,7 +30,7 @@ don't need to check the ones after it.
 5. **Check your notification shade, not just the status bar itself.**
    Android sometimes has more notification icons than it has room for
    in the status bar and quietly moves the overflow into the
-   pull-down shade instead of dropping them. If UplinkStatus's
+   pull-down shade instead of dropping them. If Ping'd's
    notification is visible there but the small icon isn't in the
    status bar strip itself, that's an Android space limit, not an app
    problem.
@@ -74,9 +74,9 @@ This prompt only appears if you select **Specific Wi-Fi networks
 option.
 
 The reason is an Android platform restriction, not a choice
-UplinkStatus made: reading the name of the Wi-Fi network your phone is
+Ping'd made: reading the name of the Wi-Fi network your phone is
 currently connected to is something Android only allows an app to do
-if it holds a location permission. UplinkStatus needs to read that
+if it holds a location permission. Ping'd needs to read that
 network name for exactly one purpose — comparing it against the list
 of networks you've whitelisted, so it knows whether to turn the icon
 on. It does not track, store, or transmit your device's actual

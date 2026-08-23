@@ -1,8 +1,8 @@
 # Install and setup
 
-## What UplinkStatus does
+## What Ping'd does
 
-UplinkStatus adds a small icon to your phone's status bar — the same
+Ping'd adds a small icon to your phone's status bar — the same
 strip along the top of the screen where you see signal strength,
 Wi-Fi, and battery icons — that shows whether your device currently
 has a working internet connection.
@@ -21,7 +21,7 @@ again to change a setting.
 
 ## Requirements
 
-- **Android 14 or newer.** UplinkStatus doesn't support older Android
+- **Android 14 or newer.** Ping'd doesn't support older Android
   versions.
 - **A notification permission grant.** The status-bar icon is
   technically part of an ongoing notification, so Android requires you
@@ -39,10 +39,10 @@ settings.
    appears.
    - If you deny it, the app tells you the icon can't be shown without
      it, and that you can turn it on later from the phone's system
-     notification settings for UplinkStatus — you're not stuck if you
+     notification settings for Ping'd — you're not stuck if you
      change your mind.
 3. Once granted, the status-bar icon appears and the settings screen
-   opens, where you can review or change how UplinkStatus behaves
+   opens, where you can review or change how Ping'd behaves
    (see [The settings screen](/guide/settings)).
 
 ## Defaults out of the box

@@ -1,30 +1,30 @@
 <resources>
-    <string name="app_name">UplinkStatus</string>
+    <string name="app_name">Ping\'d</string>
 
     <!-- Stage 2: foreground service notification content. -->
-    <string name="notification_channel_name">Uplink status</string>
+    <string name="notification_channel_name">Ping\'d status</string>
     <string name="notification_channel_description">Ongoing status-bar indicator of uplink (network) connectivity health.</string>
-    <string name="notification_title">Uplink status</string>
-    <string name="notification_text_connected_with_latency">Uplink: connected, %1$dms</string>
-    <string name="notification_text_connected_unknown_latency">Uplink: connected</string>
-    <string name="notification_text_disabled">Uplink: paused (network out of scope)</string>
+    <string name="notification_title">Ping\'d status</string>
+    <string name="notification_text_connected_with_latency">Ping\'d: connected, %1$dms</string>
+    <string name="notification_text_connected_unknown_latency">Ping\'d: connected</string>
+    <string name="notification_text_disabled">Ping\'d: paused (network out of scope)</string>
     <!-- The notification Android requires immediately on service start, before any
          visibility decision has been reached, and the one posted the instant the tracer
          starts cycling but before any probe has completed. Neither claims a connection
          state, because none has been established at either point. -->
-    <string name="notification_text_starting">Uplink: starting…</string>
-    <string name="notification_text_checking">Uplink: checking connection…</string>
+    <string name="notification_text_starting">Ping\'d: starting…</string>
+    <string name="notification_text_checking">Ping\'d: checking connection…</string>
     <!-- Shown instead of notification_text_disabled specifically when network scope is set
          to the SSID whitelist: "out of scope" is technically true but unhelpfully vague
          when what's actually happening is "none of your whitelisted networks are in range." -->
-    <string name="notification_text_disabled_ssid_scope">Uplink: waiting for a whitelisted Wi-Fi network…</string>
+    <string name="notification_text_disabled_ssid_scope">Ping\'d: waiting for a whitelisted Wi-Fi network…</string>
 
     <!-- On-screen status line (SettingsScreen) wording, one string per confirmed state the
          service can report. These are kept separate from the notification strings above
          rather than derived from them: the two surfaces agree about confirmed states but
          genuinely diverge at startup, where the notification must carry a placeholder
          Android requires and the status line must only ever say what has actually been
-         established. They also read as a sentence after "Status: ", with no "Uplink: "
+         established. They also read as a sentence after "Status: ", with no "Ping'd: "
          prefix to strip. -->
     <string name="status_text_starting">starting up…</string>
     <string name="status_text_checking">checking the connection…</string>
@@ -40,11 +40,11 @@
     <!-- Stage 5: CycleEvent.Frozen accessibility text. Per spec, a DNS problem and a
          network-down problem must not look the same to the user, even though the icon
          itself freezes in place either way (no distinct "lost" frame). -->
-    <string name="notification_text_probe_failure">Uplink: connection trouble, retrying…</string>
-    <string name="notification_text_dns_failure">Uplink: can\'t resolve target host, retrying…</string>
+    <string name="notification_text_probe_failure">Ping\'d: connection trouble, retrying…</string>
+    <string name="notification_text_dns_failure">Ping\'d: can\'t resolve target host, retrying…</string>
 
     <!-- Stage 2: POST_NOTIFICATIONS runtime-permission rationale flow. -->
-    <string name="notification_permission_rationale">UplinkStatus shows its connectivity status as a persistent status-bar icon. That requires permission to post a notification — allow it so the icon can be shown.</string>
+    <string name="notification_permission_rationale">Ping\'d shows its connectivity status as a persistent status-bar icon. That requires permission to post a notification — allow it so the icon can be shown.</string>
     <string name="notification_permission_request_button">Allow notifications</string>
     <string name="notification_permission_denied">Notifications permission was denied, so the status icon can\'t be shown. You can grant it from system settings at any time.</string>
 </resources>

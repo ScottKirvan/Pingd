@@ -7,11 +7,11 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 This file is the primary context for any agent working in this repo — keep
 it accurate as the project evolves. Update it in the same commit as the
 work it documents (design-decision changes belong in
-`notes/dev/uplink-status-indicator-spec.md` instead — see below).
+`notes/dev/pingd-status-indicator-spec.md` instead — see below).
 
 ## Project state
 
-`UplinkStatus` is an Android app (status-bar uplink health indicator)
+`Ping'd` is an Android app (status-bar uplink health indicator)
 with a working implementation: `:core` (pure-Kotlin probe/tracer/
 visibility state machine) and `:app` (the `specialUse` foreground
 service, notification wiring, and a Compose settings screen backed by
@@ -24,12 +24,12 @@ has driven a further round of fixes and UX work directly against `dev`
 entry for specifics (tracer sweep direction, immediate foreground
 notification, settings-panel async-race lock, on-screen status line,
 etc.). The repo was bootstrapped from `ScooterGitTemplate`; `README.md`
-and `CONTRIBUTING.md` have since been rewritten for UplinkStatus
+and `CONTRIBUTING.md` have since been rewritten for Ping'd
 specifically (public-release cleanup), but keep an eye out for any
 remaining template-generic language if you're touching either file.
 
 **Before changing app behavior, read
-`notes/dev/uplink-status-indicator-spec.md` first.** It's the
+`notes/dev/pingd-status-indicator-spec.md` first.** It's the
 authoritative design doc and encodes decisions that aren't obvious from
 first principles, e.g.:
 - The status-bar icon is 6 fixed vector-drawable frames (not an
