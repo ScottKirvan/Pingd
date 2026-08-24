@@ -159,8 +159,11 @@ so an outage mid-sequence resumes at the same point once connectivity
 returns, rather than restarting the pattern.
 
 ## Bar Position Persistence
-Position persists only for the lifetime of the running process. An app
-restart resets to bar 1 — it is not restored from preferences.
+Position and remembered latency/freeze state persist only for the
+lifetime of the current probe cycle. Any transition into `ENABLED` from
+a not-running state — a fresh app/process start, or resuming after
+`DISABLED`/`HIDDEN` within the same process — starts a new cycle and
+resets to bar 1; neither is restored from preferences.
 
 ## Enabled / Disabled / Hidden — State Logic
 The master toggle is checked first and is unconditional; the network
@@ -638,13 +641,14 @@ toggle the way the preference controls are — clearing what is displayed
 has to work exactly when the user wants a clean slate, including while
 the icon is switched off.
 
-Absent an explicit reset, the sample history is session-only, matching
-bar position's own per-process lifetime — a fresh service start begins
-with no samples, not samples carried over from a previous run. Process
-lifetime, specifically, not cycle lifetime: the history deliberately
-survives the probe cycle stopping and restarting (a network dropping out
-of scope and coming back), since the failures around exactly that
-transition are what a connectivity history is for.
+Absent an explicit reset, the sample history is session-only: a fresh
+service start begins with no samples, not samples carried over from a
+previous run. It is deliberately scoped to the *process*, not the
+cycle — unlike [bar position](#bar-position-persistence), which resets
+on every cycle start, the history survives the probe cycle stopping and
+restarting (a network dropping out of scope and coming back), since the
+failures around exactly that transition are what a connectivity history
+is for.
 
 **Each card states a windowed number, and its caption names the span
 that number actually covers.** The ping-success card's number is

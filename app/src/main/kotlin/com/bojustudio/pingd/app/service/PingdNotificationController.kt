@@ -86,7 +86,7 @@ open class PingdNotificationController(
      * (a probe-success ack). Retained across the automatic ack (which has no latency of
      * its own) so the displayed text doesn't flicker to "unknown" every other step; reset
      * whenever a fresh cycle starts (see [resetSession]), matching bar position's own
-     * per-process reset per spec. */
+     * per-cycle reset per spec. */
     @Volatile
     private var lastLatencyMs: Long? = null
 
