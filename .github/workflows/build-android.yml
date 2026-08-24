@@ -100,5 +100,5 @@ jobs:
           serviceAccountJsonPlainText: ${{ secrets.PLAY_STORE_JSON_KEY }}
           packageName: com.bojustudio.pingd
           releaseFiles: app/build/outputs/bundle/release/app-release.aab
-          tracks: alpha
+          tracks: internal
           status: completed
