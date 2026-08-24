@@ -1,0 +1,12 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  actionlint:
+    name: Lint workflows
+    uses: ScottKirvan/.github/.github/workflows/reusable-actionlint.yml@main
