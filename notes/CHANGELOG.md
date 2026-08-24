@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.2.3](https://github.com/ScottKirvan/Pingd/compare/v0.2.2...v0.2.3) (2026-08-24)
+
+
+### Bug Fixes
+
+* initial play store deployment ([33dfebf](https://github.com/ScottKirvan/Pingd/commit/33dfebff73fcf5c24aafd56e3a219f5bf68131b5))
+
 ## [0.2.2](https://github.com/ScottKirvan/Pingd/compare/v0.2.1...v0.2.2) (2026-08-23)
 
 
