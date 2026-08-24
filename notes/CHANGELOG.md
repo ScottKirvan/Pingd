@@ -7,6 +7,8 @@
 
 * initial play store deployment ([33dfebf](https://github.com/ScottKirvan/Pingd/commit/33dfebff73fcf5c24aafd56e3a219f5bf68131b5))
 
+Includes PRs: [#72](https://github.com/ScottKirvan/Pingd/pull/72), [#73](https://github.com/ScottKirvan/Pingd/pull/73)
+
 ## [0.2.2](https://github.com/ScottKirvan/Pingd/compare/v0.2.1...v0.2.2) (2026-08-23)
 
 
