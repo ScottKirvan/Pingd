@@ -16,6 +16,7 @@ export default defineConfig({
           { text: 'Troubleshooting', link: '/guide/troubleshooting' },
         ],
       },
+      { text: 'Privacy Policy', link: '/privacy' },
       { text: 'GitHub', link: 'https://github.com/ScottKirvan/Pingd' }
     ],
     sidebar: [
