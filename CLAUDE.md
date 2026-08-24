@@ -226,8 +226,10 @@ against `main`.
   never as a response to a request from Claude.
 - For each new piece of work (a fix, a feature — the same granularity as
   "delegate this to an agent" below), branch off `main`, do the work,
-  and open a real GitHub PR against `main`. Don't open a *second* PR for
-  follow-up commits on the same branch/effort — push them to the
+  and open a real GitHub PR against `main`. This is standing authorization
+  to open the PR as a normal part of finishing the work — don't wait for
+  the user to separately ask for one each time. Don't open a *second* PR
+  for follow-up commits on the same branch/effort — push them to the
   existing branch and update that PR's body to describe the accumulated
   change. Merging is the user's alone to do, per the hard rule above.
 - Prefer delegating implementation-sized work (a fix, a feature, anything
