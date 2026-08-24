@@ -1,7 +1,7 @@
 # Ping'd [![starline](https://raw.githubusercontent.com/ScottKirvan/Pingd/refs/heads/starlines/ScottKirvan/Pingd/starline.svg)](https://github.com/qoomon/starlines)
 <div align="center">
 
-  <img src="assets/media/logo.jpg" alt="logo" width="200" height="auto" />
+  <img src="assets/media/ping.jpg" alt="logo" width="200" height="auto" />
   <h1><a href="https://github.com/ScottKirvan/Pingd">Ping'd</a></h1>
   <h3>A status-bar icon for your uplink health</h3>
 
