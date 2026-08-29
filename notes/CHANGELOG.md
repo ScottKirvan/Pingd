@@ -1,5 +1,13 @@
 # Changelog
 
+## [0.2.4](https://github.com/ScottKirvan/Pingd/compare/v0.2.3...v0.2.4) (2026-08-29)
+
+
+### Bug Fixes
+
+* add changelog link to release and staging footers ([32fe422](https://github.com/ScottKirvan/Pingd/commit/32fe422065c31c706fa1b1b235f3c236d75df1b1))
+* add CI workflow with actionlint ([5dd5970](https://github.com/ScottKirvan/Pingd/commit/5dd5970f8431e91c641aecac81c13c904c082e0a))
+
 ## [0.2.3](https://github.com/ScottKirvan/Pingd/compare/v0.2.2...v0.2.3) (2026-08-24)
 
 
