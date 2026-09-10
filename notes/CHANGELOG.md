@@ -5,8 +5,8 @@
 
 ### Bug Fixes
 
-* add changelog link to release and staging footers ([32fe422](https://github.com/ScottKirvan/Pingd/commit/32fe422065c31c706fa1b1b235f3c236d75df1b1))
-* add CI workflow with actionlint ([5dd5970](https://github.com/ScottKirvan/Pingd/commit/5dd5970f8431e91c641aecac81c13c904c082e0a))
+* add changelog link to release and staging footers ([#79](https://github.com/ScottKirvan/Pingd/pull/79))
+* add CI workflow with actionlint ([#77](https://github.com/ScottKirvan/Pingd/pull/77))
 
 ## [0.2.3](https://github.com/ScottKirvan/Pingd/compare/v0.2.2...v0.2.3) (2026-08-24)
 
