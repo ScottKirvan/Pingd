@@ -37,6 +37,9 @@ export default defineConfig({
     footer: {
       message: 'Released under the MIT License.',
       copyright: 'Copyright © Scott Kirvan'
+    },
+    search: {
+      provider: 'local'
     }
   }
 })
