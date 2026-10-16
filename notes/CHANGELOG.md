@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.2.5](https://github.com/ScottKirvan/Pingd/compare/v0.2.4...v0.2.5) (2026-10-16)
+
+
+### Bug Fixes
+
+* add VitePress local search provider to docs ([5b6d70c](https://github.com/ScottKirvan/Pingd/commit/5b6d70c8755a970750a2d12b5efb40c256ad1a8f))
+
 ## [0.2.4](https://github.com/ScottKirvan/Pingd/compare/v0.2.3...v0.2.4) (2026-08-29)
 
 
