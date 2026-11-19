@@ -1,5 +1,14 @@
 # Changelog
 
+## [0.2.5](https://github.com/ScottKirvan/Pingd/compare/v0.2.4...v0.2.5) (2026-11-19)
+
+
+### Bug Fixes
+
+* add a 7-day cooldown to Dependabot version updates ([97e7dd0](https://github.com/ScottKirvan/Pingd/commit/97e7dd023241beac52887c0a72ca4271f020c2af))
+* add Dependabot config for monthly grouped dependency updates ([1657701](https://github.com/ScottKirvan/Pingd/commit/1657701bc6079751b9bf146c8a9a60d8322b17bb))
+* add VitePress local search provider to docs ([5b6d70c](https://github.com/ScottKirvan/Pingd/commit/5b6d70c8755a970750a2d12b5efb40c256ad1a8f))
+
 ## [0.2.4](https://github.com/ScottKirvan/Pingd/compare/v0.2.3...v0.2.4) (2026-08-29)
 
 
