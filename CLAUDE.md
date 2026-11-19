@@ -189,7 +189,7 @@ of this same pattern.)
 ./gradlew build   # compiles, assembles debug + release APKs, runs unit tests, lints
 ./gradlew test    # unit tests only (:app debug+release, :core)
 ```
-Requires a local Android SDK (`compileSdk`/`targetSdk` 36, `minSdk` 34)
+Requires a local Android SDK (`compileSdk` 37, `targetSdk` 36, `minSdk` 34)
 — set `ANDROID_HOME`/`ANDROID_SDK_ROOT`, or add a gitignored
 `local.properties` with `sdk.dir=/path/to/sdk`. No device or emulator is
 required for the test suite — the Compose UI tests run on the JVM via
